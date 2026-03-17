@@ -15,6 +15,7 @@
     <div class="topbar-left">
       <span class="app-title">PrintFarm Planner</span>
     </div>
+    <div class="topbar-center" id="printer-status-bar"></div>
     <div class="topbar-right">
       <button id="btn-add-job" class="btn btn-primary">+ Job</button>
       <button id="btn-queue" class="btn btn-secondary">Queue</button>
@@ -172,6 +173,10 @@
             <div class="color-swatches" id="color-swatches"></div>
           </div>
         </div>
+        <div class="form-group" style="margin-bottom:0">
+          <label for="printer-bambu-serial">BambuLab Serial <span style="font-weight:400;color:var(--text-muted)">(optional — for live status)</span></label>
+          <input type="text" id="printer-bambu-serial" class="form-input" placeholder="e.g. 01P00A123456789" autocomplete="off">
+        </div>
       </div>
       <div class="modal-footer">
         <button id="btn-cancel-printer" class="btn btn-secondary hidden">Cancel Edit</button>
@@ -237,6 +242,55 @@
             <input type="checkbox" id="setting-queue-auto-expand">
             <span>Expand queue panel on startup if not empty</span>
           </label>
+        </div>
+        <hr class="divider">
+        <div class="form-group" style="margin-bottom:0">
+          <label>BambuLab Connection</label>
+
+          <!-- State: login form -->
+          <div id="bambu-state-login">
+            <div class="form-row" style="margin-top:6px">
+              <div class="form-group" style="margin-bottom:0;flex:1">
+                <label for="bambu-email">Email</label>
+                <input type="email" id="bambu-email" placeholder="your@bambulab.com" autocomplete="off">
+              </div>
+              <div class="form-group" style="margin-bottom:0">
+                <label for="bambu-region">Region</label>
+                <select id="bambu-region">
+                  <option value="us">Global (us)</option>
+                  <option value="cn">China (cn)</option>
+                </select>
+              </div>
+            </div>
+            <div class="form-group" style="margin-top:8px;margin-bottom:0">
+              <label for="bambu-password">Password</label>
+              <input type="password" id="bambu-password" placeholder="BambuLab password" autocomplete="off">
+            </div>
+            <button type="button" id="btn-bambu-connect" class="btn btn-primary" style="margin-top:10px">Connect</button>
+          </div>
+
+          <!-- State: verify code -->
+          <div id="bambu-state-verify" class="hidden">
+            <p style="font-size:13px;color:var(--text-muted);margin:6px 0">Bambu sent a verification code to your email. Enter it below:</p>
+            <div style="display:flex;align-items:flex-end;gap:8px;margin-top:4px">
+              <div class="form-group" style="margin-bottom:0;flex:1">
+                <label for="bambu-code">Verification Code</label>
+                <input type="text" id="bambu-code" placeholder="123456" autocomplete="off" inputmode="numeric">
+              </div>
+              <button type="button" id="btn-bambu-verify" class="btn btn-primary" style="white-space:nowrap">Verify</button>
+            </div>
+            <button type="button" id="btn-bambu-cancel-verify" class="btn btn-secondary" style="margin-top:6px">Cancel</button>
+          </div>
+
+          <!-- State: connected -->
+          <div id="bambu-state-connected" class="hidden">
+            <div class="bambu-connected-row">
+              <span class="bambu-dot bambu-dot-ok"></span>
+              <span id="bambu-connected-email" class="bambu-connected-email"></span>
+              <button type="button" id="btn-bambu-disconnect" class="btn btn-secondary btn-sm">Disconnect</button>
+            </div>
+            <p style="font-size:12px;color:var(--text-muted);margin:4px 0 0">Set BambuLab serial numbers per printer in ⚙ Printers.</p>
+          </div>
         </div>
         <hr class="divider">
         <div class="form-group" style="margin-bottom:0">

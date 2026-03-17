@@ -33,6 +33,76 @@ async function api(method, path, body) {
   return method === 'DELETE' ? null : res.json();
 }
 
+// ---- Bambu live status helpers ----
+function getPrinterLiveStatus(printer) {
+  if (!printer.bambu_serial) return null;
+  return printerStatus[printer.bambu_serial] ?? null;
+}
+
+function printerStatusLabel(s) {
+  if (!s) return null;
+  if (s.stage === 'RUNNING') return s.progress > 0 ? `${s.progress}%` : 'Printing';
+  if (s.stage === 'PAUSE')   return 'Paused';
+  if (s.stage === 'FAILED')  return 'Error';
+  if (s.stage === 'FINISH')  return 'Done';
+  if (s.stage === 'IDLE')    return 'Idle';
+  return null;
+}
+
+function printerStatusPillHtml(printer) {
+  const s = getPrinterLiveStatus(printer);
+  const label = printerStatusLabel(s);
+  if (!label) return '';
+  const cls = s.stage.toLowerCase();
+  return `<span class="printer-status-pill printer-status-${cls}">${escHtml(label)}</span>`;
+}
+
+function renderTopbarStatus() {
+  const bar = document.getElementById('printer-status-bar');
+  if (!bar) return;
+
+  const bambuPrinters = printers.filter(p => p.bambu_serial);
+  if (!bambuPrinters.length) { bar.innerHTML = ''; return; }
+
+  bar.innerHTML = bambuPrinters.map(p => {
+    const s    = getPrinterLiveStatus(p);
+    const label = printerStatusLabel(s);
+    const cls   = s ? s.stage.toLowerCase() : '';
+
+    // Popup detail lines
+    let popupBody = `<div class="spopup-name">${escHtml(p.name)}</div>`;
+    if (s) {
+      const stageText = s.stage === 'RUNNING' ? `Printing${s.progress > 0 ? ` · ${s.progress}%` : ''}` :
+                        s.stage === 'PAUSE'   ? 'Paused' :
+                        s.stage === 'FINISH'  ? 'Finished' :
+                        s.stage === 'FAILED'  ? 'Error' : 'Idle';
+      popupBody += `<div class="spopup-stage">${stageText}</div>`;
+      if (s.stage === 'RUNNING' && s.progress > 0) {
+        popupBody += `<div class="spopup-bar-wrap"><div class="spopup-bar-fill" style="width:${s.progress}%"></div></div>`;
+      }
+      const details = [];
+      if (s.nozzle_temp != null) details.push(`🌡 ${Math.round(s.nozzle_temp)}°C`);
+      if (s.bed_temp    != null) details.push(`🛏 ${Math.round(s.bed_temp)}°C`);
+      if (s.remaining   != null && s.remaining > 0) {
+        const h = Math.floor(s.remaining / 60), m = s.remaining % 60;
+        details.push(`⏱ ${h > 0 ? h + 'h ' : ''}${m}m left`);
+      }
+      if (details.length) popupBody += `<div class="spopup-details">${details.map(d => `<span>${escHtml(d)}</span>`).join('')}</div>`;
+    } else {
+      popupBody += `<div class="spopup-stage spopup-dim">Waiting for data…</div>`;
+    }
+
+    return `<div class="schip-wrap">
+      <div class="schip">
+        <span class="schip-dot" style="background:${p.color}"></span>
+        <span class="schip-name">${escHtml(p.name)}</span>
+        ${label ? `<span class="printer-status-pill printer-status-${cls}">${escHtml(label)}</span>` : ''}
+      </div>
+      <div class="schip-popup">${popupBody}</div>
+    </div>`;
+  }).join('');
+}
+
 // ---- App state ----
 let view           = 'day';
 let navDate        = todayMidnight();
@@ -49,6 +119,7 @@ let jobsCache       = {};   // id → job, updated on each full DB fetch
 let lastDragMoved  = false;
 let closures       = [];   // loaded before every render
 let editClosureId  = null;
+let printerStatus  = {};   // keyed by bambu_serial — live status from SSE
 
 // =============================================================================
 // Init
@@ -77,7 +148,20 @@ async function init() {
 
   await loadStatusColors();
   printers = await api('GET', '/api/printers');
+
+  // Connect to live Bambu printer status stream
+  const sse = new EventSource('/api/printers/status/stream');
+  sse.onmessage = (e) => {
+    try {
+      const updates = JSON.parse(e.data);
+      Object.assign(printerStatus, updates);
+      renderTopbarStatus();
+    } catch (_) {}
+  };
+  sse.onerror = () => {}; // silently ignore — server may not have Bambu configured
+
   renderCalendar();
+  renderTopbarStatus();
   setupListeners();
   if (printers.length === 0) openPrintersModal();
   else if (view === 'day') setTimeout(scrollToNow, 80);
@@ -1401,7 +1485,7 @@ async function refreshPrinterList() {
   list.innerHTML = printers.map(p => `
     <div class="printer-item">
       <div class="printer-color-dot" style="background:${p.color}"></div>
-      <span class="printer-item-name">${escHtml(p.name)}</span>
+      <span class="printer-item-name">${escHtml(p.name)}${printerStatusPillHtml(p)}</span>
       <div class="printer-item-actions">
         <button class="btn-icon" onclick="editPrinter(${p.id})" title="Edit">✏️</button>
         <button class="btn-icon danger" onclick="deletePrinter(${p.id})" title="Delete">🗑</button>
@@ -1411,8 +1495,9 @@ async function refreshPrinterList() {
 
 function resetPrinterForm() {
   editPrintId = null;
-  document.getElementById('printer-name').value  = '';
-  document.getElementById('printer-color').value = PRESET_COLORS[printers.length % PRESET_COLORS.length];
+  document.getElementById('printer-name').value         = '';
+  document.getElementById('printer-color').value        = PRESET_COLORS[printers.length % PRESET_COLORS.length];
+  document.getElementById('printer-bambu-serial').value = '';
   document.getElementById('printer-form-title').textContent = 'Add Printer';
   document.getElementById('btn-save-printer').textContent   = 'Add Printer';
   document.getElementById('btn-cancel-printer').classList.add('hidden');
@@ -1422,8 +1507,9 @@ function editPrinter(id) {
   const p = printers.find(pr => pr.id === id);
   if (!p) return;
   editPrintId = id;
-  document.getElementById('printer-name').value  = p.name;
-  document.getElementById('printer-color').value = p.color;
+  document.getElementById('printer-name').value         = p.name;
+  document.getElementById('printer-color').value        = p.color;
+  document.getElementById('printer-bambu-serial').value = p.bambu_serial || '';
   document.getElementById('printer-form-title').textContent = 'Edit Printer';
   document.getElementById('btn-save-printer').textContent   = 'Save Changes';
   document.getElementById('btn-cancel-printer').classList.remove('hidden');
@@ -1431,12 +1517,13 @@ function editPrinter(id) {
 }
 
 async function savePrinter() {
-  const name  = document.getElementById('printer-name').value.trim();
-  const color = document.getElementById('printer-color').value;
+  const name         = document.getElementById('printer-name').value.trim();
+  const color        = document.getElementById('printer-color').value;
+  const bambu_serial = document.getElementById('printer-bambu-serial').value.trim() || null;
   if (!name) return alert('Please enter a printer name.');
 
-  if (editPrintId !== null) await api('PUT', `/api/printers/${editPrintId}`, { name, color });
-  else                      await api('POST', '/api/printers', { name, color });
+  if (editPrintId !== null) await api('PUT', `/api/printers/${editPrintId}`, { name, color, bambu_serial });
+  else                      await api('POST', '/api/printers', { name, color, bambu_serial });
 
   await refreshPrinterList();
   resetPrinterForm();
@@ -1556,7 +1643,86 @@ async function openSettingsModal() {
   const cb = document.getElementById('setting-queue-auto-expand');
   if (cb) cb.checked = qae?.value === true;
 
+  // BambuLab connection state
+  await renderBambuConnectionState();
+
   document.getElementById('settings-modal').classList.remove('hidden');
+}
+
+async function renderBambuConnectionState() {
+  const config = await api('GET', '/api/bambu/config').catch(() => null);
+  const stateLogin     = document.getElementById('bambu-state-login');
+  const stateVerify    = document.getElementById('bambu-state-verify');
+  const stateConnected = document.getElementById('bambu-state-connected');
+  if (!stateLogin) return;
+
+  if (config?.connected) {
+    stateLogin.classList.add('hidden');
+    stateVerify.classList.add('hidden');
+    stateConnected.classList.remove('hidden');
+    document.getElementById('bambu-connected-email').textContent = config.email || '';
+  } else {
+    stateLogin.classList.remove('hidden');
+    stateVerify.classList.add('hidden');
+    stateConnected.classList.add('hidden');
+    if (config?.email) document.getElementById('bambu-email').value = config.email;
+    if (config?.region) document.getElementById('bambu-region').value = config.region;
+  }
+}
+
+async function bambuConnect() {
+  const email    = document.getElementById('bambu-email').value.trim();
+  const password = document.getElementById('bambu-password').value;
+  const region   = document.getElementById('bambu-region').value;
+  if (!email || !password) { alert('Enter your BambuLab email and password.'); return; }
+
+  const btn = document.getElementById('btn-bambu-connect');
+  btn.disabled = true;
+  btn.textContent = 'Connecting…';
+
+  try {
+    const res = await api('POST', '/api/bambu/connect', { email, password, region });
+    if (res.status === 'verifyCode') {
+      document.getElementById('bambu-state-login').classList.add('hidden');
+      document.getElementById('bambu-state-verify').classList.remove('hidden');
+      document.getElementById('bambu-code').value = '';
+      document.getElementById('bambu-code').focus();
+    } else if (res.status === 'ok') {
+      await renderBambuConnectionState();
+    }
+  } catch (e) {
+    alert('Connection failed: ' + (e.message || 'Unknown error'));
+  } finally {
+    btn.disabled = false;
+    btn.textContent = 'Connect';
+  }
+}
+
+async function bambuVerify() {
+  const code = document.getElementById('bambu-code').value.trim();
+  if (!code) { alert('Enter the verification code from your email.'); return; }
+
+  const btn = document.getElementById('btn-bambu-verify');
+  btn.disabled = true;
+  btn.textContent = 'Verifying…';
+
+  try {
+    const res = await api('POST', '/api/bambu/verify', { code });
+    if (res.status === 'ok') {
+      await renderBambuConnectionState();
+    }
+  } catch (e) {
+    alert('Verification failed: ' + (e.message || 'Unknown error'));
+  } finally {
+    btn.disabled = false;
+    btn.textContent = 'Verify';
+  }
+}
+
+async function bambuDisconnect() {
+  if (!confirm('Disconnect from BambuLab? Live status updates will stop.')) return;
+  await api('DELETE', '/api/bambu/connect');
+  await renderBambuConnectionState();
 }
 
 async function saveSettings() {
@@ -1724,6 +1890,10 @@ function setupListeners() {
   document.getElementById('btn-cancel-closure').addEventListener('click', resetClosureForm);
   document.getElementById('btn-settings').addEventListener('click', openSettingsModal);
   document.getElementById('btn-save-settings').addEventListener('click', saveSettings);
+  document.getElementById('btn-bambu-connect').addEventListener('click', bambuConnect);
+  document.getElementById('btn-bambu-verify').addEventListener('click', bambuVerify);
+  document.getElementById('btn-bambu-disconnect').addEventListener('click', bambuDisconnect);
+  document.getElementById('btn-bambu-cancel-verify').addEventListener('click', renderBambuConnectionState);
   document.getElementById('btn-export').addEventListener('click', exportData);
   document.getElementById('btn-import-trigger').addEventListener('click', () =>
     document.getElementById('import-file').click()

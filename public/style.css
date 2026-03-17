@@ -96,7 +96,44 @@ body {
   z-index: 10;
 }
 .app-title { font-size: 18px; font-weight: 700; color: var(--primary); }
+.topbar-center { display: flex; align-items: center; gap: 6px; flex: 1; justify-content: center; }
 .topbar-right { display: flex; gap: 8px; }
+
+/* Printer status chips in topbar */
+.schip-wrap { position: relative; }
+.schip {
+  display: flex; align-items: center; gap: 5px;
+  padding: 3px 8px; border-radius: 20px;
+  background: var(--surface-alt, var(--surface));
+  border: 1px solid var(--border);
+  cursor: default; font-size: 12px; white-space: nowrap;
+  transition: border-color .15s;
+}
+.schip-wrap:hover .schip { border-color: var(--primary); }
+.schip-dot { width: 8px; height: 8px; border-radius: 50%; flex-shrink: 0; }
+.schip-name { color: var(--text); font-weight: 500; }
+
+/* Hover popup */
+.schip-popup {
+  display: none;
+  position: absolute; top: calc(100% + 6px); left: 50%;
+  transform: translateX(-50%);
+  z-index: 200;
+  background: var(--surface);
+  border: 1px solid var(--border);
+  border-radius: 8px;
+  padding: 10px 12px;
+  min-width: 170px;
+  box-shadow: 0 4px 16px rgba(0,0,0,.15);
+  pointer-events: none;
+}
+.schip-wrap:hover .schip-popup { display: block; }
+.spopup-name { font-weight: 600; font-size: 13px; color: var(--text); margin-bottom: 3px; }
+.spopup-stage { font-size: 12px; color: var(--text); margin-bottom: 6px; }
+.spopup-dim { color: var(--text-muted) !important; }
+.spopup-bar-wrap { height: 4px; background: var(--border); border-radius: 2px; margin-bottom: 8px; overflow: hidden; }
+.spopup-bar-fill { height: 100%; background: var(--primary); border-radius: 2px; }
+.spopup-details { display: flex; flex-wrap: wrap; gap: 6px; font-size: 11px; color: var(--text-muted); }
 
 /* ======================== Buttons ======================== */
 .btn {
@@ -1118,3 +1155,30 @@ body.is-resizing,    body.is-resizing    * { cursor: ns-resize  !important; user
   font-weight: 400;
   opacity: .8;
 }
+
+/* Bambu live status pills */
+.printer-status-pill {
+  display: inline-block;
+  font-size: 10px;
+  font-weight: 600;
+  padding: 1px 6px;
+  border-radius: 10px;
+  margin-left: 6px;
+  letter-spacing: .3px;
+  text-transform: uppercase;
+  vertical-align: middle;
+}
+.printer-status-running { background: #e6f4ea; color: #1e7e34; }
+.printer-status-idle    { background: #f0f0f0; color: #888; }
+.printer-status-pause   { background: #fff3cd; color: #856404; }
+.printer-status-failed  { background: #fde8e8; color: #c53030; }
+.printer-status-finish  { background: #e8f4fd; color: #1a6896; }
+
+/* Bambu settings connected row */
+.bambu-connected-row {
+  display: flex; align-items: center; gap: 8px; margin-top: 6px;
+}
+.bambu-connected-email { font-size: 13px; color: var(--text); flex: 1; }
+.bambu-dot { width: 9px; height: 9px; border-radius: 50%; flex-shrink: 0; }
+.bambu-dot-ok { background: #22c55e; }
+.btn-sm { padding: 2px 10px; font-size: 12px; }

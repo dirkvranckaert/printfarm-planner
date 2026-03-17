@@ -47,4 +47,9 @@ if (!jobCols.some(c => c.name === 'durationMins')) {
   db.exec('ALTER TABLE jobs ADD COLUMN durationMins INTEGER NOT NULL DEFAULT 0');
 }
 
+const printerCols = db.pragma('table_info(printers)');
+if (!printerCols.some(c => c.name === 'bambu_serial')) {
+  db.exec('ALTER TABLE printers ADD COLUMN bambu_serial TEXT;');
+}
+
 module.exports = db;
