@@ -412,6 +412,7 @@ body {
   text-overflow: ellipsis;
   font-size: 11px;
 }
+[data-theme="dark"] .job-block-customer { opacity: 1; }
 
 /* Current-time indicator */
 .now-line {

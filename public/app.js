@@ -83,6 +83,13 @@ function slotCardHtml(slot) {
   </div>`;
 }
 
+function isDarkMode() {
+  const theme = document.documentElement.getAttribute('data-theme');
+  if (theme === 'dark')  return true;
+  if (theme === 'light') return false;
+  return window.matchMedia('(prefers-color-scheme: dark)').matches;
+}
+
 // Return a light or dark hex based on perceived luminance of a hex bg color.
 function contrastColor(hex) {
   const r = parseInt(hex.slice(1, 3), 16);
@@ -753,12 +760,13 @@ async function renderDay() {
       const conflictCls  = isConflict ? ' job-conflict' : '';
       const conflictIcon = isConflict ? '<span class="job-conflict-icon" title="Scheduling conflict">⚠</span>' : '';
 
+      const bgAlpha = isDarkMode() ? 0.5 : 0.15;
       h += `<div class="job-block${conflictCls}" data-job-id="${job.id}"
               data-job-start="${job.start}" data-job-end="${job.end}"
               style="top:${topPx}px; height:${htPx}px;
-                     background:${hexRgba(p.color, .15)};
+                     background:${hexRgba(p.color, bgAlpha)};
                      border-left-color:${isConflict ? '#e53e3e' : p.color};
-                     color:#2d3748">
+                     color:var(--text)">
               <div style="display:flex;align-items:center;gap:4px;flex-wrap:wrap">
                 ${conflictIcon}
                 <span class="job-block-name" style="flex:1">${job.orderNr ? `#${escHtml(job.orderNr)} — ` : ''}${escHtml(job.name)}</span>
@@ -1136,7 +1144,7 @@ async function renderWeek() {
           const statusCol = statusMeta[status]?.color ?? '#888';
           h += `<span class="week-job-chip" data-job-id="${job.id}"
                   style="background:${hexRgba(p.color,.18)};
-                         color:${darken(p.color,.3)};
+                         color:var(--text);
                          border-left-color:${p.color}">
                   <span class="chip-status-dot" style="background:${statusCol}"></span>${job.orderNr ? `#${escHtml(job.orderNr)} — ` : ''}${escHtml(job.name)}
                 </span>`;
@@ -1225,7 +1233,7 @@ async function renderMonth() {
       const statusCol = statusMeta[status]?.color ?? '#888';
       h += `<span class="month-job-chip" data-job-id="${job.id}"
                style="background:${hexRgba(p.color,.18)};
-                      color:${darken(p.color,.3)};
+                      color:var(--text);
                       border-left-color:${p.color}">
                <span class="chip-status-dot" style="background:${statusCol}"></span>${job.orderNr ? `#${escHtml(job.orderNr)} — ` : ''}${escHtml(job.name)}${job.customerName ? `<span class="month-chip-customer"> · ${escHtml(job.customerName)}</span>` : ''}
              </span>`;
