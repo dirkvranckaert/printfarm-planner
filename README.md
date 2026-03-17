@@ -8,7 +8,7 @@ Built with Node.js + Express + SQLite. Protected by session-based cookie auth. D
 
 ## Features
 
-- Day / week / month / upcoming calendar views
+- Day / week / month / upcoming calendar views, plus a Today summary panel
 - Multiple printers, each with a custom color and brand
 - Print jobs with customer name, order number, filament colors, print file, status, and remarks
 - Drag to move or resize jobs in day view
@@ -81,6 +81,8 @@ cp .env.example .env
 ADMIN_USER=admin
 ADMIN_PASS=yourpassword
 PORT=3000
+TOPBAR_PRINTER_LIMIT=3
+BAMBU_AMS_DEBUG=false
 ```
 
 Start the server:
@@ -162,7 +164,7 @@ PrintFarm Planner connects to BambuLab's cloud MQTT to show real-time printer st
 
 ### Connecting your BambuLab account
 
-1. Open the app → **Settings** (gear icon)
+1. Open the app → **⋮ menu** → **Settings**
 2. Under **BambuLab Connection**, enter your BambuLab email, password, and MQTT region (`us` for EU/US, `cn` for China)
 3. Click **Connect** — if your account has 2-step verification enabled, a code will be sent to your email; enter it in the next step
 4. Once connected, a green dot confirms the live link is active
@@ -189,7 +191,7 @@ The status bar at the top of the UI shows a chip for every live-connected printe
 | Bed temp (current / target) | `bed_temper` / `bed_target_temper` |
 | AMS filament slots (color, material, K factor) | `ams.ams[].tray[]` |
 | External spool | `vt_tray` |
-| Active slot indicator (arrow below the loaded slot) | `tray_now` |
+| Active slot indicator (arrow below the loaded slot) | `ams.tray_now` |
 
 ### Supported regions
 
@@ -443,6 +445,8 @@ Railway is the recommended host: it supports persistent volumes (needed for the 
    - `ADMIN_USER` — login username
    - `ADMIN_PASS` — login password
    - `PORT` is set automatically by Railway; `server.js` reads it via `process.env.PORT || 3000`
+   - `TOPBAR_PRINTER_LIMIT` — max printer chips shown in the topbar before collapsing into "+N more" (default: `3`)
+   - `BAMBU_AMS_DEBUG` — set to `true` to log raw AMS MQTT payloads and parsed slot results (default: `false`)
 5. Deploy. Railway will run `npm start` → `node server.js`.
 
 No Bambu credentials go in `.env` — configure the BambuLab connection through the Settings UI after deployment.
