@@ -152,6 +152,41 @@ body {
   .status-panel-toggle { display: inline-flex !important; align-items: center; gap: 4px; }
 }
 
+/* Topbar ⋮ menu */
+.topbar-menu-wrap { position: relative; }
+.topbar-menu-btn { font-size: 18px; padding: 0 10px; letter-spacing: 1px; }
+.topbar-menu {
+  position: absolute;
+  top: calc(100% + 6px);
+  right: 0;
+  min-width: 160px;
+  display: none;
+  background: var(--surface);
+  border: 1px solid var(--border);
+  border-radius: 8px;
+  box-shadow: 0 4px 16px rgba(0,0,0,.12);
+  z-index: 200;
+  overflow: hidden;
+}
+.topbar-menu.open { display: block; }
+.topbar-menu-item {
+  display: block;
+  width: 100%;
+  text-align: left;
+  padding: 10px 16px;
+  background: none;
+  border: none;
+  color: var(--text);
+  font: inherit;
+  font-size: 14px;
+  cursor: pointer;
+  text-decoration: none;
+  white-space: nowrap;
+}
+.topbar-menu-item:hover { background: var(--bg); }
+.topbar-menu-divider { height: 1px; background: var(--border); margin: 4px 0; }
+.topbar-menu-signout { color: var(--text-muted); }
+
 /* Printer status chips in topbar */
 .schip-wrap { position: relative; }
 .schip {

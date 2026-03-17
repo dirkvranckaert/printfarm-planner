@@ -232,7 +232,20 @@ document.addEventListener('click', (e) => {
     const btn   = document.getElementById('btn-overflow-chips');
     if (panel) { panel.classList.remove('schip-overflow-open'); btn?.setAttribute('aria-expanded', 'false'); }
   }
+  // Close topbar menu when clicking outside
+  const menuWrap = document.getElementById('topbar-menu-wrap');
+  if (menuWrap && !menuWrap.contains(e.target)) {
+    document.getElementById('topbar-menu')?.classList.remove('open');
+    document.getElementById('btn-topbar-menu')?.setAttribute('aria-expanded', 'false');
+  }
 });
+
+function toggleTopbarMenu() {
+  const menu = document.getElementById('topbar-menu');
+  const btn  = document.getElementById('btn-topbar-menu');
+  const opening = menu.classList.toggle('open');
+  btn.setAttribute('aria-expanded', String(opening));
+}
 
 // Mobile status panel — one card per connected printer.
 function renderStatusPanel(connectedPrinters) {
@@ -2090,6 +2103,11 @@ function setupListeners() {
 
   document.getElementById('job-queued').addEventListener('change', e => {
     setQueuedMode(e.target.checked);
+  });
+  document.getElementById('btn-topbar-menu').addEventListener('click', e => { e.stopPropagation(); toggleTopbarMenu(); });
+  document.getElementById('topbar-menu').addEventListener('click', () => {
+    document.getElementById('topbar-menu').classList.remove('open');
+    document.getElementById('btn-topbar-menu').setAttribute('aria-expanded', 'false');
   });
   document.getElementById('btn-manage-printers').addEventListener('click', openPrintersModal);
   document.getElementById('btn-manage-closures').addEventListener('click', openClosuresModal);

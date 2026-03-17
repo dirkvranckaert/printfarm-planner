@@ -23,10 +23,16 @@
       </button>
       <button id="btn-add-job" class="btn btn-primary">+ Job</button>
       <button id="btn-queue" class="btn btn-secondary">Queue</button>
-      <button id="btn-manage-printers" class="btn btn-secondary">⚙ Printers</button>
-      <button id="btn-manage-closures" class="btn btn-secondary">🔒 Closures</button>
-      <button id="btn-settings" class="btn btn-secondary" title="Settings">⚙ Settings</button>
-      <a href="/logout" class="btn btn-secondary">Sign out</a>
+      <div class="topbar-menu-wrap" id="topbar-menu-wrap">
+        <button class="btn btn-secondary topbar-menu-btn" id="btn-topbar-menu" title="Menu" aria-expanded="false">⋮</button>
+        <div class="topbar-menu" id="topbar-menu">
+          <button class="topbar-menu-item" id="btn-manage-printers">⚙ Printers</button>
+          <button class="topbar-menu-item" id="btn-manage-closures">🔒 Closures</button>
+          <button class="topbar-menu-item" id="btn-settings">⚙ Settings</button>
+          <div class="topbar-menu-divider"></div>
+          <a href="/logout" class="topbar-menu-item topbar-menu-signout">Sign out</a>
+        </div>
+      </div>
     </div>
   </header>
 
