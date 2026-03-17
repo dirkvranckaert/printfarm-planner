@@ -10,6 +10,7 @@ try { mqtt = require('mqtt'); } catch {
 }
 
 const statusMap = {};       // { [serial]: { stage, progress, remaining, nozzle_temp, bed_temp, updated_at } }
+const AMS_DEBUG = process.env.BAMBU_AMS_DEBUG === 'true';
 const updateCallbacks = [];
 
 let mqttClient = null;
@@ -34,7 +35,9 @@ function bambuColorToCss(rgba) {
 // Each slot: { id, label, color, material, remainPct, k, active }
 function parseAms(p) {
   const slots = [];
-  const activeTray = p.tray_now != null ? String(p.tray_now) : null;
+  const activeTray = p.ams?.tray_now != null ? String(p.ams.tray_now)
+                   : p.tray_now     != null ? String(p.tray_now)
+                   : null;
 
   const amsUnits = p.ams?.ams;
   if (Array.isArray(amsUnits)) {
@@ -102,7 +105,14 @@ function parseMessage(serial, payload) {
 
     // Multi-color / AMS info — only update when the field is present
     if (p.ams !== undefined || p.vt_tray !== undefined) {
+      if (AMS_DEBUG) console.log(`[Bambu:${serial}] AMS print_info — tray_now:`, p.tray_now,
+        '| ams.tray_now:', p.ams?.tray_now,
+        '| ams_status:', p.ams_status,
+        '| ams:', JSON.stringify(p.ams),
+        '| vt_tray:', JSON.stringify(p.vt_tray));
       const slots = parseAms(p);
+      if (AMS_DEBUG) console.log(`[Bambu:${serial}] parsed slots:`,
+        JSON.stringify(slots?.map(s => ({ id: s.id, active: s.active, material: s.material }))));
       if (slots) next.slots = slots;
     }
 
