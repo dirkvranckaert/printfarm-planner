@@ -619,6 +619,7 @@ body {
   flex-shrink: 0;
 }
 .modal-footer-right { display: flex; gap: 8px; }
+.app-version { font-size: 11px; color: var(--text-muted); align-self: center; }
 
 /* ======================== Forms ======================== */
 .form-group { margin-bottom: 14px; }

@@ -306,6 +306,10 @@ async function init() {
   // Load server-side config (env-driven)
   const config = await api('GET', '/api/config').catch(() => null);
   if (config?.topbarPrinterLimit > 0) topbarLimit = config.topbarPrinterLimit;
+  if (config?.version) {
+    const el = document.getElementById('app-version');
+    if (el) el.textContent = `v${config.version}`;
+  }
 
   // Apply saved theme before first render
   const themeSetting = await api('GET', '/api/settings/theme');

@@ -91,8 +91,11 @@ app.get('/api/printers/status/stream', (req, res) => {
 });
 
 // --- App config (read-only, driven by env vars) ---
+const { version } = require('./package.json');
+
 app.get('/api/config', (req, res) => {
   res.json({
+    version,
     topbarPrinterLimit: parseInt(process.env.TOPBAR_PRINTER_LIMIT, 10) || 3,
   });
 });
