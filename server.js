@@ -2,8 +2,8 @@ require('dotenv').config();
 const express = require('express');
 const crypto  = require('crypto');
 const path    = require('path');
-const db = require('./db');
-const bambu = require('./bambu');
+const db     = require('./db');
+const brands = require('./brands');
 
 const app = express();
 app.use(express.json());
@@ -52,112 +52,25 @@ app.use((req, res, next) => {
 
 app.use(express.static('public'));
 
-// --- Bambu helpers ---
-function getSetting(key) {
-  const row = db.prepare('SELECT value FROM settings WHERE key=?').get(key);
-  if (!row) return null;
-  try { return JSON.parse(row.value); } catch { return row.value; }
-}
-function setSetting(key, value) {
-  db.prepare('INSERT INTO settings (key,value) VALUES(?,?) ON CONFLICT(key) DO UPDATE SET value=excluded.value')
-    .run(key, JSON.stringify(value));
-}
-async function fetchBambuToken(email, password, code) {
-  const body = { account: email, password };
-  if (code) body.code = code;
-  const res = await fetch('https://api.bambulab.com/v1/user-service/user/login', {
-    method: 'POST',
-    headers: { 'Content-Type': 'application/json' },
-    body: JSON.stringify(body),
-  });
-  if (!res.ok) {
-    const text = await res.text();
-    throw new Error(`Login failed: ${res.status} ${text}`);
-  }
-  return res.json();
-}
-async function fetchBambuUserId(token) {
-  const res = await fetch('https://api.bambulab.com/v1/design-user-service/my/preference', {
-    headers: { Authorization: `Bearer ${token}` },
-  });
-  if (!res.ok) throw new Error(`User ID fetch failed: ${res.status}`);
-  const json = await res.json();
-  return json.uid || json.userId || json.user_id;
-}
-
-// --- Bambu live status (SSE) ---
+// --- Live status (SSE) ---
 const sseClients = new Set();
 
-bambu.connect(db).catch(err => console.error('[Bambu] connect error:', err.message));
-bambu.onUpdate((serial, status) => {
-  const data = `data: ${JSON.stringify({ [serial]: status })}\n\n`;
+// Connect all brand integrations on startup
+brands.connectAll(db);
+
+// Broadcast every live-status update to SSE clients.
+// brandKey is namespaced: "bambulab:01P00A123456789"
+brands.onUpdate((brandKey, status) => {
+  const data = `data: ${JSON.stringify({ [brandKey]: status })}\n\n`;
   sseClients.forEach(res => res.write(data));
 });
 
-// --- Bambu auth API ---
-app.get('/api/bambu/config', (req, res) => {
-  const email  = getSetting('bambu.email');
-  const region = getSetting('bambu.region') || 'us';
-  const token  = getSetting('bambu.token');
-  res.json({ email, region, connected: !!token });
-});
-
-app.post('/api/bambu/connect', async (req, res) => {
-  const { email, password, region } = req.body ?? {};
-  if (!email || !password) return res.status(400).json({ error: 'email and password required' });
-  try {
-    const loginJson = await fetchBambuToken(email, password);
-    if (loginJson.loginType === 'verifyCode') {
-      setSetting('bambu.pendingEmail',    email);
-      setSetting('bambu.pendingPassword', password);
-      setSetting('bambu.pendingRegion',   region || 'us');
-      return res.json({ status: 'verifyCode' });
-    }
-    const token = loginJson.token || loginJson.accessToken;
-    if (!token) return res.status(502).json({ error: 'No token in login response' });
-    const uid = await fetchBambuUserId(token);
-    if (!uid) return res.status(502).json({ error: 'Could not get user ID' });
-    setSetting('bambu.email',  email);
-    setSetting('bambu.token',  token);
-    setSetting('bambu.userId', String(uid));
-    setSetting('bambu.region', region || 'us');
-    await bambu.reinit(db);
-    res.json({ status: 'ok' });
-  } catch (e) {
-    res.status(502).json({ error: e.message });
-  }
-});
-
-app.post('/api/bambu/verify', async (req, res) => {
-  const { code } = req.body ?? {};
-  if (!code) return res.status(400).json({ error: 'code required' });
-  const email    = getSetting('bambu.pendingEmail');
-  const password = getSetting('bambu.pendingPassword');
-  const region   = getSetting('bambu.pendingRegion') || 'us';
-  if (!email || !password) return res.status(400).json({ error: 'No pending login — call /api/bambu/connect first' });
-  try {
-    const loginJson = await fetchBambuToken(email, password, code);
-    const token = loginJson.token || loginJson.accessToken;
-    if (!token) return res.status(502).json({ error: 'No token in login response' });
-    const uid = await fetchBambuUserId(token);
-    if (!uid) return res.status(502).json({ error: 'Could not get user ID' });
-    setSetting('bambu.email',  email);
-    setSetting('bambu.token',  token);
-    setSetting('bambu.userId', String(uid));
-    setSetting('bambu.region', region);
-    db.prepare("DELETE FROM settings WHERE key IN ('bambu.pendingEmail','bambu.pendingPassword','bambu.pendingRegion')").run();
-    await bambu.reinit(db);
-    res.json({ status: 'ok' });
-  } catch (e) {
-    res.status(502).json({ error: e.message });
-  }
-});
-
-app.delete('/api/bambu/connect', (req, res) => {
-  db.prepare("DELETE FROM settings WHERE key LIKE 'bambu.%'").run();
-  bambu.disconnect();
-  res.json({ status: 'ok' });
-});
+// --- Brand-specific API routers ---
+// Each brand module exposes an Express router for its own auth/config endpoints.
+// Mounted at /api/brands/{brand.id}/ — e.g. GET /api/brands/bambulab/config
+for (const brand of brands.all) {
+  if (brand.router) app.use(`/api/brands/${brand.id}`, brand.router);
+}
 
 app.get('/api/printers/status/stream', (req, res) => {
   res.set({
@@ -167,8 +80,8 @@ app.get('/api/printers/status/stream', (req, res) => {
   });
   res.flushHeaders();
 
-  // Send current snapshot immediately
-  const snapshot = bambu.getAllStatuses();
+  // Send current snapshot immediately (keys are "brand:printerKey")
+  const snapshot = brands.getAllStatuses();
   if (Object.keys(snapshot).length > 0) {
     res.write(`data: ${JSON.stringify(snapshot)}\n\n`);
   }
@@ -184,13 +97,13 @@ app.get('/api/printers', (req, res) => {
 app.post('/api/printers', (req, res) => {
   const { name, color, brand, bambu_serial } = req.body;
   const result = db.prepare('INSERT INTO printers (name, color, brand, bambu_serial) VALUES (?, ?, ?, ?)').run(name, color, brand || 'other', bambu_serial || null);
-  if (bambu_serial) bambu.subscribeSerial(bambu_serial);
+  brands.subscribeForPrinter({ brand, bambu_serial });
   res.status(201).json({ id: result.lastInsertRowid, name, color, brand: brand || 'other', bambu_serial: bambu_serial || null });
 });
 app.put('/api/printers/:id', (req, res) => {
   const { name, color, brand, bambu_serial } = req.body;
   db.prepare('UPDATE printers SET name=?, color=?, brand=?, bambu_serial=? WHERE id=?').run(name, color, brand || 'other', bambu_serial || null, req.params.id);
-  if (bambu_serial) bambu.subscribeSerial(bambu_serial);
+  brands.subscribeForPrinter({ brand, bambu_serial });
   res.json({ id: Number(req.params.id), name, color, brand: brand || 'other', bambu_serial: bambu_serial || null });
 });
 app.delete('/api/printers/:id', (req, res) => {

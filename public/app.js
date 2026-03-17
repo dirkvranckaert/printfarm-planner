@@ -34,10 +34,12 @@ async function api(method, path, body) {
 }
 
 // ---- Live status helpers ----
-// Status is keyed by the printer's live-status key.
-// For BambuLab that is bambu_serial; future brands may use another identifier.
+// Status is keyed as "{brand}:{printerKey}" — e.g. "bambulab:01P00A123456789".
+// Add a case here when a new brand integration is added.
 function printerStatusKey(printer) {
-  if (printer.brand === 'bambulab' || printer.bambu_serial) return printer.bambu_serial || null;
+  if (printer.brand === 'bambulab' && printer.bambu_serial) return `bambulab:${printer.bambu_serial}`;
+  // Future brands:
+  // if (printer.brand === 'prusa' && printer.prusa_serial) return `prusa:${printer.prusa_serial}`;
   return null;
 }
 
@@ -1741,7 +1743,7 @@ async function openSettingsModal() {
 }
 
 async function renderBambuConnectionState() {
-  const config = await api('GET', '/api/bambu/config').catch(() => null);
+  const config = await api('GET', '/api/brands/bambulab/config').catch(() => null);
   const stateLogin     = document.getElementById('bambu-state-login');
   const stateVerify    = document.getElementById('bambu-state-verify');
   const stateConnected = document.getElementById('bambu-state-connected');
@@ -1772,7 +1774,7 @@ async function bambuConnect() {
   btn.textContent = 'Connecting…';
 
   try {
-    const res = await api('POST', '/api/bambu/connect', { email, password, region });
+    const res = await api('POST', '/api/brands/bambulab/connect', { email, password, region });
     if (res.status === 'verifyCode') {
       document.getElementById('bambu-state-login').classList.add('hidden');
       document.getElementById('bambu-state-verify').classList.remove('hidden');
@@ -1798,7 +1800,7 @@ async function bambuVerify() {
   btn.textContent = 'Verifying…';
 
   try {
-    const res = await api('POST', '/api/bambu/verify', { code });
+    const res = await api('POST', '/api/brands/bambulab/verify', { code });
     if (res.status === 'ok') {
       await renderBambuConnectionState();
     }
@@ -1812,7 +1814,7 @@ async function bambuVerify() {
 
 async function bambuDisconnect() {
   if (!confirm('Disconnect from BambuLab? Live status updates will stop.')) return;
-  await api('DELETE', '/api/bambu/connect');
+  await api('DELETE', '/api/brands/bambulab/connect');
   await renderBambuConnectionState();
 }
 
