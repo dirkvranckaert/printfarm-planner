@@ -1266,9 +1266,9 @@ async function renderUpcoming() {
   const allJobs = await api('GET', '/api/jobs');
   allJobs.forEach(j => { jobsCache[j.id] = j; });
 
-  const now = new Date();
+  const today = todayMidnight();
   const upcoming = allJobs
-    .filter(j => !j.queued && new Date(j.end) >= now)
+    .filter(j => !j.queued && new Date(j.end) >= today)
     .sort((a, b) => new Date(a.start) - new Date(b.start));
 
   // Group by date key
