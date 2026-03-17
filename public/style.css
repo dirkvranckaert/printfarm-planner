@@ -97,7 +97,60 @@ body {
 }
 .app-title { font-size: 18px; font-weight: 700; color: var(--primary); }
 .topbar-center { display: flex; align-items: center; gap: 6px; flex: 1; justify-content: center; }
-.topbar-right { display: flex; gap: 8px; }
+.topbar-right { display: flex; gap: 8px; align-items: center; }
+
+/* ---- Printer status panel (mobile) ---- */
+.printer-status-panel {
+  background: var(--surface);
+  border-bottom: 1px solid var(--border);
+  box-shadow: var(--shadow);
+  padding: 10px 16px 14px;
+  display: flex;
+  flex-direction: column;
+  gap: 10px;
+  z-index: 9;
+}
+.ps-card {
+  display: flex;
+  flex-direction: column;
+  gap: 6px;
+  padding: 10px 12px;
+  border: 1px solid var(--border);
+  border-radius: 8px;
+  background: var(--surface-alt, var(--surface));
+}
+.ps-card-header {
+  display: flex;
+  align-items: center;
+  gap: 7px;
+}
+.ps-card-dot { width: 9px; height: 9px; border-radius: 50%; flex-shrink: 0; }
+.ps-card-name { font-weight: 600; font-size: 13px; color: var(--text); flex: 1; }
+.ps-card-body { display: flex; flex-direction: column; gap: 4px; padding-left: 16px; }
+.ps-card-stage { font-size: 12px; color: var(--text); }
+.ps-card-details { display: flex; flex-wrap: wrap; gap: 6px; font-size: 11px; color: var(--text-muted); }
+.ps-card-bar-wrap { height: 4px; background: var(--border); border-radius: 2px; overflow: hidden; }
+.ps-card-bar-fill { height: 100%; background: var(--primary); border-radius: 2px; }
+
+/* Badge dot on the mobile printer-status button */
+.status-panel-toggle { position: relative; }
+.status-badge {
+  display: inline-block;
+  width: 7px; height: 7px;
+  border-radius: 50%;
+  background: #22c55e;
+  vertical-align: middle;
+  margin-left: 2px;
+}
+
+/* On wide screens: show chips in topbar, hide the panel button */
+.status-panel-toggle { display: none; }
+
+/* On narrow screens: hide topbar chips, show the panel button */
+@media (max-width: 760px) {
+  .topbar-center { display: none; }
+  .status-panel-toggle { display: inline-flex !important; align-items: center; gap: 4px; }
+}
 
 /* Printer status chips in topbar */
 .schip-wrap { position: relative; }
@@ -128,6 +181,42 @@ body {
   pointer-events: none;
 }
 .schip-wrap:hover .schip-popup { display: block; }
+
+/* Overflow chip — "+N more" button */
+.schip-overflow {
+  border-style: dashed;
+  color: var(--text-muted);
+  gap: 5px;
+  background: transparent;
+}
+.schip-overflow:hover { color: var(--text); border-color: var(--primary); border-style: solid; }
+.overflow-dot {
+  width: 6px; height: 6px; border-radius: 50%;
+  background: #22c55e; flex-shrink: 0;
+}
+
+/* Overflow panel — click-toggled, wider than regular popup */
+.schip-overflow-panel {
+  display: none;
+  pointer-events: auto;    /* panel itself is interactive */
+  min-width: 220px;
+  max-width: 300px;
+  max-height: 70vh;
+  overflow-y: auto;
+  left: auto;
+  right: 0;
+  transform: none;
+}
+.schip-overflow-panel.schip-overflow-open { display: block; }
+/* Suppress hover-open on the overflow wrap (it's click-only) */
+.schip-overflow-wrap:hover .schip-popup { display: none; }
+.schip-overflow-wrap .schip-overflow-panel.schip-overflow-open { display: block; }
+
+.overflow-card { padding: 2px 0 6px; }
+.overflow-card-header { display: flex; align-items: center; gap: 6px; margin-bottom: 6px; }
+.overflow-card-name { font-weight: 600; font-size: 13px; color: var(--text); flex: 1; }
+.overflow-card-body { padding-left: 14px; }
+.overflow-divider { border: none; border-top: 1px solid var(--border); margin: 8px 0; }
 .spopup-name { font-weight: 600; font-size: 13px; color: var(--text); margin-bottom: 3px; }
 .spopup-stage { font-size: 12px; color: var(--text); margin-bottom: 6px; }
 .spopup-dim { color: var(--text-muted) !important; }

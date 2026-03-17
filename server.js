@@ -90,6 +90,13 @@ app.get('/api/printers/status/stream', (req, res) => {
   req.on('close', () => sseClients.delete(res));
 });
 
+// --- App config (read-only, driven by env vars) ---
+app.get('/api/config', (req, res) => {
+  res.json({
+    topbarPrinterLimit: parseInt(process.env.TOPBAR_PRINTER_LIMIT, 10) || 3,
+  });
+});
+
 // --- Printers ---
 app.get('/api/printers', (req, res) => {
   res.json(db.prepare('SELECT * FROM printers').all());

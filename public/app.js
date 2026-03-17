@@ -92,82 +92,179 @@ function contrastColor(hex) {
   return lum > 0.55 ? '#111' : '#fff';
 }
 
+// Build the detail block (stage, progress bar, temps, remaining, AMS slots) for a printer.
+// Used by both the topbar hover popup and the mobile status panel.
+function printerDetailHtml(s) {
+  if (!s) return `<div class="spopup-stage spopup-dim">Waiting for data…</div>`;
+
+  const stageText = s.stage === 'RUNNING' ? `Printing${s.progress > 0 ? ` · ${s.progress}%` : ''}` :
+                    s.stage === 'PAUSE'   ? 'Paused' :
+                    s.stage === 'FINISH'  ? 'Finished' :
+                    s.stage === 'FAILED'  ? 'Error' : 'Idle';
+  let html = `<div class="spopup-stage">${stageText}</div>`;
+  if (s.stage === 'RUNNING' && s.progress > 0) {
+    html += `<div class="spopup-bar-wrap"><div class="spopup-bar-fill" style="width:${s.progress}%"></div></div>`;
+  }
+  const details = [];
+  if (s.nozzle_temp != null) {
+    const cur = Math.round(s.nozzle_temp);
+    const tgt = s.nozzle_target != null && s.nozzle_target > 0 ? Math.round(s.nozzle_target) : null;
+    details.push(`🌡 ${cur}°${tgt ? ` / ${tgt}°` : ''}`);
+  }
+  if (s.bed_temp != null) {
+    const cur = Math.round(s.bed_temp);
+    const tgt = s.bed_target != null && s.bed_target > 0 ? Math.round(s.bed_target) : null;
+    details.push(`🛏 ${cur}°${tgt ? ` / ${tgt}°` : ''}`);
+  }
+  if (s.remaining != null && s.remaining > 0) {
+    const h = Math.floor(s.remaining / 60), m = s.remaining % 60;
+    details.push(`⏱ ${h > 0 ? h + 'h ' : ''}${m}m left`);
+  }
+  if (details.length) html += `<div class="spopup-details">${details.map(d => `<span>${escHtml(d)}</span>`).join('')}</div>`;
+
+  if (s.slots && s.slots.length) {
+    const amsSlots = s.slots.filter(sl => sl.id !== 'Ext');
+    const extSlot  = s.slots.find(sl => sl.id === 'Ext');
+    if (amsSlots.length) {
+      const rows = [];
+      for (let i = 0; i < amsSlots.length; i += 4) rows.push(amsSlots.slice(i, i + 4));
+      html += `<div class="spopup-ams">${rows.map(row => `<div class="spopup-ams-row">${row.map(sl => slotCardHtml(sl)).join('')}</div>`).join('')}</div>`;
+    }
+    if (extSlot) {
+      html += `<div class="spopup-ams spopup-ams-ext"><div class="spopup-ams-label">External</div><div class="spopup-ams-row">${slotCardHtml(extSlot)}</div></div>`;
+    }
+  }
+  return html;
+}
+
 function renderTopbarStatus() {
   const bar = document.getElementById('printer-status-bar');
   if (!bar) return;
 
   const connectedPrinters = printers.filter(p => printerStatusKey(p));
-  if (!connectedPrinters.length) { bar.innerHTML = ''; return; }
+  if (!connectedPrinters.length) { bar.innerHTML = ''; renderStatusPanel(connectedPrinters); return; }
 
-  bar.innerHTML = connectedPrinters.map(p => {
-    const s    = getPrinterLiveStatus(p);
+  const visible  = connectedPrinters.slice(0, topbarLimit);
+  const overflow = connectedPrinters.slice(topbarLimit);
+
+  const chipHtml = visible.map(p => {
+    const s     = getPrinterLiveStatus(p);
     const label = printerStatusLabel(s);
     const cls   = s ? s.stage.toLowerCase() : '';
-
-    // Popup detail lines
-    let popupBody = `<div class="spopup-name">${escHtml(p.name)}</div>`;
-    if (s) {
-      const stageText = s.stage === 'RUNNING' ? `Printing${s.progress > 0 ? ` · ${s.progress}%` : ''}` :
-                        s.stage === 'PAUSE'   ? 'Paused' :
-                        s.stage === 'FINISH'  ? 'Finished' :
-                        s.stage === 'FAILED'  ? 'Error' : 'Idle';
-      popupBody += `<div class="spopup-stage">${stageText}</div>`;
-      if (s.stage === 'RUNNING' && s.progress > 0) {
-        popupBody += `<div class="spopup-bar-wrap"><div class="spopup-bar-fill" style="width:${s.progress}%"></div></div>`;
-      }
-      const details = [];
-      if (s.nozzle_temp != null) {
-        const cur = Math.round(s.nozzle_temp);
-        const tgt = s.nozzle_target != null && s.nozzle_target > 0 ? Math.round(s.nozzle_target) : null;
-        details.push(`🌡 ${cur}°${tgt ? ` / ${tgt}°` : ''}`);
-      }
-      if (s.bed_temp != null) {
-        const cur = Math.round(s.bed_temp);
-        const tgt = s.bed_target != null && s.bed_target > 0 ? Math.round(s.bed_target) : null;
-        details.push(`🛏 ${cur}°${tgt ? ` / ${tgt}°` : ''}`);
-      }
-      if (s.remaining   != null && s.remaining > 0) {
-        const h = Math.floor(s.remaining / 60), m = s.remaining % 60;
-        details.push(`⏱ ${h > 0 ? h + 'h ' : ''}${m}m left`);
-      }
-      if (details.length) popupBody += `<div class="spopup-details">${details.map(d => `<span>${escHtml(d)}</span>`).join('')}</div>`;
-
-      // Multi-color / AMS slots
-      if (s.slots && s.slots.length) {
-        // Group by AMS unit (A1–A4, B1–B4, …) vs Ext
-        const amsSlots = s.slots.filter(sl => sl.id !== 'Ext');
-        const extSlot  = s.slots.find(sl => sl.id === 'Ext');
-
-        if (amsSlots.length) {
-          // Group into rows of 4 (one AMS unit per row)
-          const rows = [];
-          for (let i = 0; i < amsSlots.length; i += 4) rows.push(amsSlots.slice(i, i + 4));
-          const slotsHtml = rows.map(row =>
-            `<div class="spopup-ams-row">${row.map(sl => slotCardHtml(sl)).join('')}</div>`
-          ).join('');
-          popupBody += `<div class="spopup-ams">${slotsHtml}</div>`;
-        }
-
-        if (extSlot) {
-          popupBody += `<div class="spopup-ams spopup-ams-ext">
-            <div class="spopup-ams-label">External</div>
-            <div class="spopup-ams-row">${slotCardHtml(extSlot)}</div>
-          </div>`;
-        }
-      }
-    } else {
-      popupBody += `<div class="spopup-stage spopup-dim">Waiting for data…</div>`;
-    }
-
     return `<div class="schip-wrap">
       <div class="schip">
         <span class="schip-dot" style="background:${p.color}"></span>
         <span class="schip-name">${escHtml(p.name)}</span>
         ${label ? `<span class="printer-status-pill printer-status-${cls}">${escHtml(label)}</span>` : ''}
       </div>
-      <div class="schip-popup">${popupBody}</div>
+      <div class="schip-popup">
+        <div class="spopup-name">${escHtml(p.name)}</div>
+        ${printerDetailHtml(s)}
+      </div>
     </div>`;
   }).join('');
+
+  let overflowHtml = '';
+  if (overflow.length) {
+    const anyActive = overflow.some(p => getPrinterLiveStatus(p)?.stage === 'RUNNING');
+    overflowHtml = `<div class="schip-wrap schip-overflow-wrap" id="schip-overflow-wrap">
+      <button class="schip schip-overflow" id="btn-overflow-chips" aria-expanded="false">
+        ${anyActive ? `<span class="overflow-dot"></span>` : ''}
+        +${overflow.length} more
+      </button>
+      <div class="schip-popup schip-overflow-panel" id="schip-overflow-panel">
+        ${overflow.map(p => {
+          const s   = getPrinterLiveStatus(p);
+          const label = printerStatusLabel(s);
+          const cls   = s ? s.stage.toLowerCase() : '';
+          return `<div class="overflow-card">
+            <div class="overflow-card-header">
+              <span class="schip-dot" style="background:${p.color}"></span>
+              <span class="overflow-card-name">${escHtml(p.name)}</span>
+              ${label ? `<span class="printer-status-pill printer-status-${cls}">${escHtml(label)}</span>` : ''}
+            </div>
+            <div class="overflow-card-body">${printerDetailHtml(s)}</div>
+          </div>`;
+        }).join('<hr class="overflow-divider">')}
+      </div>
+    </div>`;
+  }
+
+  // Preserve open state before replacing DOM
+  const overflowWasOpen = document.getElementById('schip-overflow-panel')
+    ?.classList.contains('schip-overflow-open') ?? false;
+
+  bar.innerHTML = chipHtml + overflowHtml;
+
+  // Restore open state after re-render
+  if (overflowWasOpen) {
+    document.getElementById('schip-overflow-panel')?.classList.add('schip-overflow-open');
+    document.getElementById('btn-overflow-chips')?.setAttribute('aria-expanded', 'true');
+  }
+
+  // Wire up overflow toggle (re-attached after innerHTML replace)
+  const overflowBtn = document.getElementById('btn-overflow-chips');
+  if (overflowBtn) overflowBtn.addEventListener('click', e => { e.stopPropagation(); toggleOverflowPanel(); });
+
+  renderStatusPanel(connectedPrinters);
+}
+
+function toggleOverflowPanel() {
+  const panel = document.getElementById('schip-overflow-panel');
+  const btn   = document.getElementById('btn-overflow-chips');
+  if (!panel) return;
+  const opening = panel.classList.toggle('schip-overflow-open');
+  btn.setAttribute('aria-expanded', String(opening));
+}
+
+// Close overflow panel when clicking anywhere outside it
+document.addEventListener('click', (e) => {
+  const wrap = document.getElementById('schip-overflow-wrap');
+  if (wrap && !wrap.contains(e.target)) {
+    const panel = document.getElementById('schip-overflow-panel');
+    const btn   = document.getElementById('btn-overflow-chips');
+    if (panel) { panel.classList.remove('schip-overflow-open'); btn?.setAttribute('aria-expanded', 'false'); }
+  }
+});
+
+// Mobile status panel — one card per connected printer.
+function renderStatusPanel(connectedPrinters) {
+  const panel  = document.getElementById('printer-status-panel');
+  const btn    = document.getElementById('btn-printer-status');
+  const badge  = document.getElementById('printer-status-badge');
+  if (!panel || !btn) return;
+
+  const list = connectedPrinters ?? printers.filter(p => printerStatusKey(p));
+
+  // Show/hide the toggle button
+  btn.classList.toggle('hidden', list.length === 0);
+
+  // Badge dot: green if any printer is RUNNING, grey otherwise
+  const anyRunning = list.some(p => getPrinterLiveStatus(p)?.stage === 'RUNNING');
+  badge.innerHTML  = list.length ? `<span class="status-badge" style="background:${anyRunning ? '#22c55e' : '#94a3b8'}"></span>` : '';
+
+  // Build cards
+  panel.innerHTML = list.map(p => {
+    const s   = getPrinterLiveStatus(p);
+    const label = printerStatusLabel(s);
+    const cls   = s ? s.stage.toLowerCase() : '';
+    return `<div class="ps-card">
+      <div class="ps-card-header">
+        <span class="ps-card-dot" style="background:${p.color}"></span>
+        <span class="ps-card-name">${escHtml(p.name)}</span>
+        ${label ? `<span class="printer-status-pill printer-status-${cls}">${escHtml(label)}</span>` : ''}
+      </div>
+      <div class="ps-card-body">${printerDetailHtml(s)}</div>
+    </div>`;
+  }).join('');
+}
+
+function toggleStatusPanel() {
+  const panel = document.getElementById('printer-status-panel');
+  const btn   = document.getElementById('btn-printer-status');
+  if (!panel) return;
+  const open = panel.classList.toggle('hidden');
+  btn.setAttribute('aria-expanded', String(!open));
 }
 
 // ---- App state ----
@@ -186,7 +283,8 @@ let jobsCache       = {};   // id → job, updated on each full DB fetch
 let lastDragMoved  = false;
 let closures       = [];   // loaded before every render
 let editClosureId  = null;
-let printerStatus  = {};   // keyed by bambu_serial — live status from SSE
+let printerStatus  = {};   // keyed by "brand:serial" — live status from SSE
+let topbarLimit    = 3;    // max chips shown before overflow; set from /api/config
 
 // =============================================================================
 // Init
@@ -198,6 +296,10 @@ function applyTheme(mode) {
 }
 
 async function init() {
+  // Load server-side config (env-driven)
+  const config = await api('GET', '/api/config').catch(() => null);
+  if (config?.topbarPrinterLimit > 0) topbarLimit = config.topbarPrinterLimit;
+
   // Apply saved theme before first render
   const themeSetting = await api('GET', '/api/settings/theme');
   applyTheme(themeSetting?.value ?? 'system');
@@ -1981,6 +2083,7 @@ function setupListeners() {
   document.getElementById('btn-manage-closures').addEventListener('click', openClosuresModal);
   document.getElementById('btn-save-closure').addEventListener('click', saveClosure);
   document.getElementById('btn-cancel-closure').addEventListener('click', resetClosureForm);
+  document.getElementById('btn-printer-status').addEventListener('click', toggleStatusPanel);
   document.getElementById('btn-settings').addEventListener('click', openSettingsModal);
   document.getElementById('btn-save-settings').addEventListener('click', saveSettings);
   document.getElementById('btn-bambu-connect').addEventListener('click', bambuConnect);

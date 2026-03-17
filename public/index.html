@@ -17,6 +17,10 @@
     </div>
     <div class="topbar-center" id="printer-status-bar"></div>
     <div class="topbar-right">
+      <!-- Shown only on small screens when the topbar chips are hidden -->
+      <button id="btn-printer-status" class="btn btn-secondary status-panel-toggle hidden" title="Printer status" aria-expanded="false">
+        🖨 <span id="printer-status-badge"></span>
+      </button>
       <button id="btn-add-job" class="btn btn-primary">+ Job</button>
       <button id="btn-queue" class="btn btn-secondary">Queue</button>
       <button id="btn-manage-printers" class="btn btn-secondary">⚙ Printers</button>
@@ -25,6 +29,9 @@
       <a href="/logout" class="btn btn-secondary">Sign out</a>
     </div>
   </header>
+
+  <!-- Printer status panel (mobile — slides down when btn-printer-status is clicked) -->
+  <div id="printer-status-panel" class="printer-status-panel hidden"></div>
 
   <!-- Calendar toolbar -->
   <div class="calendar-toolbar">
