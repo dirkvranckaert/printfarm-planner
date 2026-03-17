@@ -1,6 +1,6 @@
 # PrintFarm Planner
 
-A browser-based print farm scheduling tool for BambuLab printers. Plan and track print jobs across multiple printers in day, week, month, and upcoming views.
+A browser-based print farm scheduling tool for 3D printers. Plan and track print jobs across multiple printers in day, week, month, and upcoming views.
 
 Built with Node.js + Express + SQLite. Protected by session-based cookie auth. Deployable on Railway (or any Node-capable host with persistent disk).
 
