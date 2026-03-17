@@ -1,0 +1,31 @@
+# Dependencies
+node_modules/
+
+# Environment — contains credentials, never commit
+.env
+.env.*
+!.env.example
+
+# Database — contains live user data
+data/
+
+# macOS
+.DS_Store
+.AppleDouble
+.LSOverride
+
+# Logs
+logs/
+*.log
+npm-debug.log*
+yarn-debug.log*
+yarn-error.log*
+
+# PM2 local runtime files
+.pm2/
+
+# Editor
+.vscode/
+.idea/
+*.swp
+*.swo

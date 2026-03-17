@@ -1,0 +1,313 @@
+<!DOCTYPE html>
+<html lang="en">
+<head>
+  <meta charset="UTF-8">
+  <meta name="viewport" content="width=device-width, initial-scale=1.0">
+  <title>PrintFarm Planner</title>
+  <link rel="icon" type="image/svg+xml" href="favicon.svg">
+  <link rel="apple-touch-icon" href="favicon.svg">
+  <link rel="stylesheet" href="style.css">
+</head>
+<body>
+
+  <!-- Top bar -->
+  <header class="topbar">
+    <div class="topbar-left">
+      <span class="app-title">PrintFarm Planner</span>
+    </div>
+    <div class="topbar-right">
+      <button id="btn-add-job" class="btn btn-primary">+ Job</button>
+      <button id="btn-queue" class="btn btn-secondary">Queue</button>
+      <button id="btn-manage-printers" class="btn btn-secondary">⚙ Printers</button>
+      <button id="btn-manage-closures" class="btn btn-secondary">🔒 Closures</button>
+      <button id="btn-settings" class="btn btn-secondary" title="Settings">⚙ Settings</button>
+      <a href="/logout" class="btn btn-secondary">Sign out</a>
+    </div>
+  </header>
+
+  <!-- Calendar toolbar -->
+  <div class="calendar-toolbar">
+    <div class="nav-group">
+      <button id="btn-prev" class="btn btn-nav">‹</button>
+      <button id="btn-today" class="btn btn-nav">Today</button>
+      <button id="btn-next" class="btn btn-nav">›</button>
+      <span id="date-label" class="date-label date-label-btn" title="Click to jump to a date" role="button" tabindex="0"></span>
+      <input type="date" id="date-jump" style="position:absolute;opacity:0;pointer-events:none;width:0;height:0">
+    </div>
+    <div class="view-group">
+      <button id="btn-today-panel" class="btn btn-view" title="Today Summary">📋 Today</button>
+      <span class="view-sep"></span>
+      <button id="btn-day"      class="btn btn-view active">Day</button>
+      <button id="btn-week"     class="btn btn-view">Week</button>
+      <button id="btn-month"    class="btn btn-view">Month</button>
+      <button id="btn-upcoming" class="btn btn-view">Upcoming</button>
+    </div>
+  </div>
+
+  <!-- Today panel -->
+  <div id="today-panel" class="today-panel hidden"></div>
+
+  <!-- Queue panel -->
+  <div id="queue-panel" class="queue-panel hidden"></div>
+
+  <!-- Calendar output -->
+  <main id="calendar-container"></main>
+
+  <!-- ==================== Job Modal ==================== -->
+  <div id="job-modal" class="modal-overlay hidden">
+    <div class="modal">
+      <div class="modal-header">
+        <h2 id="job-modal-title">Add Print Job</h2>
+        <button class="modal-close" data-close="job-modal">✕</button>
+      </div>
+      <div class="modal-body">
+        <div class="form-group">
+          <label for="job-name">Job Name *</label>
+          <input type="text" id="job-name" placeholder="e.g. Keychain Batch #12">
+        </div>
+        <div class="form-row">
+          <div class="form-group">
+            <label for="job-customer">Customer</label>
+            <input type="text" id="job-customer" placeholder="Optional" list="customer-suggestions" autocomplete="off">
+            <datalist id="customer-suggestions"></datalist>
+          </div>
+          <div class="form-group">
+            <label for="job-ordernr">Order number</label>
+            <input type="text" id="job-ordernr" placeholder="Optional">
+          </div>
+        </div>
+        <div class="form-group">
+          <label for="job-printer">Printer *</label>
+          <select id="job-printer"></select>
+        </div>
+        <div class="form-group">
+          <label class="queue-toggle-label">
+            <input type="checkbox" id="job-queued">
+            <span>Queue for later — no date yet</span>
+          </label>
+        </div>
+        <div id="job-queue-section" class="hidden">
+          <div class="form-group">
+            <label>Expected Duration</label>
+            <div class="form-row" style="margin-top:4px">
+              <div class="form-group" style="margin-bottom:0">
+                <label for="job-queue-dur-h">Hours</label>
+                <input type="number" id="job-queue-dur-h" min="0" value="1">
+              </div>
+              <div class="form-group" style="margin-bottom:0">
+                <label for="job-queue-dur-m">Minutes</label>
+                <input type="number" id="job-queue-dur-m" min="0" max="59" value="0">
+              </div>
+            </div>
+          </div>
+        </div>
+        <div id="job-schedule-section">
+          <div class="form-group">
+            <label for="job-start">Start *</label>
+            <input type="datetime-local" id="job-start">
+          </div>
+          <div class="form-group">
+            <div class="end-mode-toggle">
+              <button type="button" id="toggle-duration" class="end-mode-btn active">Duration</button>
+              <button type="button" id="toggle-enddate"  class="end-mode-btn">End date</button>
+            </div>
+            <div id="end-duration-row" class="form-row" style="margin-top:6px">
+              <div class="form-group" style="margin-bottom:0">
+                <label for="job-duration-h">Hours</label>
+                <input type="number" id="job-duration-h" min="0" value="1">
+              </div>
+              <div class="form-group" style="margin-bottom:0">
+                <label for="job-duration-m">Minutes</label>
+                <input type="number" id="job-duration-m" min="0" max="59" value="0">
+              </div>
+            </div>
+            <div id="end-enddate-row" class="hidden" style="margin-top:6px">
+              <label for="job-end">End date &amp; time</label>
+              <input type="datetime-local" id="job-end">
+            </div>
+          </div>
+        </div>
+        <div class="form-group">
+          <label for="job-colors">Color(s) / Filament</label>
+          <input type="text" id="job-colors" placeholder="e.g. White PLA + Black PETG (optional)">
+        </div>
+        <div class="form-group">
+          <label for="job-printfile">Print File</label>
+          <input type="text" id="job-printfile" placeholder="e.g. /path/to/file.3mf (optional)">
+        </div>
+        <div class="form-group">
+          <label for="job-remarks">Remarks</label>
+          <textarea id="job-remarks" rows="3" placeholder="Optional notes..."></textarea>
+        </div>
+      </div>
+      <div class="modal-footer">
+        <button id="btn-delete-job" class="btn btn-danger hidden">Delete</button>
+        <div class="modal-footer-right">
+          <button class="btn btn-secondary" data-close="job-modal">Cancel</button>
+          <button id="btn-save-job" class="btn btn-primary">Save</button>
+        </div>
+      </div>
+    </div>
+  </div>
+
+  <!-- ==================== Printers Modal ==================== -->
+  <div id="printers-modal" class="modal-overlay hidden">
+    <div class="modal">
+      <div class="modal-header">
+        <h2>Manage Printers</h2>
+        <button class="modal-close" data-close="printers-modal">✕</button>
+      </div>
+      <div class="modal-body">
+        <div id="printers-list"></div>
+        <hr class="divider">
+        <h3 id="printer-form-title">Add Printer</h3>
+        <div class="form-group">
+          <label for="printer-name">Name *</label>
+          <input type="text" id="printer-name" placeholder="e.g. BambuLab P1S">
+        </div>
+        <div class="form-group">
+          <label for="printer-color">Color *</label>
+          <div class="color-input-row">
+            <input type="color" id="printer-color" value="#4f9cf9">
+            <div class="color-swatches" id="color-swatches"></div>
+          </div>
+        </div>
+      </div>
+      <div class="modal-footer">
+        <button id="btn-cancel-printer" class="btn btn-secondary hidden">Cancel Edit</button>
+        <div class="modal-footer-right">
+          <button class="btn btn-secondary" data-close="printers-modal">Close</button>
+          <button id="btn-save-printer" class="btn btn-primary">Add Printer</button>
+        </div>
+      </div>
+    </div>
+  </div>
+
+  <!-- ==================== Settings Modal ==================== -->
+  <div id="settings-modal" class="modal-overlay hidden">
+    <div class="modal modal-settings">
+      <div class="modal-header">
+        <h2>Settings</h2>
+        <button class="modal-close" data-close="settings-modal">✕</button>
+      </div>
+      <div class="modal-body">
+        <div class="form-group">
+          <label for="setting-theme">Theme</label>
+          <select id="setting-theme">
+            <option value="system">System (auto)</option>
+            <option value="light">Light</option>
+            <option value="dark">Dark</option>
+          </select>
+        </div>
+        <hr class="divider">
+        <div class="form-group">
+          <label>Default view on startup</label>
+          <div class="radio-group">
+            <label class="radio-label"><input type="radio" name="default-view" value="day"> Day</label>
+            <label class="radio-label"><input type="radio" name="default-view" value="week"> Week</label>
+            <label class="radio-label"><input type="radio" name="default-view" value="month"> Month</label>
+            <label class="radio-label"><input type="radio" name="default-view" value="upcoming"> Upcoming</label>
+          </div>
+        </div>
+        <hr class="divider">
+        <div class="form-group" style="margin-bottom:0">
+          <label>Status colors</label>
+          <div class="status-color-rows">
+            <div class="status-color-row">
+              <span class="status-color-label">Planned</span>
+              <input type="color" id="sc-Planned">
+            </div>
+            <div class="status-color-row">
+              <span class="status-color-label">Printing</span>
+              <input type="color" id="sc-Printing">
+            </div>
+            <div class="status-color-row">
+              <span class="status-color-label">Post Printing</span>
+              <input type="color" id="sc-Post-Printing">
+            </div>
+            <div class="status-color-row">
+              <span class="status-color-label">Done</span>
+              <input type="color" id="sc-Done">
+            </div>
+          </div>
+        </div>
+        <hr class="divider">
+        <div class="form-group" style="margin-bottom:0">
+          <label class="radio-label" style="font-size:14px">
+            <input type="checkbox" id="setting-queue-auto-expand">
+            <span>Expand queue panel on startup if not empty</span>
+          </label>
+        </div>
+        <hr class="divider">
+        <div class="form-group" style="margin-bottom:0">
+          <label>Data</label>
+          <div style="display:flex;gap:8px;margin-top:4px">
+            <button type="button" id="btn-export" class="btn btn-secondary">↓ Export JSON</button>
+            <button type="button" id="btn-import-trigger" class="btn btn-secondary">↑ Import JSON</button>
+            <input type="file" id="import-file" accept=".json" style="display:none">
+          </div>
+          <p style="font-size:12px;color:var(--text-muted);margin-top:6px">Import replaces all existing data.</p>
+        </div>
+      </div>
+      <div class="modal-footer">
+        <div></div>
+        <div class="modal-footer-right">
+          <button class="btn btn-secondary" data-close="settings-modal">Cancel</button>
+          <button id="btn-save-settings" class="btn btn-primary">Save</button>
+        </div>
+      </div>
+    </div>
+  </div>
+
+  <!-- ==================== Closures Modal ==================== -->
+  <div id="closures-modal" class="modal-overlay hidden">
+    <div class="modal">
+      <div class="modal-header">
+        <h2>Manage Closures</h2>
+        <button class="modal-close" data-close="closures-modal">✕</button>
+      </div>
+      <div class="modal-body">
+        <div id="closures-list"></div>
+        <hr class="divider">
+        <h3 id="closure-form-title">Add Closure</h3>
+        <div class="form-row">
+          <div class="form-group">
+            <label for="closure-start">From *</label>
+            <input type="date" id="closure-start">
+          </div>
+          <div class="form-group">
+            <label for="closure-end">To (inclusive)</label>
+            <input type="date" id="closure-end">
+          </div>
+        </div>
+        <div class="form-group" style="margin-bottom:0">
+          <label for="closure-label">Label</label>
+          <input type="text" id="closure-label" placeholder="e.g. Christmas, Summer break">
+        </div>
+      </div>
+      <div class="modal-footer">
+        <button id="btn-cancel-closure" class="btn btn-secondary hidden">Cancel Edit</button>
+        <div class="modal-footer-right">
+          <button class="btn btn-secondary" data-close="closures-modal">Close</button>
+          <button id="btn-save-closure" class="btn btn-primary">Add Closure</button>
+        </div>
+      </div>
+    </div>
+  </div>
+
+  <!-- Custom context menu -->
+  <div id="ctx-menu" class="ctx-menu hidden">
+    <button class="ctx-item" id="ctx-edit">✏️ Edit</button>
+    <div class="ctx-separator"></div>
+    <button class="ctx-item ctx-status-btn" data-status="Planned">Planned</button>
+    <button class="ctx-item ctx-status-btn" data-status="Printing">Printing</button>
+    <button class="ctx-item ctx-status-btn" data-status="Post Printing">Post Printing</button>
+    <button class="ctx-item ctx-status-btn" data-status="Done">Done</button>
+    <div class="ctx-separator"></div>
+    <button class="ctx-item" id="ctx-duplicate">📋 Duplicate</button>
+    <button class="ctx-item ctx-item-danger" id="ctx-delete">🗑 Delete</button>
+  </div>
+
+  <script src="app.js"></script>
+</body>
+</html>
