@@ -1182,3 +1182,39 @@ body.is-resizing,    body.is-resizing    * { cursor: ns-resize  !important; user
 .bambu-dot { width: 9px; height: 9px; border-radius: 50%; flex-shrink: 0; }
 .bambu-dot-ok { background: #22c55e; }
 .btn-sm { padding: 2px 10px; font-size: 12px; }
+
+/* Brand picker in printers modal */
+.brand-picker {
+  display: flex; flex-wrap: wrap; gap: 6px; margin-top: 4px;
+}
+.brand-btn {
+  padding: 4px 12px; border-radius: 16px; border: 1.5px solid var(--border);
+  background: var(--surface); color: var(--text-muted); font-size: 13px;
+  cursor: pointer; transition: border-color .15s, background .15s, color .15s;
+}
+.brand-btn:hover { border-color: var(--primary); color: var(--text); }
+.brand-btn.active { border-color: var(--primary); background: var(--primary); color: #fff; }
+
+/* AMS slot cards in hover popup */
+.spopup-ams { margin-top: 8px; }
+.spopup-ams-ext { margin-top: 6px; }
+.spopup-ams-label { font-size: 10px; font-weight: 600; color: var(--text-muted); text-transform: uppercase; letter-spacing: .5px; margin-bottom: 4px; }
+.spopup-ams-row { display: flex; gap: 5px; }
+.ams-slot-wrap { display: flex; flex-direction: column; align-items: center; gap: 3px; }
+.ams-slot {
+  width: 46px; min-height: 58px; border-radius: 5px;
+  display: flex; flex-direction: column; align-items: center; justify-content: center;
+  padding: 4px 2px; gap: 2px; font-size: 10px; font-weight: 600;
+  border: 2px solid transparent; box-sizing: border-box; text-align: center;
+  background: var(--surface-2); color: var(--text-muted);
+}
+.ams-slot-active { border-color: rgba(255,255,255,.9); box-shadow: 0 0 0 1px rgba(0,0,0,.2); }
+.ams-slot-arrow {
+  width: 0; height: 0;
+  border-left: 5px solid transparent;
+  border-right: 5px solid transparent;
+  border-top: 6px solid rgba(255,255,255,.85);
+}
+.ams-slot-mat { font-size: 11px; font-weight: 700; line-height: 1.2; }
+.ams-slot-k   { font-size: 9px; opacity: .8; }
+.ams-slot-id  { font-size: 9px; opacity: .6; margin-top: 1px; }

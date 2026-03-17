@@ -51,5 +51,8 @@ const printerCols = db.pragma('table_info(printers)');
 if (!printerCols.some(c => c.name === 'bambu_serial')) {
   db.exec('ALTER TABLE printers ADD COLUMN bambu_serial TEXT;');
 }
+if (!printerCols.some(c => c.name === 'brand')) {
+  db.exec("ALTER TABLE printers ADD COLUMN brand TEXT NOT NULL DEFAULT 'other';");
+}
 
 module.exports = db;

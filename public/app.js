@@ -33,10 +33,18 @@ async function api(method, path, body) {
   return method === 'DELETE' ? null : res.json();
 }
 
-// ---- Bambu live status helpers ----
+// ---- Live status helpers ----
+// Status is keyed by the printer's live-status key.
+// For BambuLab that is bambu_serial; future brands may use another identifier.
+function printerStatusKey(printer) {
+  if (printer.brand === 'bambulab' || printer.bambu_serial) return printer.bambu_serial || null;
+  return null;
+}
+
 function getPrinterLiveStatus(printer) {
-  if (!printer.bambu_serial) return null;
-  return printerStatus[printer.bambu_serial] ?? null;
+  const key = printerStatusKey(printer);
+  if (!key) return null;
+  return printerStatus[key] ?? null;
 }
 
 function printerStatusLabel(s) {
@@ -57,14 +65,39 @@ function printerStatusPillHtml(printer) {
   return `<span class="printer-status-pill printer-status-${cls}">${escHtml(label)}</span>`;
 }
 
+function slotCardHtml(slot) {
+  const bg      = slot.color || 'var(--surface-2)';
+  const fg      = slot.color ? contrastColor(slot.color) : 'var(--text-muted)';
+  const active  = slot.active ? ' ams-slot-active' : '';
+  const kText   = slot.k != null ? `K ${slot.k.toFixed(3)}` : '';
+  const matText = slot.empty ? 'Empty' : (slot.material || '?');
+  return `<div class="ams-slot-wrap${slot.active ? ' ams-slot-wrap-active' : ''}">
+    <div class="ams-slot${active}" style="background:${bg};color:${fg}">
+      <div class="ams-slot-mat">${escHtml(matText)}</div>
+      ${kText ? `<div class="ams-slot-k">${escHtml(kText)}</div>` : ''}
+      <div class="ams-slot-id">${escHtml(slot.id)}</div>
+    </div>
+    ${slot.active ? '<div class="ams-slot-arrow"></div>' : ''}
+  </div>`;
+}
+
+// Return a light or dark hex based on perceived luminance of a hex bg color.
+function contrastColor(hex) {
+  const r = parseInt(hex.slice(1, 3), 16);
+  const g = parseInt(hex.slice(3, 5), 16);
+  const b = parseInt(hex.slice(5, 7), 16);
+  const lum = (0.299 * r + 0.587 * g + 0.114 * b) / 255;
+  return lum > 0.55 ? '#111' : '#fff';
+}
+
 function renderTopbarStatus() {
   const bar = document.getElementById('printer-status-bar');
   if (!bar) return;
 
-  const bambuPrinters = printers.filter(p => p.bambu_serial);
-  if (!bambuPrinters.length) { bar.innerHTML = ''; return; }
+  const connectedPrinters = printers.filter(p => printerStatusKey(p));
+  if (!connectedPrinters.length) { bar.innerHTML = ''; return; }
 
-  bar.innerHTML = bambuPrinters.map(p => {
+  bar.innerHTML = connectedPrinters.map(p => {
     const s    = getPrinterLiveStatus(p);
     const label = printerStatusLabel(s);
     const cls   = s ? s.stage.toLowerCase() : '';
@@ -81,13 +114,45 @@ function renderTopbarStatus() {
         popupBody += `<div class="spopup-bar-wrap"><div class="spopup-bar-fill" style="width:${s.progress}%"></div></div>`;
       }
       const details = [];
-      if (s.nozzle_temp != null) details.push(`🌡 ${Math.round(s.nozzle_temp)}°C`);
-      if (s.bed_temp    != null) details.push(`🛏 ${Math.round(s.bed_temp)}°C`);
+      if (s.nozzle_temp != null) {
+        const cur = Math.round(s.nozzle_temp);
+        const tgt = s.nozzle_target != null && s.nozzle_target > 0 ? Math.round(s.nozzle_target) : null;
+        details.push(`🌡 ${cur}°${tgt ? ` / ${tgt}°` : ''}`);
+      }
+      if (s.bed_temp != null) {
+        const cur = Math.round(s.bed_temp);
+        const tgt = s.bed_target != null && s.bed_target > 0 ? Math.round(s.bed_target) : null;
+        details.push(`🛏 ${cur}°${tgt ? ` / ${tgt}°` : ''}`);
+      }
       if (s.remaining   != null && s.remaining > 0) {
         const h = Math.floor(s.remaining / 60), m = s.remaining % 60;
         details.push(`⏱ ${h > 0 ? h + 'h ' : ''}${m}m left`);
       }
       if (details.length) popupBody += `<div class="spopup-details">${details.map(d => `<span>${escHtml(d)}</span>`).join('')}</div>`;
+
+      // Multi-color / AMS slots
+      if (s.slots && s.slots.length) {
+        // Group by AMS unit (A1–A4, B1–B4, …) vs Ext
+        const amsSlots = s.slots.filter(sl => sl.id !== 'Ext');
+        const extSlot  = s.slots.find(sl => sl.id === 'Ext');
+
+        if (amsSlots.length) {
+          // Group into rows of 4 (one AMS unit per row)
+          const rows = [];
+          for (let i = 0; i < amsSlots.length; i += 4) rows.push(amsSlots.slice(i, i + 4));
+          const slotsHtml = rows.map(row =>
+            `<div class="spopup-ams-row">${row.map(sl => slotCardHtml(sl)).join('')}</div>`
+          ).join('');
+          popupBody += `<div class="spopup-ams">${slotsHtml}</div>`;
+        }
+
+        if (extSlot) {
+          popupBody += `<div class="spopup-ams spopup-ams-ext">
+            <div class="spopup-ams-label">External</div>
+            <div class="spopup-ams-row">${slotCardHtml(extSlot)}</div>
+          </div>`;
+        }
+      }
     } else {
       popupBody += `<div class="spopup-stage spopup-dim">Waiting for data…</div>`;
     }
@@ -1493,11 +1558,23 @@ async function refreshPrinterList() {
     </div>`).join('');
 }
 
+function setBrand(brand) {
+  document.querySelectorAll('#brand-picker .brand-btn').forEach(btn => {
+    btn.classList.toggle('active', btn.dataset.brand === brand);
+  });
+  const isOther   = brand === 'other';
+  const isBambu   = brand === 'bambulab';
+  document.getElementById('printer-brand-other').classList.toggle('hidden', !isOther);
+  document.getElementById('printer-fields-bambulab').classList.toggle('hidden', !isBambu);
+}
+
 function resetPrinterForm() {
   editPrintId = null;
   document.getElementById('printer-name').value         = '';
   document.getElementById('printer-color').value        = PRESET_COLORS[printers.length % PRESET_COLORS.length];
   document.getElementById('printer-bambu-serial').value = '';
+  document.getElementById('printer-brand-other').value  = '';
+  setBrand('bambulab');
   document.getElementById('printer-form-title').textContent = 'Add Printer';
   document.getElementById('btn-save-printer').textContent   = 'Add Printer';
   document.getElementById('btn-cancel-printer').classList.add('hidden');
@@ -1510,6 +1587,14 @@ function editPrinter(id) {
   document.getElementById('printer-name').value         = p.name;
   document.getElementById('printer-color').value        = p.color;
   document.getElementById('printer-bambu-serial').value = p.bambu_serial || '';
+  const knownBrands = ['bambulab', 'prusa', 'creality', 'klipper', 'octoprint'];
+  const brand = p.brand || 'other';
+  if (knownBrands.includes(brand)) {
+    setBrand(brand);
+  } else {
+    setBrand('other');
+    document.getElementById('printer-brand-other').value = brand;
+  }
   document.getElementById('printer-form-title').textContent = 'Edit Printer';
   document.getElementById('btn-save-printer').textContent   = 'Save Changes';
   document.getElementById('btn-cancel-printer').classList.remove('hidden');
@@ -1519,11 +1604,17 @@ function editPrinter(id) {
 async function savePrinter() {
   const name         = document.getElementById('printer-name').value.trim();
   const color        = document.getElementById('printer-color').value;
-  const bambu_serial = document.getElementById('printer-bambu-serial').value.trim() || null;
+  const activeBrand  = document.querySelector('#brand-picker .brand-btn.active')?.dataset.brand || 'other';
+  const brand        = activeBrand === 'other'
+    ? (document.getElementById('printer-brand-other').value.trim() || 'other')
+    : activeBrand;
+  const bambu_serial = brand === 'bambulab'
+    ? (document.getElementById('printer-bambu-serial').value.trim() || null)
+    : null;
   if (!name) return alert('Please enter a printer name.');
 
-  if (editPrintId !== null) await api('PUT', `/api/printers/${editPrintId}`, { name, color, bambu_serial });
-  else                      await api('POST', '/api/printers', { name, color, bambu_serial });
+  if (editPrintId !== null) await api('PUT', `/api/printers/${editPrintId}`, { name, color, brand, bambu_serial });
+  else                      await api('POST', '/api/printers', { name, color, brand, bambu_serial });
 
   await refreshPrinterList();
   resetPrinterForm();
@@ -1907,6 +1998,10 @@ function setupListeners() {
   document.getElementById('btn-delete-job').addEventListener('click',  deleteJob);
   document.getElementById('btn-save-printer').addEventListener('click',  savePrinter);
   document.getElementById('btn-cancel-printer').addEventListener('click', resetPrinterForm);
+  document.getElementById('brand-picker').addEventListener('click', e => {
+    const btn = e.target.closest('.brand-btn');
+    if (btn) setBrand(btn.dataset.brand);
+  });
 
 
   // Duration ↔ end-date toggle

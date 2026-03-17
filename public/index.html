@@ -164,7 +164,7 @@
         <h3 id="printer-form-title">Add Printer</h3>
         <div class="form-group">
           <label for="printer-name">Name *</label>
-          <input type="text" id="printer-name" placeholder="e.g. BambuLab P1S">
+          <input type="text" id="printer-name" placeholder="e.g. My P1S">
         </div>
         <div class="form-group">
           <label for="printer-color">Color *</label>
@@ -173,8 +173,21 @@
             <div class="color-swatches" id="color-swatches"></div>
           </div>
         </div>
-        <div class="form-group" style="margin-bottom:0">
-          <label for="printer-bambu-serial">BambuLab Serial <span style="font-weight:400;color:var(--text-muted)">(optional — for live status)</span></label>
+        <div class="form-group">
+          <label>Brand</label>
+          <div class="brand-picker" id="brand-picker">
+            <button type="button" class="brand-btn active" data-brand="bambulab">BambuLab</button>
+            <button type="button" class="brand-btn" data-brand="prusa">Prusa</button>
+            <button type="button" class="brand-btn" data-brand="creality">Creality</button>
+            <button type="button" class="brand-btn" data-brand="klipper">Klipper</button>
+            <button type="button" class="brand-btn" data-brand="octoprint">OctoPrint</button>
+            <button type="button" class="brand-btn" data-brand="other">Other</button>
+          </div>
+          <input type="text" id="printer-brand-other" class="hidden" placeholder="Brand name" style="margin-top:6px" autocomplete="off">
+        </div>
+        <!-- BambuLab-specific fields -->
+        <div id="printer-fields-bambulab" class="form-group" style="margin-bottom:0">
+          <label for="printer-bambu-serial">Serial Number <span style="font-weight:400;color:var(--text-muted)">(optional — for live status)</span></label>
           <input type="text" id="printer-bambu-serial" class="form-input" placeholder="e.g. 01P00A123456789" autocomplete="off">
         </div>
       </div>

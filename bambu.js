@@ -23,6 +23,65 @@ function getSetting(key) {
   try { return JSON.parse(row.value); } catch { return row.value; }
 }
 
+// Convert a Bambu RGBA hex string (e.g. "FF69B4FF") to CSS hex (e.g. "#FF69B4").
+// Returns null for empty/unknown slots (all-zero or empty string).
+function bambuColorToCss(rgba) {
+  if (!rgba || rgba === '00000000' || rgba.length < 6) return null;
+  return '#' + rgba.slice(0, 6).toUpperCase();
+}
+
+// Parse the AMS object from a Bambu MQTT message into a generic slots array.
+// Each slot: { id, label, color, material, remainPct, k, active }
+function parseAms(p) {
+  const slots = [];
+  const activeTray = p.tray_now != null ? String(p.tray_now) : null;
+
+  const amsUnits = p.ams?.ams;
+  if (Array.isArray(amsUnits)) {
+    amsUnits.forEach(unit => {
+      const unitIdx = Number(unit.id ?? 0);
+      const unitLabel = String.fromCharCode(65 + unitIdx); // 0→A, 1→B, …
+      (unit.tray || []).forEach(tray => {
+        const slotIdx = Number(tray.id ?? 0);
+        const id      = `${unitLabel}${slotIdx + 1}`;  // A1, A2, B1, …
+        const color    = bambuColorToCss(tray.tray_color);
+        const material = tray.tray_type || null;
+        const isEmpty  = !material && !color;
+        slots.push({
+          id,
+          label:     isEmpty ? 'Empty' : material,
+          color:     color,
+          material:  material,
+          remainPct: tray.remain != null ? Number(tray.remain) : null,
+          k:         tray.k     != null ? Number(tray.k)      : null,
+          active:    activeTray === String(unitIdx * 4 + slotIdx),
+          empty:     isEmpty,
+        });
+      });
+    });
+  }
+
+  // External spool (vt_tray)
+  if (p.vt_tray != null) {
+    const vt = p.vt_tray;
+    const color    = bambuColorToCss(vt.tray_color);
+    const material = vt.tray_type || null;
+    const isEmpty  = !material && !color;
+    slots.push({
+      id:        'Ext',
+      label:     isEmpty ? '?' : material,
+      color:     color,
+      material:  material,
+      remainPct: vt.remain != null ? Number(vt.remain) : null,
+      k:         vt.k      != null ? Number(vt.k)      : null,
+      active:    activeTray === '254',
+      empty:     isEmpty,
+    });
+  }
+
+  return slots.length ? slots : null;
+}
+
 function parseMessage(serial, payload) {
   try {
     const msg = JSON.parse(payload.toString());
@@ -33,11 +92,19 @@ function parseMessage(serial, payload) {
     const prev = statusMap[serial] || {};
     const next = { ...prev, updated_at: new Date().toISOString() };
 
-    if (p.gcode_state              !== undefined) next.stage       = p.gcode_state;
-    if (p.mc_percent               !== undefined) next.progress    = p.mc_percent;
-    if (p.mc_remaining_time        !== undefined) next.remaining   = p.mc_remaining_time;
-    if (p.nozzle_temper            !== undefined) next.nozzle_temp = p.nozzle_temper;
-    if (p.bed_temper               !== undefined) next.bed_temp    = p.bed_temper;
+    if (p.gcode_state              !== undefined) next.stage          = p.gcode_state;
+    if (p.mc_percent               !== undefined) next.progress       = p.mc_percent;
+    if (p.mc_remaining_time        !== undefined) next.remaining      = p.mc_remaining_time;
+    if (p.nozzle_temper            !== undefined) next.nozzle_temp    = p.nozzle_temper;
+    if (p.nozzle_target_temper     !== undefined) next.nozzle_target  = p.nozzle_target_temper;
+    if (p.bed_temper               !== undefined) next.bed_temp       = p.bed_temper;
+    if (p.bed_target_temper        !== undefined) next.bed_target     = p.bed_target_temper;
+
+    // Multi-color / AMS info — only update when the field is present
+    if (p.ams !== undefined || p.vt_tray !== undefined) {
+      const slots = parseAms(p);
+      if (slots) next.slots = slots;
+    }
 
     // Infer RUNNING if we have remaining time but no explicit stage yet
     if (!next.stage && next.remaining > 0) next.stage = 'RUNNING';
