@@ -28,6 +28,7 @@ async function api(method, path, body) {
     headers: { 'Content-Type': 'application/json' },
     body: body ? JSON.stringify(body) : undefined,
   });
+  if (res.status === 401) { location.href = '/login'; return; }
   if (res.status === 404) return null;
   if (!res.ok) throw new Error(await res.text());
   return method === 'DELETE' ? null : res.json();

@@ -9,12 +9,20 @@ const app = express();
 app.use(express.json());
 
 // --- Session store ---
-const sessions = new Set();
+const SESSION_TTL = 7 * 24 * 60 * 60 * 1000; // 7 days in ms
+const sessions = new Map(); // token → expiresAt
 
 function parseCookieToken(req) {
   const raw = req.headers.cookie ?? '';
   const match = raw.match(/(?:^|;\s*)pf_session=([^;]+)/);
   return match ? match[1] : null;
+}
+
+function isValidSession(token) {
+  const expiresAt = sessions.get(token);
+  if (!expiresAt) return false;
+  if (Date.now() > expiresAt) { sessions.delete(token); return false; }
+  return true;
 }
 
 // --- Auth routes (bypass middleware) ---
@@ -26,8 +34,8 @@ app.post('/login', (req, res) => {
   const { username, password } = req.body ?? {};
   if (username === process.env.ADMIN_USER && password === process.env.ADMIN_PASS) {
     const token = crypto.randomBytes(32).toString('hex');
-    sessions.add(token);
-    res.setHeader('Set-Cookie', `pf_session=${token}; HttpOnly; Path=/`);
+    sessions.set(token, Date.now() + SESSION_TTL);
+    res.setHeader('Set-Cookie', `pf_session=${token}; HttpOnly; Path=/; Max-Age=604800`);
     return res.json({ ok: true });
   }
   res.status(401).json({ ok: false });
@@ -45,7 +53,7 @@ app.use((req, res, next) => {
   // Allow favicon through unauthenticated
   if (req.path === '/favicon.svg') return next();
   const token = parseCookieToken(req);
-  if (token && sessions.has(token)) return next();
+  if (token && isValidSession(token)) return next();
   if (req.path.startsWith('/api/')) return res.status(401).json({ error: 'Unauthorized' });
   res.redirect('/login');
 });
