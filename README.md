@@ -14,7 +14,7 @@ Built with Node.js + Express + SQLite. Protected by session-based cookie auth. D
 - Drag to move or resize jobs in day view
 - Queue panel — park jobs with no date yet, schedule them later
 - Closure periods (holidays, breaks) that block scheduling
-- Configurable status colors, default view, and queue auto-expand on startup
+- Configurable status colors, default view, queue auto-expand, and topbar display mode on startup
 - Dark / light / system theme (persisted per-browser via settings)
 - Session-based login page (no browser credential dialog)
 - Sign out link
@@ -180,7 +180,7 @@ Credentials are stored in the SQLite `settings` table (never in `.env`). You can
 
 ### What is shown
 
-The status bar at the top of the UI shows a chip for every live-connected printer. Hover over a chip to see:
+The status bar at the top of the UI shows chips for a curated subset of connected printers (pinned or currently active, depending on the topbar display mode in Settings). A permanent 🖨 button opens a full-status panel showing all connected printers at once — 3–4 cards per row on wide screens. Hover over a chip to see:
 
 | Info | Source |
 |------|--------|
@@ -366,6 +366,7 @@ Known keys:
 | `statusColors` | object | `{ Planned, Printing, "Post Printing", Done }` — hex strings |
 | `theme` | string | `system` / `light` / `dark` |
 | `queueAutoExpand` | boolean | Expand queue panel on startup if not empty |
+| `topbarMode` | string | `pinned` (show ⭐ pinned printers) / `active` (show only printing printers) |
 
 Values are JSON-serialised in the database, so `value` can be any JSON type.
 
@@ -398,7 +399,8 @@ CREATE TABLE printers (
   name         TEXT NOT NULL,
   color        TEXT NOT NULL,
   brand        TEXT NOT NULL DEFAULT 'other',
-  bambu_serial TEXT
+  bambu_serial TEXT,
+  pinned       INTEGER NOT NULL DEFAULT 0
 );
 
 CREATE TABLE jobs (

@@ -143,13 +143,12 @@ body {
   margin-left: 2px;
 }
 
-/* On wide screens: show chips in topbar, hide the panel button */
-.status-panel-toggle { display: none; }
+/* Printer status button — always visible */
+.status-panel-toggle { display: inline-flex; align-items: center; gap: 4px; }
 
-/* On narrow screens: hide topbar chips, show the panel button */
+/* On narrow screens: hide topbar chips (button remains visible) */
 @media (max-width: 760px) {
   .topbar-center { display: none; }
-  .status-panel-toggle { display: inline-flex !important; align-items: center; gap: 4px; }
 }
 
 /* Topbar ⋮ menu */
@@ -217,42 +216,20 @@ body {
 }
 .schip-wrap:hover .schip-popup { display: block; }
 
-/* Overflow chip — "+N more" button */
-.schip-overflow {
-  border-style: dashed;
-  color: var(--text-muted);
-  gap: 5px;
-  background: transparent;
+/* Printer status panel — multi-column on wide screens */
+@media (min-width: 761px) {
+  .printer-status-panel {
+    display: grid;
+    grid-template-columns: repeat(3, 1fr);
+  }
 }
-.schip-overflow:hover { color: var(--text); border-color: var(--primary); border-style: solid; }
-.overflow-dot {
-  width: 6px; height: 6px; border-radius: 50%;
-  background: #22c55e; flex-shrink: 0;
+@media (min-width: 1200px) {
+  .printer-status-panel {
+    grid-template-columns: repeat(4, 1fr);
+  }
 }
-
-/* Overflow panel — click-toggled, wider than regular popup */
-.schip-overflow-panel {
-  display: none;
-  pointer-events: auto;    /* panel itself is interactive */
-  min-width: 220px;
-  max-width: 300px;
-  max-height: 70vh;
-  overflow-y: auto;
-  left: auto;
-  right: 0;
-  transform: none;
-}
-.schip-overflow-panel.schip-overflow-open { display: block; }
-/* Suppress hover-open on the overflow wrap (it's click-only) */
-.schip-overflow-wrap:hover .schip-popup { display: none; }
-.schip-overflow-wrap .schip-overflow-panel.schip-overflow-open { display: block; }
-
-.overflow-card { padding: 2px 0 6px; }
-.overflow-card-header { display: flex; align-items: center; gap: 6px; margin-bottom: 6px; }
-.overflow-card-name { font-weight: 600; font-size: 13px; color: var(--text); flex: 1; }
-.overflow-card-body { padding-left: 14px; }
-.overflow-divider { border: none; border-top: 1px solid var(--border); margin: 8px 0; }
 .spopup-name { font-weight: 600; font-size: 13px; color: var(--text); margin-bottom: 3px; }
+.spopup-job-name { font-size: 11px; color: var(--text-muted); margin-bottom: 2px; white-space: nowrap; overflow: hidden; text-overflow: ellipsis; max-width: 180px; }
 .spopup-stage { font-size: 12px; color: var(--text); margin-bottom: 6px; }
 .spopup-dim { color: var(--text-muted) !important; }
 .spopup-bar-wrap { height: 4px; background: var(--border); border-radius: 2px; margin-bottom: 8px; overflow: hidden; }
@@ -835,6 +812,10 @@ input[type="color"] {
 }
 .btn-icon:hover { background: var(--border); color: var(--text); }
 .btn-icon.danger:hover { background: rgba(229,62,62,.12); color: var(--danger); }
+.pin-btn { opacity: 0.25; }
+.pin-btn:hover { opacity: 0.6; }
+.pin-btn.pinned { opacity: 1; color: #f59e0b; }
+.pin-btn.pinned:hover { opacity: 1; color: #f59e0b; }
 
 /* ======================== Today panel ======================== */
 .today-panel {

@@ -108,7 +108,9 @@ function printerDetailHtml(s) {
                     s.stage === 'PAUSE'   ? 'Paused' :
                     s.stage === 'FINISH'  ? 'Finished' :
                     s.stage === 'FAILED'  ? 'Error' : 'Idle';
-  let html = `<div class="spopup-stage">${stageText}</div>`;
+  let html = '';
+  if (s.job_name) html += `<div class="spopup-job-name">${escHtml(s.job_name)}</div>`;
+  html += `<div class="spopup-stage">${stageText}</div>`;
   if (s.stage === 'RUNNING' && s.progress > 0) {
     html += `<div class="spopup-bar-wrap"><div class="spopup-bar-fill" style="width:${s.progress}%"></div></div>`;
   }
@@ -149,90 +151,62 @@ function renderTopbarStatus() {
   if (!bar) return;
 
   const connectedPrinters = printers.filter(p => printerStatusKey(p));
-  if (!connectedPrinters.length) { bar.innerHTML = ''; renderStatusPanel(connectedPrinters); return; }
 
-  const visible  = connectedPrinters.slice(0, topbarLimit);
-  const overflow = connectedPrinters.slice(topbarLimit);
-
-  const chipHtml = visible.map(p => {
-    const s     = getPrinterLiveStatus(p);
-    const label = printerStatusLabel(s);
-    const cls   = s ? s.stage.toLowerCase() : '';
-    return `<div class="schip-wrap">
-      <div class="schip">
-        <span class="schip-dot" style="background:${p.color}"></span>
-        <span class="schip-name">${escHtml(p.name)}</span>
-        ${label ? `<span class="printer-status-pill printer-status-${cls}">${escHtml(label)}</span>` : ''}
-      </div>
-      <div class="schip-popup">
-        <div class="spopup-name">${escHtml(p.name)}</div>
-        ${printerDetailHtml(s)}
-      </div>
-    </div>`;
-  }).join('');
-
-  let overflowHtml = '';
-  if (overflow.length) {
-    const anyActive = overflow.some(p => getPrinterLiveStatus(p)?.stage === 'RUNNING');
-    overflowHtml = `<div class="schip-wrap schip-overflow-wrap" id="schip-overflow-wrap">
-      <button class="schip schip-overflow" id="btn-overflow-chips" aria-expanded="false">
-        ${anyActive ? `<span class="overflow-dot"></span>` : ''}
-        +${overflow.length} more
-      </button>
-      <div class="schip-popup schip-overflow-panel" id="schip-overflow-panel">
-        ${overflow.map(p => {
-          const s   = getPrinterLiveStatus(p);
-          const label = printerStatusLabel(s);
-          const cls   = s ? s.stage.toLowerCase() : '';
-          return `<div class="overflow-card">
-            <div class="overflow-card-header">
-              <span class="schip-dot" style="background:${p.color}"></span>
-              <span class="overflow-card-name">${escHtml(p.name)}</span>
-              ${label ? `<span class="printer-status-pill printer-status-${cls}">${escHtml(label)}</span>` : ''}
-            </div>
-            <div class="overflow-card-body">${printerDetailHtml(s)}</div>
-          </div>`;
-        }).join('<hr class="overflow-divider">')}
-      </div>
-    </div>`;
+  // Determine which printers to show as chips based on topbar mode
+  let visiblePrinters;
+  if (topbarModeCache === 'active') {
+    visiblePrinters = connectedPrinters
+      .filter(p => getPrinterLiveStatus(p)?.stage === 'RUNNING')
+      .slice(0, topbarLimit);
+  } else {
+    // pinned mode
+    visiblePrinters = connectedPrinters.filter(p => p.pinned);
   }
 
-  // Preserve open state before replacing DOM
-  const overflowWasOpen = document.getElementById('schip-overflow-panel')
-    ?.classList.contains('schip-overflow-open') ?? false;
+  const newIds = visiblePrinters.map(p => p.id).join(',');
 
-  bar.innerHTML = chipHtml + overflowHtml;
-
-  // Restore open state after re-render
-  if (overflowWasOpen) {
-    document.getElementById('schip-overflow-panel')?.classList.add('schip-overflow-open');
-    document.getElementById('btn-overflow-chips')?.setAttribute('aria-expanded', 'true');
+  if (newIds !== _lastTopbarIds) {
+    // Set of displayed printers changed — full rebuild
+    _lastTopbarIds = newIds;
+    bar.innerHTML = visiblePrinters.map(p => {
+      const s     = getPrinterLiveStatus(p);
+      const label = printerStatusLabel(s);
+      const cls   = s ? s.stage.toLowerCase() : '';
+      return `<div class="schip-wrap" data-pid="${p.id}">
+        <div class="schip">
+          <span class="schip-dot" style="background:${p.color}"></span>
+          <span class="schip-name">${escHtml(p.name)}</span>
+          <span class="schip-pill printer-status-pill printer-status-${cls}">${label ? escHtml(label) : ''}</span>
+        </div>
+        <div class="schip-popup">
+          <div class="spopup-name">${escHtml(p.name)}</div>
+          ${printerDetailHtml(s)}
+        </div>
+      </div>`;
+    }).join('');
+  } else {
+    // Same set — update only pill text/class and popup detail in-place (no flash)
+    visiblePrinters.forEach(p => {
+      const wrap = bar.querySelector(`.schip-wrap[data-pid="${p.id}"]`);
+      if (!wrap) return;
+      const s     = getPrinterLiveStatus(p);
+      const label = printerStatusLabel(s);
+      const cls   = s ? s.stage.toLowerCase() : '';
+      const pill  = wrap.querySelector('.schip-pill');
+      if (pill) {
+        pill.textContent = label || '';
+        pill.className   = `schip-pill printer-status-pill printer-status-${cls}`;
+      }
+      const popup = wrap.querySelector('.schip-popup');
+      if (popup) popup.innerHTML = `<div class="spopup-name">${escHtml(p.name)}</div>${printerDetailHtml(s)}`;
+    });
   }
-
-  // Wire up overflow toggle (re-attached after innerHTML replace)
-  const overflowBtn = document.getElementById('btn-overflow-chips');
-  if (overflowBtn) overflowBtn.addEventListener('click', e => { e.stopPropagation(); toggleOverflowPanel(); });
 
   renderStatusPanel(connectedPrinters);
 }
 
-function toggleOverflowPanel() {
-  const panel = document.getElementById('schip-overflow-panel');
-  const btn   = document.getElementById('btn-overflow-chips');
-  if (!panel) return;
-  const opening = panel.classList.toggle('schip-overflow-open');
-  btn.setAttribute('aria-expanded', String(opening));
-}
-
-// Close overflow panel when clicking anywhere outside it
+// Close topbar menu when clicking outside
 document.addEventListener('click', (e) => {
-  const wrap = document.getElementById('schip-overflow-wrap');
-  if (wrap && !wrap.contains(e.target)) {
-    const panel = document.getElementById('schip-overflow-panel');
-    const btn   = document.getElementById('btn-overflow-chips');
-    if (panel) { panel.classList.remove('schip-overflow-open'); btn?.setAttribute('aria-expanded', 'false'); }
-  }
-  // Close topbar menu when clicking outside
   const menuWrap = document.getElementById('topbar-menu-wrap');
   if (menuWrap && !menuWrap.contains(e.target)) {
     document.getElementById('topbar-menu')?.classList.remove('open');
@@ -247,7 +221,7 @@ function toggleTopbarMenu() {
   btn.setAttribute('aria-expanded', String(opening));
 }
 
-// Mobile status panel — one card per connected printer.
+// All-printers status panel.
 function renderStatusPanel(connectedPrinters) {
   const panel  = document.getElementById('printer-status-panel');
   const btn    = document.getElementById('btn-printer-status');
@@ -256,7 +230,7 @@ function renderStatusPanel(connectedPrinters) {
 
   const list = connectedPrinters ?? printers.filter(p => printerStatusKey(p));
 
-  // Show/hide the toggle button
+  // Hide the button only when there are no connected printers at all
   btn.classList.toggle('hidden', list.length === 0);
 
   // Badge dot: green if any printer is RUNNING, grey otherwise
@@ -303,8 +277,10 @@ let jobsCache       = {};   // id → job, updated on each full DB fetch
 let lastDragMoved  = false;
 let closures       = [];   // loaded before every render
 let editClosureId  = null;
-let printerStatus  = {};   // keyed by "brand:serial" — live status from SSE
-let topbarLimit    = 3;    // max chips shown before overflow; set from /api/config
+let printerStatus    = {};       // keyed by "brand:serial" — live status from SSE
+let topbarLimit      = 3;        // max chips shown; set from /api/config
+let topbarModeCache  = 'pinned'; // 'pinned' | 'active'; loaded on init
+let _lastTopbarIds   = null;     // comma-joined IDs of last rendered chips; null forces a rebuild
 
 // =============================================================================
 // Init
@@ -341,6 +317,10 @@ async function init() {
 
   await loadStatusColors();
   printers = await api('GET', '/api/printers');
+
+  // Load topbar display mode
+  const tmSetting = await api('GET', '/api/settings/topbarMode');
+  if (tmSetting?.value) topbarModeCache = tmSetting.value;
 
   // Connect to live Bambu printer status stream
   const sse = new EventSource('/api/printers/status/stream');
@@ -1676,15 +1656,35 @@ async function refreshPrinterList() {
     list.innerHTML = '<p style="color:var(--text-muted);font-size:13px;margin-bottom:4px">No printers yet.</p>';
     return;
   }
+  const pinnedCount = printers.filter(p => p.pinned).length;
   list.innerHTML = printers.map(p => `
     <div class="printer-item">
       <div class="printer-color-dot" style="background:${p.color}"></div>
       <span class="printer-item-name">${escHtml(p.name)}${printerStatusPillHtml(p)}</span>
       <div class="printer-item-actions">
+        <button class="btn-icon pin-btn${p.pinned ? ' pinned' : ''}" onclick="togglePrinterPinned(${p.id}, ${p.pinned ? 0 : 1})" title="${p.pinned ? 'Unpin from topbar' : (pinnedCount >= topbarLimit ? `Max ${topbarLimit} pinned` : 'Pin to topbar')}">⭐</button>
         <button class="btn-icon" onclick="editPrinter(${p.id})" title="Edit">✏️</button>
         <button class="btn-icon danger" onclick="deletePrinter(${p.id})" title="Delete">🗑</button>
       </div>
     </div>`).join('');
+}
+
+async function togglePrinterPinned(id, newVal) {
+  const p = printers.find(x => x.id === id);
+  if (!p) return;
+  if (newVal === 1 && printers.filter(x => x.pinned).length >= topbarLimit) {
+    const hint = document.getElementById('printers-list');
+    const msg = document.createElement('p');
+    msg.style.cssText = 'color:var(--danger);font-size:12px;margin:4px 0 0';
+    msg.textContent = `Max ${topbarLimit} printers can be pinned. Unpin one first.`;
+    hint.prepend(msg);
+    setTimeout(() => msg.remove(), 3000);
+    return;
+  }
+  await api('PUT', `/api/printers/${id}`, { ...p, pinned: newVal });
+  await refreshPrinterList();
+  _lastTopbarIds = null; // force chip rebuild
+  renderTopbarStatus();
 }
 
 function setBrand(brand) {
@@ -1742,8 +1742,9 @@ async function savePrinter() {
     : null;
   if (!name) return alert('Please enter a printer name.');
 
-  if (editPrintId !== null) await api('PUT', `/api/printers/${editPrintId}`, { name, color, brand, bambu_serial });
-  else                      await api('POST', '/api/printers', { name, color, brand, bambu_serial });
+  const pinned = editPrintId !== null ? (printers.find(p => p.id === editPrintId)?.pinned ?? 0) : 0;
+  if (editPrintId !== null) await api('PUT', `/api/printers/${editPrintId}`, { name, color, brand, bambu_serial, pinned });
+  else                      await api('POST', '/api/printers', { name, color, brand, bambu_serial, pinned: 0 });
 
   await refreshPrinterList();
   resetPrinterForm();
@@ -1863,6 +1864,10 @@ async function openSettingsModal() {
   const cb = document.getElementById('setting-queue-auto-expand');
   if (cb) cb.checked = qae?.value === true;
 
+  const tm = await api('GET', '/api/settings/topbarMode');
+  const tmRadio = document.querySelector(`input[name="topbar-mode"][value="${tm?.value ?? 'pinned'}"]`);
+  if (tmRadio) tmRadio.checked = true;
+
   // BambuLab connection state
   await renderBambuConnectionState();
 
@@ -1965,8 +1970,14 @@ async function saveSettings() {
   const cb = document.getElementById('setting-queue-auto-expand');
   await api('PUT', '/api/settings/queueAutoExpand', { value: cb?.checked === true });
 
+  const topbarMode = document.querySelector('input[name="topbar-mode"]:checked')?.value ?? 'pinned';
+  await api('PUT', '/api/settings/topbarMode', { value: topbarMode });
+  topbarModeCache = topbarMode;
+  _lastTopbarIds  = null; // force chip rebuild after mode change
+
   closeModal('settings-modal');
   renderCalendar();
+  renderTopbarStatus();
 }
 
 // =============================================================================

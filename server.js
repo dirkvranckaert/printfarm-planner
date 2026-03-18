@@ -105,16 +105,16 @@ app.get('/api/printers', (req, res) => {
   res.json(db.prepare('SELECT * FROM printers').all());
 });
 app.post('/api/printers', (req, res) => {
-  const { name, color, brand, bambu_serial } = req.body;
-  const result = db.prepare('INSERT INTO printers (name, color, brand, bambu_serial) VALUES (?, ?, ?, ?)').run(name, color, brand || 'other', bambu_serial || null);
+  const { name, color, brand, bambu_serial, pinned } = req.body;
+  const result = db.prepare('INSERT INTO printers (name, color, brand, bambu_serial, pinned) VALUES (?, ?, ?, ?, ?)').run(name, color, brand || 'other', bambu_serial || null, pinned ? 1 : 0);
   brands.subscribeForPrinter({ brand, bambu_serial });
-  res.status(201).json({ id: result.lastInsertRowid, name, color, brand: brand || 'other', bambu_serial: bambu_serial || null });
+  res.status(201).json({ id: result.lastInsertRowid, name, color, brand: brand || 'other', bambu_serial: bambu_serial || null, pinned: pinned ? 1 : 0 });
 });
 app.put('/api/printers/:id', (req, res) => {
-  const { name, color, brand, bambu_serial } = req.body;
-  db.prepare('UPDATE printers SET name=?, color=?, brand=?, bambu_serial=? WHERE id=?').run(name, color, brand || 'other', bambu_serial || null, req.params.id);
+  const { name, color, brand, bambu_serial, pinned } = req.body;
+  db.prepare('UPDATE printers SET name=?, color=?, brand=?, bambu_serial=?, pinned=? WHERE id=?').run(name, color, brand || 'other', bambu_serial || null, pinned ? 1 : 0, req.params.id);
   brands.subscribeForPrinter({ brand, bambu_serial });
-  res.json({ id: Number(req.params.id), name, color, brand: brand || 'other', bambu_serial: bambu_serial || null });
+  res.json({ id: Number(req.params.id), name, color, brand: brand || 'other', bambu_serial: bambu_serial || null, pinned: pinned ? 1 : 0 });
 });
 app.delete('/api/printers/:id', (req, res) => {
   db.prepare('DELETE FROM jobs WHERE printerId=?').run(req.params.id);

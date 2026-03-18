@@ -54,5 +54,8 @@ if (!printerCols.some(c => c.name === 'bambu_serial')) {
 if (!printerCols.some(c => c.name === 'brand')) {
   db.exec("ALTER TABLE printers ADD COLUMN brand TEXT NOT NULL DEFAULT 'other';");
 }
+if (!printerCols.some(c => c.name === 'pinned')) {
+  db.exec('ALTER TABLE printers ADD COLUMN pinned INTEGER NOT NULL DEFAULT 0;');
+}
 
 module.exports = db;

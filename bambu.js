@@ -102,6 +102,7 @@ function parseMessage(serial, payload) {
     if (p.nozzle_target_temper     !== undefined) next.nozzle_target  = p.nozzle_target_temper;
     if (p.bed_temper               !== undefined) next.bed_temp       = p.bed_temper;
     if (p.bed_target_temper        !== undefined) next.bed_target     = p.bed_target_temper;
+    if (p.subtask_name             !== undefined) next.job_name       = p.subtask_name;
 
     // Multi-color / AMS info — only update when the field is present
     if (p.ams !== undefined || p.vt_tray !== undefined) {

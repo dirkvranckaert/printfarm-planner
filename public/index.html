@@ -18,7 +18,7 @@
     <div class="topbar-center" id="printer-status-bar"></div>
     <div class="topbar-right">
       <!-- Shown only on small screens when the topbar chips are hidden -->
-      <button id="btn-printer-status" class="btn btn-secondary status-panel-toggle hidden" title="Printer status" aria-expanded="false">
+      <button id="btn-printer-status" class="btn btn-secondary status-panel-toggle" title="All printers" aria-expanded="false">
         🖨 <span id="printer-status-badge"></span>
       </button>
       <button id="btn-add-job" class="btn btn-primary">+ Job</button>
@@ -268,6 +268,15 @@
             <input type="checkbox" id="setting-queue-auto-expand">
             <span>Expand queue panel on startup if not empty</span>
           </label>
+        </div>
+        <hr class="divider">
+        <div class="form-group" style="margin-bottom:0">
+          <label>Topbar printer display</label>
+          <div class="radio-group" style="margin-top:6px">
+            <label class="radio-label"><input type="radio" name="topbar-mode" value="pinned"> ⭐ Pinned printers</label>
+            <label class="radio-label"><input type="radio" name="topbar-mode" value="active"> 🖨 Active (printing) only</label>
+          </div>
+          <p id="topbar-mode-pin-hint" style="font-size:12px;color:var(--text-muted);margin:4px 0 0">Pin printers via ⭐ in ⚙ Printers to select which appear in the topbar.</p>
         </div>
         <hr class="divider">
         <div class="form-group" style="margin-bottom:0">
