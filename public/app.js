@@ -337,6 +337,7 @@ async function init() {
   renderCalendar();
   renderTopbarStatus();
   setupListeners();
+  setInterval(updateNowLine, 60_000);
   if (printers.length === 0) openPrintersModal();
   else if (view === 'day') setTimeout(scrollToNow, 80);
 }
@@ -456,13 +457,18 @@ function escHtml(s) {
 // =============================================================================
 // Conflict detection
 // =============================================================================
-function detectConflicts(jobs) {
+function detectConflicts(jobs, printerMap) {
   const ids = new Set();
   for (let i = 0; i < jobs.length; i++) {
     for (let j = i + 1; j < jobs.length; j++) {
       if (jobs[i].printerId !== jobs[j].printerId) continue;
-      if (new Date(jobs[i].start) < new Date(jobs[j].end) &&
-          new Date(jobs[i].end)   > new Date(jobs[j].start)) {
+      const pi = printerMap?.[jobs[i].printerId];
+      const pj = printerMap?.[jobs[j].printerId];
+      const iStart = new Date(jobs[i].start).getTime() - (pi?.warm_up_mins  ?? 0) * 60_000;
+      const iEnd   = new Date(jobs[i].end).getTime()   + (pi?.cool_down_mins ?? 0) * 60_000;
+      const jStart = new Date(jobs[j].start).getTime() - (pj?.warm_up_mins  ?? 0) * 60_000;
+      const jEnd   = new Date(jobs[j].end).getTime()   + (pj?.cool_down_mins ?? 0) * 60_000;
+      if (iStart < jEnd && iEnd > jStart) {
         ids.add(jobs[i].id);
         ids.add(jobs[j].id);
       }
@@ -697,8 +703,9 @@ async function renderDay() {
   // Populate jobs cache
   allJobs.forEach(j => { jobsCache[j.id] = j; });
 
-  // Detect conflicts across scheduled jobs only
-  const conflictIds = detectConflicts(scheduledJobs);
+  // Detect conflicts across scheduled jobs only (buffer times included)
+  const printerMap  = Object.fromEntries(printers.map(p => [p.id, p]));
+  const conflictIds = detectConflicts(scheduledJobs, printerMap);
 
   const dayClosure = closureForDay(navDate);
 
@@ -758,7 +765,19 @@ async function renderDay() {
       const conflictCls  = isConflict ? ' job-conflict' : '';
       const conflictIcon = isConflict ? '<span class="job-conflict-icon" title="Scheduling conflict">⚠</span>' : '';
 
-      const bgAlpha = isDarkMode() ? 0.5 : 0.15;
+      const bgAlpha  = isDarkMode() ? 0.5 : 0.15;
+      const warmUp   = p.warm_up_mins   ?? 0;
+      const coolDown = p.cool_down_mins ?? 0;
+
+      // Warm-up buffer block (before job)
+      if (warmUp > 0) {
+        const bTop = Math.max(0, topPx - warmUp);
+        const bHt  = topPx - bTop;
+        if (bHt > 0) {
+          h += `<div class="buffer-block" style="top:${bTop}px;height:${bHt}px">${bHt >= 10 ? '<span class="buffer-label">Warm-up</span>' : ''}</div>`;
+        }
+      }
+
       h += `<div class="job-block${conflictCls}" data-job-id="${job.id}"
               data-job-start="${job.start}" data-job-end="${job.end}"
               style="top:${topPx}px; height:${htPx}px;
@@ -773,6 +792,15 @@ async function renderDay() {
       if (job.customerName) h += `<span class="job-block-customer">${escHtml(job.customerName)}</span>`;
       h += '<div class="job-resize-handle"></div>';
       h += '</div>';
+
+      // Cool-down buffer block (after job)
+      if (coolDown > 0) {
+        const bTop = topPx + htPx;
+        const bHt  = Math.min(coolDown, DAY_MINS - bTop);
+        if (bHt > 0) {
+          h += `<div class="buffer-block" style="top:${bTop}px;height:${bHt}px">${bHt >= 10 ? '<span class="buffer-label">Cool-down</span>' : ''}</div>`;
+        }
+      }
     });
 
     h += '</div>'; // .day-printer-col
@@ -1089,6 +1117,14 @@ function scrollToNow() {
   if (!scroll) return;
   const now = new Date();
   scroll.scrollTop = Math.max(0, now.getHours() * HOUR_HEIGHT - 120);
+}
+
+function updateNowLine() {
+  const lines = document.querySelectorAll('.now-line');
+  if (!lines.length) return;
+  const now   = new Date();
+  const nowPx = now.getHours() * 60 + now.getMinutes();
+  lines.forEach(line => { line.style.top = `${nowPx}px`; });
 }
 
 // =============================================================================
@@ -1704,6 +1740,8 @@ function resetPrinterForm() {
   document.getElementById('printer-color').value        = PRESET_COLORS[printers.length % PRESET_COLORS.length];
   document.getElementById('printer-bambu-serial').value = '';
   document.getElementById('printer-brand-other').value  = '';
+  document.getElementById('printer-warm-up').value      = '5';
+  document.getElementById('printer-cool-down').value    = '15';
   setBrand('bambulab');
   document.getElementById('printer-form-title').textContent = 'Add Printer';
   document.getElementById('btn-save-printer').textContent   = 'Add Printer';
@@ -1725,6 +1763,8 @@ function editPrinter(id) {
     setBrand('other');
     document.getElementById('printer-brand-other').value = brand;
   }
+  document.getElementById('printer-warm-up').value      = p.warm_up_mins  ?? 5;
+  document.getElementById('printer-cool-down').value    = p.cool_down_mins ?? 15;
   document.getElementById('printer-form-title').textContent = 'Edit Printer';
   document.getElementById('btn-save-printer').textContent   = 'Save Changes';
   document.getElementById('btn-cancel-printer').classList.remove('hidden');
@@ -1741,11 +1781,13 @@ async function savePrinter() {
   const bambu_serial = brand === 'bambulab'
     ? (document.getElementById('printer-bambu-serial').value.trim() || null)
     : null;
+  const warm_up_mins   = parseInt(document.getElementById('printer-warm-up').value,  10) || 0;
+  const cool_down_mins = parseInt(document.getElementById('printer-cool-down').value, 10) || 0;
   if (!name) return alert('Please enter a printer name.');
 
   const pinned = editPrintId !== null ? (printers.find(p => p.id === editPrintId)?.pinned ?? 0) : 0;
-  if (editPrintId !== null) await api('PUT', `/api/printers/${editPrintId}`, { name, color, brand, bambu_serial, pinned });
-  else                      await api('POST', '/api/printers', { name, color, brand, bambu_serial, pinned: 0 });
+  if (editPrintId !== null) await api('PUT', `/api/printers/${editPrintId}`, { name, color, brand, bambu_serial, pinned, warm_up_mins, cool_down_mins });
+  else                      await api('POST', '/api/printers', { name, color, brand, bambu_serial, pinned: 0, warm_up_mins, cool_down_mins });
 
   await refreshPrinterList();
   resetPrinterForm();

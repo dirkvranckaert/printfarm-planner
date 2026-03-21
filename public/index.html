@@ -199,9 +199,22 @@
           <input type="text" id="printer-brand-other" class="hidden" placeholder="Brand name" style="margin-top:6px" autocomplete="off">
         </div>
         <!-- BambuLab-specific fields -->
-        <div id="printer-fields-bambulab" class="form-group" style="margin-bottom:0">
+        <div id="printer-fields-bambulab" class="form-group">
           <label for="printer-bambu-serial">Serial Number <span style="font-weight:400;color:var(--text-muted)">(optional — for live status)</span></label>
           <input type="text" id="printer-bambu-serial" class="form-input" placeholder="e.g. 01P00A123456789" autocomplete="off">
+        </div>
+        <div class="form-group" style="margin-bottom:0">
+          <label>Buffer time <span style="font-weight:400;color:var(--text-muted)">(blocked on calendar around each job)</span></label>
+          <div class="form-row" style="margin-top:6px">
+            <div class="form-group" style="margin-bottom:0">
+              <label for="printer-warm-up">Warm-up (min)</label>
+              <input type="number" id="printer-warm-up" min="0" value="5" style="width:100%">
+            </div>
+            <div class="form-group" style="margin-bottom:0">
+              <label for="printer-cool-down">Cool-down (min)</label>
+              <input type="number" id="printer-cool-down" min="0" value="15" style="width:100%">
+            </div>
+          </div>
         </div>
       </div>
       <div class="modal-footer">

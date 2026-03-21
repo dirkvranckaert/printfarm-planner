@@ -57,5 +57,11 @@ if (!printerCols.some(c => c.name === 'brand')) {
 if (!printerCols.some(c => c.name === 'pinned')) {
   db.exec('ALTER TABLE printers ADD COLUMN pinned INTEGER NOT NULL DEFAULT 0;');
 }
+if (!printerCols.some(c => c.name === 'warm_up_mins')) {
+  db.exec('ALTER TABLE printers ADD COLUMN warm_up_mins INTEGER NOT NULL DEFAULT 5;');
+}
+if (!printerCols.some(c => c.name === 'cool_down_mins')) {
+  db.exec('ALTER TABLE printers ADD COLUMN cool_down_mins INTEGER NOT NULL DEFAULT 15;');
+}
 
 module.exports = db;

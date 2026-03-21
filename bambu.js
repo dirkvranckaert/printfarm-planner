@@ -10,7 +10,14 @@ try { mqtt = require('mqtt'); } catch {
 }
 
 const statusMap = {};       // { [serial]: { stage, progress, remaining, nozzle_temp, bed_temp, updated_at } }
-const AMS_DEBUG = process.env.BAMBU_AMS_DEBUG === 'true';
+const AMS_DEBUG        = process.env.BAMBU_AMS_DEBUG === 'true';
+const AMS_DEBUG_SERIAL = process.env.BAMBU_AMS_DEBUG_SERIAL || null; // e.g. "01P00A123456789"
+
+function dbg(serial, ...args) {
+  if (!AMS_DEBUG) return;
+  if (AMS_DEBUG_SERIAL && serial !== AMS_DEBUG_SERIAL) return;
+  console.log(`[Bambu:${serial}]`, ...args);
+}
 const updateCallbacks = [];
 
 let mqttClient = null;
@@ -89,7 +96,12 @@ function parseMessage(serial, payload) {
   try {
     const msg = JSON.parse(payload.toString());
     const p = msg.print;
+    dbg(serial, '← raw print keys:', p ? Object.keys(p).join(', ') : '(no print object)');
     if (!p) return;
+    if (AMS_DEBUG && (!AMS_DEBUG_SERIAL || serial === AMS_DEBUG_SERIAL) &&
+        (p.ams !== undefined || p.vt_tray !== undefined || p.tray_now !== undefined)) {
+      console.log(`[Bambu:${serial}] ← full print payload:`, JSON.stringify(p, null, 2));
+    }
 
     // Merge incremental fields into existing entry (Bambu sends partial updates)
     const prev = statusMap[serial] || {};
@@ -106,14 +118,13 @@ function parseMessage(serial, payload) {
 
     // Multi-color / AMS info — only update when the field is present
     if (p.ams !== undefined || p.vt_tray !== undefined) {
-      if (AMS_DEBUG) console.log(`[Bambu:${serial}] AMS print_info — tray_now:`, p.tray_now,
+      dbg(serial, 'AMS print_info — tray_now:', p.tray_now,
         '| ams.tray_now:', p.ams?.tray_now,
         '| ams_status:', p.ams_status,
         '| ams:', JSON.stringify(p.ams),
         '| vt_tray:', JSON.stringify(p.vt_tray));
       const slots = parseAms(p);
-      if (AMS_DEBUG) console.log(`[Bambu:${serial}] parsed slots:`,
-        JSON.stringify(slots?.map(s => ({ id: s.id, active: s.active, material: s.material }))));
+      dbg(serial, 'parsed slots:', JSON.stringify(slots?.map(s => ({ id: s.id, active: s.active, material: s.material }))));
       if (slots) next.slots = slots;
     }
 
@@ -176,6 +187,20 @@ async function connect(db) {
   mqttClient.on('offline', () => {
     console.log('[Bambu] MQTT offline — will reconnect...');
   });
+
+  // Periodically re-request full status for all subscribed printers.
+  // Covers mid-print server restarts and printers that miss the initial pushall.
+  const POLL_INTERVAL = 60_000; // ms
+  const pollTimer = setInterval(() => {
+    if (AMS_DEBUG && (!AMS_DEBUG_SERIAL || subscribedSerials.has(AMS_DEBUG_SERIAL))) {
+      console.log(`[Bambu] poll tick — requesting pushall for ${AMS_DEBUG_SERIAL ?? `${subscribedSerials.size} printer(s)`}`);
+    }
+    for (const serial of subscribedSerials) {
+      requestPushAll(serial);
+    }
+  }, POLL_INTERVAL);
+  // Clean up timer when the client is explicitly ended
+  mqttClient.on('end', () => clearInterval(pollTimer));
 }
 
 function disconnect() {
@@ -205,6 +230,15 @@ function subscribeAll(db) {
   }
 }
 
+function requestPushAll(serial) {
+  if (!mqttClient || !mqttClient.connected) return;
+  dbg(serial, '→ sending pushall');
+  mqttClient.publish(
+    `device/${serial}/request`,
+    JSON.stringify({ pushing: { command: 'pushall', push_target: 1, sequence_id: '1' } })
+  );
+}
+
 function subscribeSerial(serial) {
   if (!mqttClient || subscribedSerials.has(serial)) return;
   mqttClient.subscribe(`device/${serial}/report`, err => {
@@ -213,11 +247,8 @@ function subscribeSerial(serial) {
     } else {
       subscribedSerials.add(serial);
       console.log(`[Bambu] Subscribed to ${serial}`);
-      // Request a full status dump so we get gcode_state + all fields immediately
-      mqttClient.publish(
-        `device/${serial}/request`,
-        JSON.stringify({ pushing: { command: 'pushall', push_target: 1, sequence_id: '1' } })
-      );
+      // Request a full status dump immediately so we get current state (e.g. mid-print after restart)
+      requestPushAll(serial);
     }
   });
 }
