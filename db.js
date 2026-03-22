@@ -36,6 +36,10 @@ db.exec(`
     key   TEXT PRIMARY KEY,
     value TEXT
   );
+  CREATE TABLE IF NOT EXISTS sessions (
+    token      TEXT PRIMARY KEY,
+    expires_at INTEGER NOT NULL
+  );
 `);
 
 // Migrations: add columns if not present

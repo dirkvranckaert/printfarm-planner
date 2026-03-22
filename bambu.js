@@ -42,21 +42,43 @@ function bambuColorToCss(rgba) {
 // Each slot: { id, label, color, material, remainPct, k, active }
 function parseAms(p) {
   const slots = [];
-  const activeTray = p.ams?.tray_now != null ? String(p.ams.tray_now)
-                   : p.tray_now     != null ? String(p.tray_now)
-                   : null;
+
+  // tray_now is a virtual slot index on multi-AMS printers (H2C).
+  // The physical mapping is in p.mapping: mapping[virtualIdx] = (physicalAmsId << 8) | physicalSlotId
+  const trayNowRaw = p.ams?.tray_now ?? p.tray_now;
+  const trayNow    = trayNowRaw != null ? parseInt(String(trayNowRaw), 10) : null;
+  const mapping    = Array.isArray(p.mapping) ? p.mapping : null;
+
+  let activeAmsId = null, activeSlotId = null;
+  if (mapping && trayNow != null && mapping[trayNow] != null) {
+    // Physical mapping available (H2C / AMS Lite setup)
+    const val    = mapping[trayNow];
+    activeAmsId  = (val >> 8) & 0xFF;
+    activeSlotId = val & 0xFF;
+    if (AMS_DEBUG) console.log(`[Bambu] active slot via mapping: virtualTray=${trayNow} → amsId=${activeAmsId} slot=${activeSlotId}`);
+  }
 
   const amsUnits = p.ams?.ams;
   if (Array.isArray(amsUnits)) {
-    amsUnits.forEach(unit => {
-      const unitIdx = Number(unit.id ?? 0);
-      const unitLabel = String.fromCharCode(65 + unitIdx); // 0→A, 1→B, …
+    amsUnits.forEach((unit, arrayIdx) => {
+      const unitId    = Number(unit.id ?? 0);
+      const unitLabel = String.fromCharCode(65 + arrayIdx); // use array position: 0→A, 1→B, …
       (unit.tray || []).forEach(tray => {
         const slotIdx = Number(tray.id ?? 0);
         const id      = `${unitLabel}${slotIdx + 1}`;  // A1, A2, B1, …
         const color    = bambuColorToCss(tray.tray_color);
         const material = tray.tray_type || null;
         const isEmpty  = !material && !color;
+
+        let active;
+        if (activeAmsId != null) {
+          // Physical mapping: match by the unit's own id field and slot id
+          active = unitId === activeAmsId && slotIdx === activeSlotId;
+        } else {
+          // Fallback for single-AMS printers: tray_now is the global index
+          active = trayNow != null && trayNow === unitId * 4 + slotIdx;
+        }
+
         slots.push({
           id,
           label:     isEmpty ? 'Empty' : material,
@@ -64,7 +86,7 @@ function parseAms(p) {
           material:  material,
           remainPct: tray.remain != null ? Number(tray.remain) : null,
           k:         tray.k     != null ? Number(tray.k)      : null,
-          active:    activeTray === String(unitIdx * 4 + slotIdx),
+          active,
           empty:     isEmpty,
         });
       });
@@ -84,7 +106,7 @@ function parseAms(p) {
       material:  material,
       remainPct: vt.remain != null ? Number(vt.remain) : null,
       k:         vt.k      != null ? Number(vt.k)      : null,
-      active:    activeTray === '254',
+      active:    trayNow === 254,
       empty:     isEmpty,
     });
   }
@@ -170,6 +192,10 @@ async function connect(db) {
   mqttClient.on('connect', () => {
     console.log('[Bambu] MQTT connected');
     subscribeAll(db);
+    // Second pushall after 5s — catches printers that miss the immediate request
+    setTimeout(() => {
+      for (const serial of subscribedSerials) requestPushAll(serial);
+    }, 5000);
   });
 
   mqttClient.on('message', (topic, payload) => {

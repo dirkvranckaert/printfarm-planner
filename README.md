@@ -19,7 +19,8 @@ Built with Node.js + Express + SQLite. Protected by session-based cookie auth. D
 - Session-based login page (no browser credential dialog)
 - Sign out link
 - **Live printer status** via brand integrations — progress %, temperatures, remaining time
-- **Multi-color / AMS info** — loaded filament slots shown in the status hover popup
+- **Multi-color / AMS info** — loaded filament slots shown in the status hover popup; supports single-AMS (P1S) and multi-AMS (H2C) setups
+- **Per-printer buffer times** — configurable warm-up and cool-down periods shown as cross-hatched blocks in day view; included in conflict detection
 
 ---
 
@@ -83,6 +84,7 @@ ADMIN_PASS=yourpassword
 PORT=3000
 TOPBAR_PRINTER_LIMIT=3
 BAMBU_AMS_DEBUG=false
+BAMBU_AMS_DEBUG_SERIAL=   # optional: limit AMS debug logs to one printer serial
 ```
 
 Start the server:
@@ -319,8 +321,8 @@ All endpoints (except `GET /login`, `POST /login`, `GET /logout`, and `GET /favi
 | Method | Path | Description |
 |--------|------|-------------|
 | GET | `/api/printers` | List all printers |
-| POST | `/api/printers` | Create printer — body: `{ name, color, brand, bambu_serial? }` |
-| PUT | `/api/printers/:id` | Replace printer — body: `{ name, color, brand, bambu_serial? }` |
+| POST | `/api/printers` | Create printer — body: `{ name, color, brand, bambu_serial?, warm_up_mins?, cool_down_mins? }` |
+| PUT | `/api/printers/:id` | Replace printer — body: `{ name, color, brand, bambu_serial?, warm_up_mins?, cool_down_mins? }` |
 | DELETE | `/api/printers/:id` | Delete printer and all its jobs |
 
 `brand` is a slug string. Known values: `bambulab`, `prusa`, `creality`, `klipper`, `octoprint`, `other`. `bambu_serial` is only relevant when `brand === 'bambulab'`.
@@ -395,12 +397,14 @@ Each brand module mounts its own router at `/api/brands/{id}/`. Currently:
 
 ```sql
 CREATE TABLE printers (
-  id           INTEGER PRIMARY KEY AUTOINCREMENT,
-  name         TEXT NOT NULL,
-  color        TEXT NOT NULL,
-  brand        TEXT NOT NULL DEFAULT 'other',
-  bambu_serial TEXT,
-  pinned       INTEGER NOT NULL DEFAULT 0
+  id             INTEGER PRIMARY KEY AUTOINCREMENT,
+  name           TEXT NOT NULL,
+  color          TEXT NOT NULL,
+  brand          TEXT NOT NULL DEFAULT 'other',
+  bambu_serial   TEXT,
+  pinned         INTEGER NOT NULL DEFAULT 0,
+  warm_up_mins   INTEGER NOT NULL DEFAULT 5,
+  cool_down_mins INTEGER NOT NULL DEFAULT 15
 );
 
 CREATE TABLE jobs (
@@ -430,9 +434,14 @@ CREATE TABLE settings (
   key   TEXT PRIMARY KEY,
   value TEXT
 );
+
+CREATE TABLE sessions (
+  token      TEXT PRIMARY KEY,
+  expires_at INTEGER NOT NULL
+);
 ```
 
-Schema is applied via `CREATE TABLE IF NOT EXISTS` in `db.js` on every startup. Missing columns (`brand`, `bambu_serial`, `queued`, `durationMins`) are added via `ALTER TABLE` migrations at startup.
+Schema is applied via `CREATE TABLE IF NOT EXISTS` in `db.js` on every startup. Missing columns are added via `ALTER TABLE` migrations at startup.
 
 ---
 
@@ -449,6 +458,7 @@ Railway is the recommended host: it supports persistent volumes (needed for the 
    - `PORT` is set automatically by Railway; `server.js` reads it via `process.env.PORT || 3000`
    - `TOPBAR_PRINTER_LIMIT` — max printer chips shown in the topbar before collapsing into "+N more" (default: `3`)
    - `BAMBU_AMS_DEBUG` — set to `true` to log raw AMS MQTT payloads and parsed slot results (default: `false`)
+   - `BAMBU_AMS_DEBUG_SERIAL` — optional: limit AMS debug logs to a single printer serial
 5. Deploy. Railway will run `npm start` → `node server.js`.
 
 No Bambu credentials go in `.env` — configure the BambuLab connection through the Settings UI after deployment.
@@ -467,7 +477,7 @@ No Bambu credentials go in `.env` — configure the BambuLab connection through 
 
 - **No build step.** Edit files in `public/` and reload the browser.
 - **Frontend ↔ API contract.** All data access in `app.js` goes through the `api(method, path, body)` helper at the top of the file.
-- **Auth.** On login, the server generates a 32-byte random token, stores it in an in-memory `Set`, and sets an `HttpOnly` cookie (`pf_session`). Sessions are lost on server restart — users are redirected to login again.
+- **Auth.** On login, the server generates a 32-byte random token, stores it in the SQLite `sessions` table (TTL: 7 days), and sets an `HttpOnly` cookie (`pf_session`). Sessions survive server restarts.
 - **Theme.** The `theme` setting is loaded at startup in `app.js` and applied as a `data-theme` attribute on `<html>`. `system` removes the attribute (letting the OS `prefers-color-scheme` media query take effect), `light`/`dark` set it explicitly.
 - **Settings storage.** Values are `JSON.stringify`-ed on write and `JSON.parse`-d on read, so `value` can be a string, number, boolean, or object transparently.
 - **Deleting a printer** cascades to its jobs server-side in `DELETE /api/printers/:id`.

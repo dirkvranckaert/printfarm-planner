@@ -10,7 +10,6 @@ app.use(express.json());
 
 // --- Session store ---
 const SESSION_TTL = 7 * 24 * 60 * 60 * 1000; // 7 days in ms
-const sessions = new Map(); // token → expiresAt
 
 function parseCookieToken(req) {
   const raw = req.headers.cookie ?? '';
@@ -19,9 +18,9 @@ function parseCookieToken(req) {
 }
 
 function isValidSession(token) {
-  const expiresAt = sessions.get(token);
-  if (!expiresAt) return false;
-  if (Date.now() > expiresAt) { sessions.delete(token); return false; }
+  const row = db.prepare('SELECT expires_at FROM sessions WHERE token=?').get(token);
+  if (!row) return false;
+  if (Date.now() > row.expires_at) { db.prepare('DELETE FROM sessions WHERE token=?').run(token); return false; }
   return true;
 }
 
@@ -34,7 +33,7 @@ app.post('/login', (req, res) => {
   const { username, password } = req.body ?? {};
   if (username === process.env.ADMIN_USER && password === process.env.ADMIN_PASS) {
     const token = crypto.randomBytes(32).toString('hex');
-    sessions.set(token, Date.now() + SESSION_TTL);
+    db.prepare('INSERT INTO sessions (token, expires_at) VALUES (?,?)').run(token, Date.now() + SESSION_TTL);
     res.setHeader('Set-Cookie', `pf_session=${token}; HttpOnly; Path=/; Max-Age=604800`);
     return res.json({ ok: true });
   }
@@ -43,7 +42,7 @@ app.post('/login', (req, res) => {
 
 app.get('/logout', (req, res) => {
   const token = parseCookieToken(req);
-  if (token) sessions.delete(token);
+  if (token) db.prepare('DELETE FROM sessions WHERE token=?').run(token);
   res.setHeader('Set-Cookie', 'pf_session=; HttpOnly; Path=/; Max-Age=0');
   res.redirect('/login');
 });

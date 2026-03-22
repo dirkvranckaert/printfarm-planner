@@ -172,7 +172,7 @@ function renderTopbarStatus() {
     bar.innerHTML = visiblePrinters.map(p => {
       const s     = getPrinterLiveStatus(p);
       const label = printerStatusLabel(s);
-      const cls   = s ? s.stage.toLowerCase() : '';
+      const cls   = s?.stage?.toLowerCase() ?? '';
       return `<div class="schip-wrap" data-pid="${p.id}">
         <div class="schip">
           <span class="schip-dot" style="background:${p.color}"></span>
@@ -192,7 +192,7 @@ function renderTopbarStatus() {
       if (!wrap) return;
       const s     = getPrinterLiveStatus(p);
       const label = printerStatusLabel(s);
-      const cls   = s ? s.stage.toLowerCase() : '';
+      const cls   = s?.stage?.toLowerCase() ?? '';
       const pill  = wrap.querySelector('.schip-pill');
       if (pill) {
         pill.textContent = label || '';
@@ -227,7 +227,7 @@ function renderStatusPanel(connectedPrinters) {
   const panel  = document.getElementById('printer-status-panel');
   const btn    = document.getElementById('btn-printer-status');
   const badge  = document.getElementById('printer-status-badge');
-  if (!panel || !btn) return;
+  if (!panel || !btn || !badge) return;
 
   const list = connectedPrinters ?? printers.filter(p => printerStatusKey(p));
 
@@ -242,7 +242,7 @@ function renderStatusPanel(connectedPrinters) {
   panel.innerHTML = list.map(p => {
     const s   = getPrinterLiveStatus(p);
     const label = printerStatusLabel(s);
-    const cls   = s ? s.stage.toLowerCase() : '';
+    const cls   = s?.stage?.toLowerCase() ?? '';
     return `<div class="ps-card">
       <div class="ps-card-header">
         <span class="ps-card-dot" style="background:${p.color}"></span>
@@ -258,8 +258,15 @@ function toggleStatusPanel() {
   const panel = document.getElementById('printer-status-panel');
   const btn   = document.getElementById('btn-printer-status');
   if (!panel) return;
-  const open = panel.classList.toggle('hidden');
-  btn.setAttribute('aria-expanded', String(!open));
+  const isOpen = !panel.classList.contains('hidden');
+  if (isOpen) {
+    panel.classList.add('hidden');
+    btn.setAttribute('aria-expanded', 'false');
+  } else {
+    renderStatusPanel(); // always rebuild with latest data before showing
+    panel.classList.remove('hidden');
+    btn.setAttribute('aria-expanded', 'true');
+  }
 }
 
 // ---- App state ----
