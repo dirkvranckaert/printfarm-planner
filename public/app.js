@@ -127,8 +127,12 @@ function printerDetailHtml(s) {
     details.push(`🛏 ${cur}°${tgt ? ` / ${tgt}°` : ''}`);
   }
   if (s.remaining != null && s.remaining > 0) {
-    const h = Math.floor(s.remaining / 60), m = s.remaining % 60;
-    details.push(`⏱ ${h > 0 ? h + 'h ' : ''}${m}m left`);
+    // Compute stable absolute end time from when the update was received
+    const endMs   = new Date(s.updated_at).getTime() + s.remaining * 60_000;
+    const minsLeft = Math.max(0, Math.round((endMs - Date.now()) / 60_000));
+    const h = Math.floor(minsLeft / 60), m = minsLeft % 60;
+    const endStr  = new Date(endMs).toLocaleTimeString([], { hour: '2-digit', minute: '2-digit' });
+    details.push(`⏱ ${minsLeft > 0 ? (h > 0 ? h + 'h ' : '') + m + 'm left · ' : ''}done ~${endStr}`);
   }
   if (details.length) html += `<div class="spopup-details">${details.map(d => `<span>${escHtml(d)}</span>`).join('')}</div>`;
 
@@ -344,7 +348,7 @@ async function init() {
   renderCalendar();
   renderTopbarStatus();
   setupListeners();
-  setInterval(updateNowLine, 60_000);
+  setInterval(() => { updateNowLine(); renderTopbarStatus(); }, 60_000);
   if (printers.length === 0) openPrintersModal();
   else if (view === 'day') setTimeout(scrollToNow, 80);
 }
