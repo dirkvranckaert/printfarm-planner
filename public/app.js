@@ -2106,8 +2106,12 @@ function setupListeners() {
   document.querySelectorAll('.ctx-status-btn').forEach(btn => {
     btn.addEventListener('click', async () => {
       if (ctxJobId !== null) {
+        const scr = document.getElementById('day-scroll');
+        const savedScroll = scr ? scr.scrollTop : 0;
         await api('PATCH', `/api/jobs/${ctxJobId}`, { status: btn.dataset.status });
-        renderCalendar();
+        await renderCalendar();
+        const scr2 = document.getElementById('day-scroll');
+        if (scr2) scr2.scrollTop = savedScroll;
       }
       hideCtxMenu();
     });
