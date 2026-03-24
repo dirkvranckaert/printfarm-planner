@@ -19,6 +19,7 @@ let statusMeta = {
   'Printing':      { color: '#16a34a' },
   'Post Printing': { color: '#d97706' },
   'Done':          { color: '#64748b' },
+  'Awaiting':      { color: '#7c3aed' },
 };
 
 // ---- API helper ----
@@ -436,6 +437,7 @@ async function loadStatusColors() {
     'Printing':      { color: colors['Printing']      ?? '#16a34a' },
     'Post Printing': { color: colors['Post Printing'] ?? '#d97706' },
     'Done':          { color: colors['Done']          ?? '#64748b' },
+    'Awaiting':      { color: colors['Awaiting']      ?? '#7c3aed' },
   };
 }
 
@@ -500,6 +502,9 @@ function minutesOnDay(job, day) {
 // Calendar dispatcher
 // =============================================================================
 async function renderCalendar() {
+  const scr = document.getElementById('day-scroll');
+  const savedScroll = scr ? scr.scrollTop : 0;
+
   closures = await api('GET', '/api/closures');
   updateHeader();
   await renderTodayPanel();
@@ -508,6 +513,9 @@ async function renderCalendar() {
   else if (view === 'week')     await renderWeek();
   else if (view === 'upcoming') await renderUpcoming();
   else                          await renderMonth();
+
+  const scr2 = document.getElementById('day-scroll');
+  if (scr2 && savedScroll > 0) scr2.scrollTop = savedScroll;
 }
 
 function updateHeader() {
@@ -801,7 +809,7 @@ async function renderDay() {
                 <span class="job-status-badge" style="${statusBadgeStyle(status)}">${escHtml(status)}</span>
               </div>`;
       if (job.customerName) h += `<span class="job-block-customer">${escHtml(job.customerName)}</span>`;
-      h += '<div class="job-resize-handle"></div>';
+      if (endMins <= DAY_MINS) h += '<div class="job-resize-handle"></div>';
       h += '</div>';
 
       // Cool-down buffer block (after job)
@@ -859,6 +867,13 @@ function updateDragPreview() {
   previewEl.textContent = h > 0 ? (m > 0 ? `${h}h ${m}m` : `${h}h`) : `${m}m`;
 }
 
+function expandDayBodyForDrag(bottomPx) {
+  const body = document.querySelector('.day-view-body');
+  if (!body) return;
+  const needed = Math.max(bottomPx + 40, DAY_MINS);
+  if (needed > parseInt(body.style.height)) body.style.height = needed + 'px';
+}
+
 function onDragMove(e) {
   if (!drag) return;
 
@@ -876,7 +891,7 @@ function onDragMove(e) {
 
     if (targetCol) {
       const rect  = targetCol.getBoundingClientRect();
-      const y     = snap15(Math.max(0, Math.min(e.clientY - rect.top, DAY_MINS - drag.durationMins)));
+      const y     = snap15(Math.max(0, Math.min(e.clientY - rect.top, DAY_MINS + 240 - drag.durationMins)));
       drag.currentMins = y;
       drag.printerId   = parseInt(targetCol.dataset.printerId);
 
@@ -894,6 +909,7 @@ function onDragMove(e) {
       const color   = printer?.color ?? '#0f766e';
       previewEl.style.top             = y + 'px';
       previewEl.style.height          = durationMins + 'px';
+      expandDayBodyForDrag(y + durationMins);
       previewEl.style.background      = hexRgba(color, 0.22);
       previewEl.style.borderLeftColor = color;
       const h = Math.floor(durationMins / 60), m = durationMins % 60;
@@ -916,21 +932,23 @@ function onDragMove(e) {
   }
 
   const rect = drag.colEl.getBoundingClientRect();
-  const y    = snap15(Math.max(0, Math.min(e.clientY - rect.top, DAY_MINS)));
+  const y    = snap15(Math.max(0, Math.min(e.clientY - rect.top, DAY_MINS + 240)));
 
   if (drag.type === 'move') {
-    const newTop = Math.max(0, Math.min(y - drag.offsetMins, DAY_MINS - drag.durationMins));
+    const newTop = Math.max(0, Math.min(y - drag.offsetMins, DAY_MINS + 240 - drag.durationMins));
     if (Math.abs(newTop - drag.currentTopMins) >= 1) drag.moved = true;
     drag.currentTopMins = newTop;
     drag.jobEl.style.top = newTop + 'px';
     drag.jobEl.style.opacity = '0.75';
     drag.jobEl.style.zIndex  = '10';
+    expandDayBodyForDrag(newTop + drag.durationMins);
   } else if (drag.type === 'resize') {
-    const newEnd = Math.max(drag.startMins + 15, Math.min(y, DAY_MINS));
+    const newEnd = Math.max(drag.startMins + 15, y);
     if (Math.abs(newEnd - drag.currentEndMins) >= 1) drag.moved = true;
     drag.currentEndMins = newEnd;
     drag.jobEl.style.height  = (newEnd - drag.startMins) + 'px';
     drag.jobEl.style.opacity = '0.75';
+    expandDayBodyForDrag(newEnd);
   }
 }
 
@@ -1909,7 +1927,7 @@ async function openSettingsModal() {
   if (radio) radio.checked = true;
 
   // Populate status color pickers from current statusMeta
-  ['Planned', 'Printing', 'Post Printing', 'Done'].forEach(status => {
+  ['Planned', 'Printing', 'Post Printing', 'Done', 'Awaiting'].forEach(status => {
     const inp = document.getElementById('sc-' + status.replace(/\s+/g, '-'));
     if (inp) inp.value = statusMeta[status]?.color ?? '#888888';
   });
@@ -2014,7 +2032,7 @@ async function saveSettings() {
 
   // Save status colors
   const colors = {};
-  ['Planned', 'Printing', 'Post Printing', 'Done'].forEach(status => {
+  ['Planned', 'Printing', 'Post Printing', 'Done', 'Awaiting'].forEach(status => {
     const inp = document.getElementById('sc-' + status.replace(/\s+/g, '-'));
     if (inp) colors[status] = inp.value;
   });
