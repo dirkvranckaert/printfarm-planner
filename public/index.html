@@ -28,6 +28,7 @@
         <div class="topbar-menu" id="topbar-menu">
           <button class="topbar-menu-item" id="btn-manage-printers">⚙ Printers</button>
           <button class="topbar-menu-item" id="btn-manage-closures">🔒 Closures</button>
+          <button class="topbar-menu-item" id="btn-status-overview">📊 Job Status</button>
           <button class="topbar-menu-item" id="btn-settings">⚙ Settings</button>
           <div class="topbar-menu-divider"></div>
           <a href="/logout" class="topbar-menu-item topbar-menu-signout">Sign out</a>
@@ -411,8 +412,26 @@
     <button class="ctx-item ctx-status-btn" data-status="Post Printing">Post Printing</button>
     <button class="ctx-item ctx-status-btn" data-status="Done">Done</button>
     <div class="ctx-separator"></div>
+    <button class="ctx-item hidden" id="ctx-link-item"></button>
+    <div class="ctx-separator" id="ctx-link-sep" style="display:none"></div>
     <button class="ctx-item" id="ctx-duplicate">📋 Duplicate</button>
     <button class="ctx-item ctx-item-danger" id="ctx-delete">🗑 Delete</button>
+  </div>
+
+  <!-- ==================== Status Overview Modal ==================== -->
+  <div id="status-overview-modal" class="modal-overlay hidden">
+    <div class="modal modal-wide">
+      <div class="modal-header">
+        <h2>Job Status Overview</h2>
+        <button class="modal-close" data-close="status-overview-modal">✕</button>
+      </div>
+      <div class="modal-body" id="status-overview-body"></div>
+      <div class="modal-footer">
+        <div class="modal-footer-right">
+          <button class="btn btn-secondary" data-close="status-overview-modal">Close</button>
+        </div>
+      </div>
+    </div>
   </div>
 
   <script src="app.js"></script>

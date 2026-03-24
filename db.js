@@ -50,6 +50,9 @@ if (!jobCols.some(c => c.name === 'queued')) {
 if (!jobCols.some(c => c.name === 'durationMins')) {
   db.exec('ALTER TABLE jobs ADD COLUMN durationMins INTEGER NOT NULL DEFAULT 0');
 }
+if (!jobCols.some(c => c.name === 'linked_printer_id')) {
+  db.exec('ALTER TABLE jobs ADD COLUMN linked_printer_id INTEGER');
+}
 
 const printerCols = db.pragma('table_info(printers)');
 if (!printerCols.some(c => c.name === 'bambu_serial')) {

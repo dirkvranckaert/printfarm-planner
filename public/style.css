@@ -203,16 +203,19 @@ body {
 /* Hover popup */
 .schip-popup {
   display: none;
-  position: absolute; top: calc(100% + 6px); left: 50%;
+  position: absolute; top: 100%; left: 50%;
   transform: translateX(-50%);
+  padding-top: 6px; /* transparent bridge over the gap so hover isn't lost */
   z-index: 200;
+  pointer-events: auto;
+}
+.schip-popup-inner {
   background: var(--surface);
   border: 1px solid var(--border);
   border-radius: 8px;
   padding: 10px 12px;
   min-width: 170px;
   box-shadow: 0 4px 16px rgba(0,0,0,.15);
-  pointer-events: none;
 }
 .schip-wrap:hover .schip-popup { display: block; }
 
@@ -235,6 +238,18 @@ body {
 .spopup-bar-wrap { height: 4px; background: var(--border); border-radius: 2px; margin-bottom: 8px; overflow: hidden; }
 .spopup-bar-fill { height: 100%; background: var(--primary); border-radius: 2px; }
 .spopup-details { display: flex; flex-wrap: wrap; gap: 6px; font-size: 11px; color: var(--text-muted); }
+.spopup-linked-job {
+  margin-top: 2px;
+  margin-bottom: 6px;
+  font-size: 11px;
+  color: var(--primary);
+  cursor: pointer;
+  white-space: nowrap;
+  overflow: hidden;
+  text-overflow: ellipsis;
+  max-width: 200px;
+}
+.spopup-linked-job:hover { text-decoration: underline; }
 
 /* ======================== Buttons ======================== */
 .btn {
@@ -409,6 +424,12 @@ body {
   z-index: 1;
 }
 .job-block:hover { filter: brightness(.92); z-index: 2; }
+@keyframes job-highlight-pulse {
+  0%   { box-shadow: 0 0 0 0   rgba(255,200,0,0); }
+  25%  { box-shadow: 0 0 0 4px rgba(255,200,0,.8); }
+  100% { box-shadow: 0 0 0 0   rgba(255,200,0,0); }
+}
+.job-block-highlight { animation: job-highlight-pulse 1.8s ease-out; }
 .job-block-name {
   font-weight: 600;
   display: block;
@@ -780,6 +801,43 @@ h3 { font-size: 14px; font-weight: 600; margin-bottom: 12px; }
 .ctx-status-btn.ctx-status-active::before { content: '✓ '; }
 .ctx-item-danger { color: var(--danger); }
 .ctx-item-danger:hover { background: rgba(229,62,62,.08); color: var(--danger); }
+
+/* ======================== Modal wide ======================== */
+.modal-wide { width: 640px; }
+
+/* ======================== Status overview ======================== */
+.so-section { margin-bottom: 12px; border: 1px solid var(--border); border-radius: 8px; overflow: hidden; }
+.so-section-header {
+  display: flex;
+  align-items: center;
+  gap: 8px;
+  padding: 10px 14px;
+  background: var(--bg);
+  cursor: pointer;
+  font-weight: 600;
+  font-size: 13px;
+  user-select: none;
+}
+.so-section-header:hover { background: var(--border); }
+.so-section-toggle { font-size: 11px; color: var(--text-muted); margin-left: auto; }
+.so-section-body { }
+.so-section-body.hidden { display: none; }
+.so-row {
+  display: grid;
+  grid-template-columns: 80px 1fr 120px 120px auto;
+  gap: 8px;
+  align-items: center;
+  padding: 8px 14px;
+  border-top: 1px solid var(--border);
+  font-size: 13px;
+}
+.so-row:hover { background: var(--bg); cursor: pointer; }
+.so-row-ordernr { color: var(--text-muted); font-size: 12px; }
+.so-row-name { font-weight: 500; }
+.so-row-customer { color: var(--text-muted); font-size: 12px; }
+.so-row-printer { color: var(--text-muted); font-size: 12px; }
+.so-row-date { color: var(--text-muted); font-size: 12px; }
+.so-empty { padding: 10px 14px; color: var(--text-muted); font-size: 13px; }
 
 /* ======================== End-mode toggle ======================== */
 .end-mode-toggle { display: flex; gap: 4px; margin-bottom: 2px; }
@@ -1355,11 +1413,19 @@ body.is-resizing,    body.is-resizing    * { cursor: ns-resize  !important; user
   background: var(--surface-2); color: var(--text-muted);
 }
 .ams-slot-active { border-color: rgba(255,255,255,.9); box-shadow: 0 0 0 1px rgba(0,0,0,.2); }
+[data-theme="light"] .ams-slot-active { border-color: rgba(0,0,0,.55); box-shadow: none; }
+@media (prefers-color-scheme: light) {
+  :not([data-theme]) .ams-slot-active { border-color: rgba(0,0,0,.55); box-shadow: none; }
+}
 .ams-slot-arrow {
   width: 0; height: 0;
   border-left: 5px solid transparent;
   border-right: 5px solid transparent;
   border-top: 6px solid rgba(255,255,255,.85);
+}
+[data-theme="light"] .ams-slot-arrow { border-top-color: rgba(0,0,0,.5); }
+@media (prefers-color-scheme: light) {
+  :not([data-theme]) .ams-slot-arrow { border-top-color: rgba(0,0,0,.5); }
 }
 .ams-slot-mat { font-size: 11px; font-weight: 700; line-height: 1.2; }
 .ams-slot-k   { font-size: 9px; opacity: .8; }

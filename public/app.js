@@ -103,7 +103,7 @@ function contrastColor(hex) {
 
 // Build the detail block (stage, progress bar, temps, remaining, AMS slots) for a printer.
 // Used by both the topbar hover popup and the mobile status panel.
-function printerDetailHtml(s) {
+function printerDetailHtml(s, printer) {
   if (!s) return `<div class="spopup-stage spopup-dim">Waiting for data…</div>`;
 
   const stageText = s.stage === 'RUNNING' ? `Printing${s.progress > 0 ? ` · ${s.progress}%` : ''}` :
@@ -112,6 +112,16 @@ function printerDetailHtml(s) {
                     s.stage === 'FAILED'  ? 'Error' : 'Idle';
   let html = '';
   if (s.job_name) html += `<div class="spopup-job-name">${escHtml(s.job_name)}</div>`;
+
+  // Linked planned job — shown right below the print file name
+  if (printer) {
+    const linkedJob = Object.values(jobsCache).find(j => j.linked_printer_id === printer.id);
+    if (linkedJob) {
+      const label = linkedJob.orderNr ? `#${linkedJob.orderNr} — ${linkedJob.name}` : linkedJob.name;
+      html += `<div class="spopup-linked-job" data-job-id="${linkedJob.id}" title="Go to job">🔗 ${escHtml(label)}</div>`;
+    }
+  }
+
   html += `<div class="spopup-stage">${stageText}</div>`;
   if (s.stage === 'RUNNING' && s.progress > 0) {
     html += `<div class="spopup-bar-wrap"><div class="spopup-bar-fill" style="width:${s.progress}%"></div></div>`;
@@ -149,6 +159,7 @@ function printerDetailHtml(s) {
       html += `<div class="spopup-ams spopup-ams-ext"><div class="spopup-ams-label">External</div><div class="spopup-ams-row">${slotCardHtml(extSlot)}</div></div>`;
     }
   }
+
   return html;
 }
 
@@ -185,8 +196,10 @@ function renderTopbarStatus() {
           <span class="schip-pill printer-status-pill printer-status-${cls}">${label ? escHtml(label) : ''}</span>
         </div>
         <div class="schip-popup">
-          <div class="spopup-name">${escHtml(p.name)}</div>
-          ${printerDetailHtml(s)}
+          <div class="schip-popup-inner">
+            <div class="spopup-name">${escHtml(p.name)}</div>
+            ${printerDetailHtml(s, p)}
+          </div>
         </div>
       </div>`;
     }).join('');
@@ -204,7 +217,7 @@ function renderTopbarStatus() {
         pill.className   = `schip-pill printer-status-pill printer-status-${cls}`;
       }
       const popup = wrap.querySelector('.schip-popup');
-      if (popup) popup.innerHTML = `<div class="spopup-name">${escHtml(p.name)}</div>${printerDetailHtml(s)}`;
+      if (popup) popup.innerHTML = `<div class="schip-popup-inner"><div class="spopup-name">${escHtml(p.name)}</div>${printerDetailHtml(s, p)}</div>`;
     });
   }
 
@@ -254,7 +267,7 @@ function renderStatusPanel(connectedPrinters) {
         <span class="ps-card-name">${escHtml(p.name)}</span>
         ${label ? `<span class="printer-status-pill printer-status-${cls}">${escHtml(label)}</span>` : ''}
       </div>
-      <div class="ps-card-body">${printerDetailHtml(s)}</div>
+      <div class="ps-card-body">${printerDetailHtml(s, p)}</div>
     </div>`;
   }).join('');
 }
@@ -340,6 +353,10 @@ async function init() {
   sse.onmessage = (e) => {
     try {
       const updates = JSON.parse(e.data);
+      if (updates.jobsUpdated) {
+        renderCalendar();
+        return;
+      }
       Object.assign(printerStatus, updates);
       renderTopbarStatus();
     } catch (_) {}
@@ -806,6 +823,7 @@ async function renderDay() {
               <div style="display:flex;align-items:center;gap:4px;flex-wrap:wrap">
                 ${conflictIcon}
                 <span class="job-block-name" style="flex:1">${job.orderNr ? `#${escHtml(job.orderNr)} — ` : ''}${escHtml(job.name)}</span>
+                ${job.linked_printer_id ? '<span title="Linked to printer">🔗</span>' : ''}
                 <span class="job-status-badge" style="${statusBadgeStyle(status)}">${escHtml(status)}</span>
               </div>`;
       if (job.customerName) h += `<span class="job-block-customer">${escHtml(job.customerName)}</span>`;
@@ -1429,6 +1447,31 @@ function showCtxMenu(e, jobId) {
   document.querySelectorAll('.ctx-status-btn').forEach(btn =>
     btn.classList.toggle('ctx-status-active', btn.dataset.status === currentStatus)
   );
+
+  // Show link / unlink option based on job + printer state
+  const ctxJob     = jobsCache[jobId];
+  const ctxPrinter = printers.find(p => p.id === ctxJob?.printerId);
+  const linkItem   = document.getElementById('ctx-link-item');
+  const linkSep    = document.getElementById('ctx-link-sep');
+  const isLinked   = !!ctxJob?.linked_printer_id;
+  const isRunning  = getPrinterLiveStatus(ctxPrinter)?.stage === 'RUNNING';
+  const printerBusy = isRunning && !isLinked &&
+    Object.values(jobsCache).some(j => j.id !== jobId && j.linked_printer_id === ctxPrinter?.id);
+
+  if (isLinked) {
+    linkItem.classList.remove('hidden');
+    linkSep.style.display = '';
+    linkItem.textContent  = '🔗 Unlink from printer';
+    linkItem.dataset.action = 'unlink';
+  } else if (isRunning && !printerBusy) {
+    linkItem.classList.remove('hidden');
+    linkSep.style.display = '';
+    linkItem.textContent  = '🔗 Link to printer';
+    linkItem.dataset.action = 'link';
+  } else {
+    linkItem.classList.add('hidden');
+    linkSep.style.display = 'none';
+  }
 
   const menu = document.getElementById('ctx-menu');
   menu.style.left = e.clientX + 'px';
@@ -2101,6 +2144,116 @@ function navigate(dir) {
 }
 
 // =============================================================================
+// Go to job (navigate to day view, scroll + highlight the job block)
+// =============================================================================
+async function goToJob(jobId) {
+  let job = jobsCache[jobId];
+  if (!job) {
+    job = await api('GET', `/api/jobs/${jobId}`);
+    if (!job) return;
+    jobsCache[jobId] = job;
+  }
+  if (!job.start) return; // queued — no date
+
+  view = 'day';
+  navDate = new Date(job.start);
+  navDate.setHours(0, 0, 0, 0);
+
+  await renderCalendar();
+
+  setTimeout(() => {
+    const el = document.querySelector(`.job-block[data-job-id="${jobId}"]`);
+    if (!el) return;
+    const scr = document.getElementById('day-scroll');
+    if (scr) scr.scrollTop = Math.max(0, (parseInt(el.style.top) || 0) - 120);
+    el.classList.add('job-block-highlight');
+    setTimeout(() => el.classList.remove('job-block-highlight'), 2000);
+  }, 80);
+}
+
+// =============================================================================
+// Status overview modal
+// =============================================================================
+async function openStatusOverview() {
+  const [allJobs, allPrinters] = await Promise.all([
+    api('GET', '/api/jobs'),
+    api('GET', '/api/printers'),
+  ]);
+  const printerMap = Object.fromEntries(allPrinters.map(p => [p.id, p]));
+
+  const statusOrder = ['Printing', 'Awaiting', 'Post Printing', 'Planned', 'Done'];
+  const expandByDefault = new Set(['Printing', 'Awaiting']);
+
+  const scheduled = allJobs.filter(j => !j.queued);
+
+  const body = document.getElementById('status-overview-body');
+  const p2 = n => String(n).padStart(2, '0');
+  const fmtDateTime = d => {
+    const dt = new Date(d);
+    return `${fmtDate(dt,'D MMM')} ${p2(dt.getHours())}:${p2(dt.getMinutes())}`;
+  };
+
+  let h = '';
+  statusOrder.forEach(status => {
+    const group = scheduled
+      .filter(j => (j.status ?? 'Planned') === status)
+      .sort((a, b) => new Date(a.start) - new Date(b.start));
+
+    const expanded = expandByDefault.has(status);
+    h += `<div class="so-section">
+      <div class="so-section-header" data-so-status="${escHtml(status)}">
+        <span class="job-status-badge" style="${statusBadgeStyle(status)}">${escHtml(status)}</span>
+        <span style="color:var(--text-muted);font-weight:400">${group.length}</span>
+        <span class="so-section-toggle">${expanded ? '▲' : '▼'}</span>
+      </div>
+      <div class="so-section-body${expanded ? '' : ' hidden'}">`;
+
+    if (group.length === 0) {
+      h += `<div class="so-empty">No jobs.</div>`;
+    } else {
+      group.forEach(job => {
+        const printer = printerMap[job.printerId];
+        const orderLabel = job.orderNr ? `#${escHtml(job.orderNr)}` : '—';
+        const customerLabel = job.customerName ? escHtml(job.customerName) : '—';
+        const printerLabel  = printer ? escHtml(printer.name) : '—';
+        const dateLabel = job.start ? fmtDateTime(job.start) : '—';
+        const linkIcon  = job.linked_printer_id ? ' 🔗' : '';
+        h += `<div class="so-row" data-job-id="${job.id}">
+          <span class="so-row-ordernr">${orderLabel}</span>
+          <span class="so-row-name">${escHtml(job.name)}${linkIcon}</span>
+          <span class="so-row-customer">${customerLabel}</span>
+          <span class="so-row-printer">${printerLabel}</span>
+          <span class="so-row-date">${dateLabel}</span>
+        </div>`;
+      });
+    }
+    h += `</div></div>`;
+  });
+
+  body.innerHTML = h;
+
+  // Collapsible toggle
+  body.querySelectorAll('.so-section-header').forEach(hdr => {
+    hdr.addEventListener('click', () => {
+      const sectionBody = hdr.nextElementSibling;
+      const toggle = hdr.querySelector('.so-section-toggle');
+      const isHidden = sectionBody.classList.toggle('hidden');
+      toggle.textContent = isHidden ? '▼' : '▲';
+    });
+  });
+
+  // Click row → open job modal
+  body.querySelectorAll('.so-row[data-job-id]').forEach(row => {
+    row.addEventListener('click', () => {
+      closeModal('status-overview-modal');
+      openJobModal(parseInt(row.dataset.jobId));
+    });
+  });
+
+  document.getElementById('status-overview-modal').classList.remove('hidden');
+}
+
+// =============================================================================
 // Event listeners
 // =============================================================================
 function setupListeners() {
@@ -2144,6 +2297,33 @@ function setupListeners() {
       renderCalendar();
     }
     hideCtxMenu();
+  });
+  // Link / unlink
+  document.getElementById('ctx-link-item').addEventListener('click', async () => {
+    if (ctxJobId === null) return;
+    const btn = document.getElementById('ctx-link-item');
+    if (btn.dataset.action === 'unlink') {
+      await api('PATCH', `/api/jobs/${ctxJobId}`, { linked_printer_id: null });
+    } else {
+      const job = jobsCache[ctxJobId];
+      await api('PATCH', `/api/jobs/${ctxJobId}`, { linked_printer_id: job?.printerId ?? null, status: 'Printing' });
+    }
+    hideCtxMenu();
+    renderCalendar();
+  });
+
+  // Click linked-job chip in topbar popup or status panel → jump to that job
+  document.getElementById('printer-status-bar').addEventListener('click', e => {
+    const el = e.target.closest('.spopup-linked-job[data-job-id]');
+    if (el) goToJob(parseInt(el.dataset.jobId));
+  });
+  document.getElementById('printer-status-panel').addEventListener('click', e => {
+    const el = e.target.closest('.spopup-linked-job[data-job-id]');
+    if (el) {
+      document.getElementById('printer-status-panel').classList.add('hidden');
+      document.getElementById('btn-printer-status').setAttribute('aria-expanded', 'false');
+      goToJob(parseInt(el.dataset.jobId));
+    }
   });
   document.addEventListener('click',       hideCtxMenu);
   document.addEventListener('contextmenu', e => {
@@ -2198,6 +2378,7 @@ function setupListeners() {
   });
   document.getElementById('btn-manage-printers').addEventListener('click', openPrintersModal);
   document.getElementById('btn-manage-closures').addEventListener('click', openClosuresModal);
+  document.getElementById('btn-status-overview').addEventListener('click', openStatusOverview);
   document.getElementById('btn-save-closure').addEventListener('click', saveClosure);
   document.getElementById('btn-cancel-closure').addEventListener('click', resetClosureForm);
   document.getElementById('btn-printer-status').addEventListener('click', toggleStatusPanel);
@@ -2257,7 +2438,7 @@ function setupListeners() {
   document.addEventListener('keydown', e => {
     if (e.key !== 'Escape') return;
     hideCtxMenu();
-    ['job-modal', 'printers-modal', 'closures-modal', 'settings-modal'].forEach(id => {
+    ['job-modal', 'printers-modal', 'closures-modal', 'settings-modal', 'status-overview-modal'].forEach(id => {
       if (!document.getElementById(id).classList.contains('hidden')) closeModal(id);
     });
   });

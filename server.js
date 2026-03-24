@@ -65,11 +65,40 @@ const sseClients = new Set();
 // Connect all brand integrations on startup
 brands.connectAll(db);
 
+// Track previous stage per brandKey for auto-transition logic
+const prevStage = new Map();
+
 // Broadcast every live-status update to SSE clients.
 // brandKey is namespaced: "bambulab:01P00A123456789"
 brands.onUpdate((brandKey, status) => {
   const data = `data: ${JSON.stringify({ [brandKey]: status })}\n\n`;
   sseClients.forEach(res => res.write(data));
+
+  // Auto-transition jobs linked to this printer
+  const prev = prevStage.get(brandKey);
+  const curr = status.stage;
+  if (curr && curr !== prev) {
+    const serial = brandKey.includes(':') ? brandKey.split(':')[1] : null;
+    if (serial) {
+      const printer = db.prepare('SELECT id FROM printers WHERE bambu_serial=?').get(serial);
+      if (printer) {
+        const linked = db.prepare(
+          "SELECT * FROM jobs WHERE linked_printer_id=? AND status != 'Done'"
+        ).all(printer.id);
+        linked.forEach(job => {
+          if (curr === 'RUNNING' && job.status !== 'Printing') {
+            db.prepare("UPDATE jobs SET status='Printing' WHERE id=?").run(job.id);
+            sseClients.forEach(res => res.write(`data: ${JSON.stringify({ jobsUpdated: true })}\n\n`));
+          }
+          if ((curr === 'FINISH' || curr === 'IDLE') && prev === 'RUNNING' && job.status === 'Printing') {
+            db.prepare("UPDATE jobs SET status='Post Printing', linked_printer_id=NULL WHERE id=?").run(job.id);
+            sseClients.forEach(res => res.write(`data: ${JSON.stringify({ jobsUpdated: true })}\n\n`));
+          }
+        });
+      }
+    }
+  }
+  prevStage.set(brandKey, curr);
 });
 
 // --- Brand-specific API routers ---
@@ -159,7 +188,7 @@ app.put('/api/jobs/:id', (req, res) => {
   res.json({ id: Number(req.params.id), ...req.body, queued: isQueued });
 });
 app.patch('/api/jobs/:id', (req, res) => {
-  const allowed = ['printerId', 'name', 'customerName', 'orderNr', 'start', 'end', 'status', 'colors', 'printFile', 'remarks', 'queued', 'durationMins'];
+  const allowed = ['printerId', 'name', 'customerName', 'orderNr', 'start', 'end', 'status', 'colors', 'printFile', 'remarks', 'queued', 'durationMins', 'linked_printer_id'];
   const fields = Object.entries(req.body).filter(([k]) => allowed.includes(k));
   if (!fields.length) return res.status(400).json({ error: 'no valid fields' });
   const setClauses = fields.map(([k]) => `${k}=?`).join(', ');
