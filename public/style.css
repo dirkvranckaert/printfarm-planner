@@ -697,6 +697,9 @@ body {
 .form-group { margin-bottom: 14px; }
 .form-row { display: flex; gap: 12px; }
 .form-row .form-group { flex: 1; min-width: 0; }
+.datetime-split { display: flex; gap: 6px; }
+.datetime-split input[type="date"] { flex: 1.4; min-width: 0; }
+.datetime-split input[type="time"] { flex: 1; min-width: 0; }
 
 label {
   display: block;
@@ -706,6 +709,8 @@ label {
 }
 input[type="text"],
 input[type="datetime-local"],
+input[type="date"],
+input[type="time"],
 input[type="number"],
 select,
 textarea {

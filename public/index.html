@@ -118,8 +118,11 @@
         </div>
         <div id="job-schedule-section">
           <div class="form-group">
-            <label for="job-start">Start *</label>
-            <input type="datetime-local" id="job-start">
+            <label>Start *</label>
+            <div class="datetime-split">
+              <input type="date" id="job-start-date">
+              <input type="time" id="job-start-time">
+            </div>
           </div>
           <div class="form-group">
             <div class="end-mode-toggle">
@@ -137,8 +140,11 @@
               </div>
             </div>
             <div id="end-enddate-row" class="hidden" style="margin-top:6px">
-              <label for="job-end">End date &amp; time</label>
-              <input type="datetime-local" id="job-end">
+              <label>End date &amp; time</label>
+              <div class="datetime-split">
+                <input type="date" id="job-end-date">
+                <input type="time" id="job-end-time">
+              </div>
             </div>
           </div>
         </div>

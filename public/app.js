@@ -406,6 +406,40 @@ function toDatetimeLocal(date) {
   return `${date.getFullYear()}-${p(date.getMonth()+1)}-${p(date.getDate())}T${p(date.getHours())}:${p(date.getMinutes())}`;
 }
 
+function getStartVal() {
+  const d = document.getElementById('job-start-date').value;
+  const t = document.getElementById('job-start-time').value;
+  return d && t ? `${d}T${t}` : (d ? `${d}T00:00` : '');
+}
+
+function getEndVal() {
+  const d = document.getElementById('job-end-date').value;
+  const t = document.getElementById('job-end-time').value;
+  return d && t ? `${d}T${t}` : (d ? `${d}T00:00` : '');
+}
+
+function setStartVal(val) {
+  if (val && val.includes('T')) {
+    const [d, t] = val.split('T');
+    document.getElementById('job-start-date').value = d;
+    document.getElementById('job-start-time').value = t.slice(0, 5);
+  } else {
+    document.getElementById('job-start-date').value = val ? val.split('T')[0] : '';
+    document.getElementById('job-start-time').value = '';
+  }
+}
+
+function setEndVal(val) {
+  if (val && val.includes('T')) {
+    const [d, t] = val.split('T');
+    document.getElementById('job-end-date').value = d;
+    document.getElementById('job-end-time').value = t.slice(0, 5);
+  } else {
+    document.getElementById('job-end-date').value = val ? val.split('T')[0] : '';
+    document.getElementById('job-end-time').value = '';
+  }
+}
+
 function fmtDate(date, fmt) {
   const DAY_LONG  = ['Sunday','Monday','Tuesday','Wednesday','Thursday','Friday','Saturday'];
   const DAY_SHORT = ['Sun','Mon','Tue','Wed','Thu','Fri','Sat'];
@@ -1538,18 +1572,19 @@ function getJobStatus() {
 async function duplicateJob(jobId) {
   const job = await api('GET', `/api/jobs/${jobId}`);
   if (!job) return;
+  const now = toDatetimeLocal(new Date());
   openJobModal(null, {
     printerId:    job.printerId,
     name:         job.name + ' (copy)',
-    start:        job.queued ? '' : job.start,
-    end:          job.queued ? '' : job.end,
+    start:        now,
+    end:          '',
     customerName: job.customerName,
     orderNr:      job.orderNr,
     colors:       job.colors,
     printFile:    job.printFile,
     remarks:      job.remarks,
     status:       job.status,
-    queued:       job.queued,
+    queued:       false,
   });
 }
 
@@ -1588,7 +1623,7 @@ async function openJobModal(jobId = null, prefill = {}) {
       startVal = toDatetimeLocal(new Date(job.start));
       endVal   = toDatetimeLocal(new Date(job.end));
     }
-    document.getElementById('job-start').value     = startVal;
+    setStartVal(startVal);
     document.getElementById('job-customer').value  = job.customerName ?? '';
     document.getElementById('job-ordernr').value   = job.orderNr      ?? '';
     document.getElementById('job-colors').value    = job.colors       ?? '';
@@ -1615,8 +1650,8 @@ async function openJobModal(jobId = null, prefill = {}) {
              : prefill.start ? toDatetimeLocal(new Date(prefill.start)) : '';
     endVal   = typeof prefill.end   === 'string' ? prefill.end
              : prefill.end   ? toDatetimeLocal(new Date(prefill.end))   : '';
-    document.getElementById('job-start').value     = startVal;
-    document.getElementById('job-end').value       = endVal;
+    setStartVal(startVal);
+    setEndVal(endVal);
     document.getElementById('job-customer').value  = prefill.customerName ?? '';
     document.getElementById('job-ordernr').value   = prefill.orderNr      ?? '';
     document.getElementById('job-colors').value    = prefill.colors       ?? '';
@@ -1636,7 +1671,7 @@ async function openJobModal(jobId = null, prefill = {}) {
   setEndMode('duration', startVal, endVal);
 
   document.getElementById('job-modal').classList.remove('hidden');
-  if (scheduleMode) document.getElementById('job-start').focus();
+  if (scheduleMode) document.getElementById('job-start-date').focus();
   else document.getElementById('job-name').focus();
 }
 
@@ -1668,7 +1703,7 @@ async function saveJob() {
     return;
   }
 
-  const start = document.getElementById('job-start').value;
+  const start = getStartVal();
   if (!start) return alert('Please set a start time.');
 
   let end;
@@ -1679,7 +1714,7 @@ async function saveJob() {
     if (h === 0 && m === 0) return alert('Please enter a duration greater than 0.');
     end = toDatetimeLocal(new Date(new Date(start).getTime() + (h * 60 + m) * 60_000));
   } else {
-    end = document.getElementById('job-end').value;
+    end = getEndVal();
     if (!end) return alert('Please set an end time.');
     if (new Date(end) <= new Date(start)) return alert('End time must be after start time.');
   }
@@ -2182,7 +2217,7 @@ async function openStatusOverview() {
   const printerMap = Object.fromEntries(allPrinters.map(p => [p.id, p]));
 
   const statusOrder = ['Printing', 'Awaiting', 'Post Printing', 'Planned', 'Done'];
-  const expandByDefault = new Set(['Printing', 'Awaiting']);
+  const expandByDefault = new Set(['Printing', 'Awaiting', 'Post Printing']);
 
   const scheduled = allJobs.filter(j => !j.queued);
 
@@ -2197,7 +2232,7 @@ async function openStatusOverview() {
   statusOrder.forEach(status => {
     const group = scheduled
       .filter(j => (j.status ?? 'Planned') === status)
-      .sort((a, b) => new Date(a.start) - new Date(b.start));
+      .sort((a, b) => new Date(b.start) - new Date(a.start));
 
     const expanded = expandByDefault.has(status);
     h += `<div class="so-section">
@@ -2242,11 +2277,11 @@ async function openStatusOverview() {
     });
   });
 
-  // Click row → open job modal
+  // Click row → jump to job in day calendar
   body.querySelectorAll('.so-row[data-job-id]').forEach(row => {
     row.addEventListener('click', () => {
       closeModal('status-overview-modal');
-      openJobModal(parseInt(row.dataset.jobId));
+      goToJob(parseInt(row.dataset.jobId));
     });
   });
 
@@ -2409,20 +2444,17 @@ function setupListeners() {
 
   // Duration ↔ end-date toggle
   document.getElementById('toggle-duration').addEventListener('click', () => {
-    setEndMode('duration',
-      document.getElementById('job-start').value,
-      document.getElementById('job-end').value);
+    setEndMode('duration', getStartVal(), getEndVal());
   });
   document.getElementById('toggle-enddate').addEventListener('click', () => {
     // Compute end from current start + duration, then switch to end-date mode
-    const start = document.getElementById('job-start').value;
+    const start = getStartVal();
     const h = parseInt(document.getElementById('job-duration-h').value) || 0;
     const m = parseInt(document.getElementById('job-duration-m').value) || 0;
     if (start && (h > 0 || m > 0)) {
-      document.getElementById('job-end').value =
-        toDatetimeLocal(new Date(new Date(start).getTime() + (h * 60 + m) * 60_000));
+      setEndVal(toDatetimeLocal(new Date(new Date(start).getTime() + (h * 60 + m) * 60_000)));
     }
-    setEndMode('enddate', start, document.getElementById('job-end').value);
+    setEndMode('enddate', start, getEndVal());
   });
 
   // Close buttons
