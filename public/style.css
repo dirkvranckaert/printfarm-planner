@@ -701,6 +701,14 @@ body {
 .datetime-split input[type="date"] { flex: 1.4; min-width: 0; }
 .datetime-split input[type="time"] { flex: 1; min-width: 0; }
 
+/* Calendar/clock picker icon: invert in dark theme so it's visible */
+[data-theme="dark"] input[type="date"]::-webkit-calendar-picker-indicator,
+[data-theme="dark"] input[type="time"]::-webkit-calendar-picker-indicator { filter: invert(1); }
+@media (prefers-color-scheme: dark) {
+  :root:not([data-theme="light"]):not([data-theme="dark"]) input[type="date"]::-webkit-calendar-picker-indicator,
+  :root:not([data-theme="light"]):not([data-theme="dark"]) input[type="time"]::-webkit-calendar-picker-indicator { filter: invert(1); }
+}
+
 label {
   display: block;
   margin-bottom: 5px;
