@@ -1872,37 +1872,24 @@ async function openPrintersModal() {
 }
 
 async function renderConnectedAccounts() {
-  const list = document.getElementById('connected-accounts-list');
-  if (!list) return;
   const config = await api('GET', '/api/brands/bambulab/config').catch(() => null);
   bambuAccountEmail = config?.connected ? (config.email || null) : null;
+  const stateLogin     = document.getElementById('bambu-state-login');
+  const stateVerify    = document.getElementById('bambu-state-verify');
+  const stateConnected = document.getElementById('bambu-state-connected');
+  if (!stateLogin) return;
   if (config?.connected) {
-    list.innerHTML = `
-      <div class="printer-item">
-        <span style="font-size:18px">🌐</span>
-        <span class="printer-item-name"><strong>BambuLab</strong> — ${escHtml(config.email || '')}</span>
-        <div class="printer-item-actions">
-          <button class="btn btn-secondary btn-sm" onclick="bambuDisconnectFromPrinters()">Disconnect</button>
-        </div>
-      </div>`;
+    stateLogin.classList.add('hidden');
+    stateVerify.classList.add('hidden');
+    stateConnected.classList.remove('hidden');
+    document.getElementById('bambu-connected-email').textContent = config.email || '';
   } else {
-    list.innerHTML = `
-      <div style="font-size:13px;color:var(--text-muted);margin-bottom:8px">No accounts connected.</div>
-      <button type="button" id="btn-bambu-link" class="btn btn-secondary" onclick="openBambuLinkDialog()">+ Connect BambuLab Account</button>`;
+    stateLogin.classList.remove('hidden');
+    stateVerify.classList.add('hidden');
+    stateConnected.classList.add('hidden');
+    if (config?.email)   document.getElementById('bambu-email').value  = config.email;
+    if (config?.region)  document.getElementById('bambu-region').value = config.region;
   }
-}
-
-async function bambuDisconnectFromPrinters() {
-  if (!confirm('Disconnect from BambuLab? Live status updates will stop.')) return;
-  await api('DELETE', '/api/brands/bambulab/connect');
-  await renderConnectedAccounts();
-  await refreshPrinterList();
-}
-
-async function openBambuLinkDialog() {
-  // Re-use settings modal for now by opening it (the BambuLab section is there)
-  document.getElementById('printers-modal').classList.add('hidden');
-  await openSettingsModal();
 }
 
 async function openPrinterDialog(id) {
@@ -2179,34 +2166,7 @@ async function openSettingsModal() {
   const tmRadio = document.querySelector(`input[name="topbar-mode"][value="${tm?.value ?? 'pinned'}"]`);
   if (tmRadio) tmRadio.checked = true;
 
-  // BambuLab connection state
-  await renderBambuConnectionState();
-
   document.getElementById('settings-modal').classList.remove('hidden');
-}
-
-async function renderBambuConnectionState() {
-  const config = await api('GET', '/api/brands/bambulab/config').catch(() => null);
-  bambuAccountEmail = config?.connected ? (config.email || null) : null;
-  const stateLogin     = document.getElementById('bambu-state-login');
-  const stateVerify    = document.getElementById('bambu-state-verify');
-  const stateConnected = document.getElementById('bambu-state-connected');
-  if (!stateLogin) return;
-
-  if (config?.connected) {
-    stateLogin.classList.add('hidden');
-    stateVerify.classList.add('hidden');
-    stateConnected.classList.remove('hidden');
-    document.getElementById('bambu-connected-email').textContent = config.email || '';
-  } else {
-    stateLogin.classList.remove('hidden');
-    stateVerify.classList.add('hidden');
-    stateConnected.classList.add('hidden');
-    if (config?.email) document.getElementById('bambu-email').value = config.email;
-    if (config?.region) document.getElementById('bambu-region').value = config.region;
-  }
-  // Also refresh connected accounts panel if printers modal is visible
-  if (!document.getElementById('printers-modal').classList.contains('hidden')) await renderConnectedAccounts();
 }
 
 async function bambuConnect() {
@@ -2227,7 +2187,8 @@ async function bambuConnect() {
       document.getElementById('bambu-code').value = '';
       document.getElementById('bambu-code').focus();
     } else if (res.status === 'ok') {
-      await renderBambuConnectionState();
+      await renderConnectedAccounts();
+      await refreshPrinterList();
     }
   } catch (e) {
     alert('Connection failed: ' + (e.message || 'Unknown error'));
@@ -2248,7 +2209,8 @@ async function bambuVerify() {
   try {
     const res = await api('POST', '/api/brands/bambulab/verify', { code });
     if (res.status === 'ok') {
-      await renderBambuConnectionState();
+      await renderConnectedAccounts();
+      await refreshPrinterList();
     }
   } catch (e) {
     alert('Verification failed: ' + (e.message || 'Unknown error'));
@@ -2261,7 +2223,8 @@ async function bambuVerify() {
 async function bambuDisconnect() {
   if (!confirm('Disconnect from BambuLab? Live status updates will stop.')) return;
   await api('DELETE', '/api/brands/bambulab/connect');
-  await renderBambuConnectionState();
+  await renderConnectedAccounts();
+  await refreshPrinterList();
 }
 
 async function saveSettings() {
@@ -2586,7 +2549,7 @@ function setupListeners() {
   document.getElementById('btn-bambu-connect').addEventListener('click', bambuConnect);
   document.getElementById('btn-bambu-verify').addEventListener('click', bambuVerify);
   document.getElementById('btn-bambu-disconnect').addEventListener('click', bambuDisconnect);
-  document.getElementById('btn-bambu-cancel-verify').addEventListener('click', renderBambuConnectionState);
+  document.getElementById('btn-bambu-cancel-verify').addEventListener('click', renderConnectedAccounts);
   document.getElementById('btn-export').addEventListener('click', exportData);
   document.getElementById('btn-import-trigger').addEventListener('click', () =>
     document.getElementById('import-file').click()
