@@ -780,9 +780,19 @@ async function renderDay() {
 
   const dayClosure = closureForDay(navDate);
 
-  // Filter to favourite printers for day view; fall back to all if none are favourited
-  const dayPrinters     = printers.filter(p => p.favourite);
-  const visiblePrinters = dayPrinters.length ? dayPrinters : printers;
+  // Filter to favourite printers for day view
+  const visiblePrinters = printers.filter(p => p.favourite);
+
+  if (!visiblePrinters.length) {
+    container.innerHTML = `
+      <div class="empty-state">
+        <div style="font-size:52px">📅</div>
+        <h2>No printers shown in day view</h2>
+        <p>Open Printer Settings and check <strong>Show in day view</strong> for the printers you want to schedule here.</p>
+        <button class="btn btn-primary" onclick="openPrintersModal()">Open Printer Settings</button>
+      </div>`;
+    return;
+  }
 
   // ---- Build HTML ----
   let h = '<div class="day-view">';
@@ -1975,7 +1985,7 @@ function resetPrinterForm() {
   document.getElementById('printer-brand-other').value  = '';
   document.getElementById('printer-warm-up').value      = '5';
   document.getElementById('printer-cool-down').value    = '15';
-  document.getElementById('printer-favourite').checked  = false;
+  document.getElementById('printer-favourite').checked  = true;
   setBrand('bambulab');
   document.getElementById('printer-dialog-title').textContent = 'Add Printer';
   document.getElementById('btn-save-printer').textContent     = 'Add Printer';

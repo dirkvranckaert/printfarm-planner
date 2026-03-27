@@ -15,18 +15,31 @@ describe('Printer CRUD', () => {
         pinned INTEGER DEFAULT 0,
         warm_up_mins INTEGER DEFAULT 5,
         cool_down_mins INTEGER DEFAULT 15,
-        favourite INTEGER DEFAULT 0
+        favourite INTEGER DEFAULT 1
       );
     `);
   });
 
   test('can insert and retrieve a printer', () => {
     db.prepare('INSERT INTO printers (name, color, brand, pinned, warm_up_mins, cool_down_mins, favourite) VALUES (?,?,?,?,?,?,?)')
-      .run('Test Printer', '#ff0000', 'other', 0, 5, 15, 0);
+      .run('Test Printer', '#ff0000', 'other', 0, 5, 15, 1);
     const printers = db.prepare('SELECT * FROM printers').all();
     expect(printers).toHaveLength(1);
     expect(printers[0].name).toBe('Test Printer');
-    expect(printers[0].favourite).toBe(0);
+    expect(printers[0].favourite).toBe(1);
+  });
+
+  test('new printers default to favourite=1 (visible in day view)', () => {
+    db.prepare('INSERT INTO printers (name, color) VALUES (?,?)').run('Auto-fav', '#123456');
+    const p = db.prepare('SELECT * FROM printers').get();
+    expect(p.favourite).toBe(1);
+  });
+
+  test('unstarring a printer sets favourite=0', () => {
+    const r = db.prepare('INSERT INTO printers (name, color, favourite) VALUES (?,?,?)').run('Star', '#abc', 1);
+    db.prepare('UPDATE printers SET favourite=0 WHERE id=?').run(r.lastInsertRowid);
+    const p = db.prepare('SELECT favourite FROM printers WHERE id=?').get(r.lastInsertRowid);
+    expect(p.favourite).toBe(0);
   });
 
   test('can set a printer as favourite', () => {

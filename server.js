@@ -144,7 +144,7 @@ app.post('/api/printers', (req, res) => {
   const { name, color, brand, bambu_serial, pinned, warm_up_mins, cool_down_mins, favourite } = req.body;
   const wu = warm_up_mins ?? 5;
   const cd = cool_down_mins ?? 15;
-  const fav = favourite ? 1 : 0;
+  const fav = favourite !== undefined ? (favourite ? 1 : 0) : 1; // default to visible in day view
   const result = db.prepare('INSERT INTO printers (name, color, brand, bambu_serial, pinned, warm_up_mins, cool_down_mins, favourite) VALUES (?, ?, ?, ?, ?, ?, ?, ?)').run(name, color, brand || 'other', bambu_serial || null, pinned ? 1 : 0, wu, cd, fav);
   brands.subscribeForPrinter({ brand, bambu_serial });
   res.status(201).json({ id: result.lastInsertRowid, name, color, brand: brand || 'other', bambu_serial: bambu_serial || null, pinned: pinned ? 1 : 0, warm_up_mins: wu, cool_down_mins: cd, favourite: fav });
