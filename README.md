@@ -11,16 +11,18 @@ Built with Node.js + Express + SQLite. Protected by session-based cookie auth. D
 - Day / week / month / upcoming calendar views, plus a Today summary panel
 - Multiple printers, each with a custom color and brand
 - Print jobs with customer name, order number, filament colors, print file, status, and remarks
-- Drag to move or resize jobs in day view
+- **Drag to move or resize jobs in day view** — including across printer columns; buffer blocks (warm-up / cool-down) follow visually during drag; snaps to adjacent job boundaries to prevent overlap
+- **Favourite printers** — mark printers as favourites; only they are shown in day view (all printers still appear in week/month/upcoming). A ⚙ button in the day view header links to printer settings.
 - Queue panel — park jobs with no date yet, schedule them later
 - Closure periods (holidays, breaks) that block scheduling
 - Configurable status colors, default view, queue auto-expand, and topbar display mode on startup
 - Dark / light / system theme (persisted per-browser via settings)
-- Session-based login page (no browser credential dialog)
+- Session-based login page (no browser credential dialog); sessions survive server restarts
 - Sign out link
 - **Live printer status** via brand integrations — progress %, temperatures, remaining time
 - **Multi-color / AMS info** — loaded filament slots shown in the status hover popup; supports single-AMS (P1S) and multi-AMS (H2C) setups
-- **Per-printer buffer times** — configurable warm-up and cool-down periods shown as cross-hatched blocks in day view; included in conflict detection
+- **Per-printer buffer times** — configurable warm-up and cool-down periods shown as cross-hatched blocks in day view; included in conflict detection and drag overlap prevention
+- **Connected Accounts** — BambuLab account linked/unlinked directly from the Printers modal; account status shown in the printer list and edit dialog
 
 ---
 
@@ -166,19 +168,26 @@ PrintFarm Planner connects to BambuLab's cloud MQTT to show real-time printer st
 
 ### Connecting your BambuLab account
 
-1. Open the app → **⋮ menu** → **Settings**
-2. Under **BambuLab Connection**, enter your BambuLab email, password, and MQTT region (`us` for EU/US, `cn` for China)
-3. Click **Connect** — if your account has 2-step verification enabled, a code will be sent to your email; enter it in the next step
-4. Once connected, a green dot confirms the live link is active
+1. Open the app → **⋮ menu** → **Printers**
+2. At the bottom of the panel, under **Connected Accounts**, click **+ Connect BambuLab Account**
+3. Enter your BambuLab email, password, and MQTT region (`us` for EU/US, `cn` for China), then click **Connect**
+4. If your account has 2-step verification, a code is sent to your email — enter it in the next step
+5. Once connected, the account is shown in the Connected Accounts list with a disconnect button
 
-Credentials are stored in the SQLite `settings` table (never in `.env`). You can disconnect at any time via Settings → Disconnect.
+Credentials are stored in the SQLite `settings` table (never in `.env`). You can disconnect at any time from the Connected Accounts panel. The BambuLab connection section in Settings is kept as an alternative entry point.
 
 ### Assigning a serial number to a printer
 
-1. Open **Printers** → add or edit a printer
+1. Open **Printers** → add or edit a printer (opens a dialog)
 2. Select **BambuLab** as the brand
 3. Enter the printer's serial number (found in BambuLab Studio or on the printer label)
-4. Save — the printer will subscribe to live updates immediately
+4. The dialog shows the current BambuLab account connection status next to the serial field
+5. Save — the printer subscribes to live updates immediately
+
+### Account status indicators
+
+- A 🌐 icon appears next to printers in the list when a BambuLab account is connected and the printer has a serial number configured — hover for the account email
+- In the printer edit dialog, a line below the serial field confirms whether the account is linked
 
 ### What is shown
 
@@ -321,11 +330,16 @@ All endpoints (except `GET /login`, `POST /login`, `GET /logout`, and `GET /favi
 | Method | Path | Description |
 |--------|------|-------------|
 | GET | `/api/printers` | List all printers |
-| POST | `/api/printers` | Create printer — body: `{ name, color, brand, bambu_serial?, warm_up_mins?, cool_down_mins? }` |
-| PUT | `/api/printers/:id` | Replace printer — body: `{ name, color, brand, bambu_serial?, warm_up_mins?, cool_down_mins? }` |
+| POST | `/api/printers` | Create printer — body: see fields below |
+| PUT | `/api/printers/:id` | Replace printer — body: see fields below |
 | DELETE | `/api/printers/:id` | Delete printer and all its jobs |
 
+Printer body fields: `name`, `color` (hex), `brand`, `bambu_serial?`, `pinned?` (0/1), `warm_up_mins?`, `cool_down_mins?`, `favourite?` (0/1).
+
 `brand` is a slug string. Known values: `bambulab`, `prusa`, `creality`, `klipper`, `octoprint`, `other`. `bambu_serial` is only relevant when `brand === 'bambulab'`.
+
+`favourite = 1` causes the printer to appear in the day view. If no printers are marked as favourite, all printers are shown.
+`pinned = 1` makes the printer appear in the topbar status chips (subject to `TOPBAR_PRINTER_LIMIT`).
 
 ### Jobs
 
@@ -402,25 +416,27 @@ CREATE TABLE printers (
   color          TEXT NOT NULL,
   brand          TEXT NOT NULL DEFAULT 'other',
   bambu_serial   TEXT,
-  pinned         INTEGER NOT NULL DEFAULT 0,
+  pinned         INTEGER NOT NULL DEFAULT 0,   -- 1 = show in topbar chips
   warm_up_mins   INTEGER NOT NULL DEFAULT 5,
-  cool_down_mins INTEGER NOT NULL DEFAULT 15
+  cool_down_mins INTEGER NOT NULL DEFAULT 15,
+  favourite      INTEGER NOT NULL DEFAULT 0    -- 1 = show in day view
 );
 
 CREATE TABLE jobs (
-  id           INTEGER PRIMARY KEY AUTOINCREMENT,
-  printerId    INTEGER NOT NULL,
-  name         TEXT NOT NULL,
-  customerName TEXT,
-  orderNr      TEXT,
-  start        TEXT NOT NULL,
-  end          TEXT NOT NULL,
-  queued       INTEGER NOT NULL DEFAULT 0,
-  durationMins INTEGER NOT NULL DEFAULT 0,
-  status       TEXT DEFAULT 'Planned',
-  colors       TEXT,
-  printFile    TEXT,
-  remarks      TEXT
+  id                INTEGER PRIMARY KEY AUTOINCREMENT,
+  printerId         INTEGER NOT NULL,
+  name              TEXT NOT NULL,
+  customerName      TEXT,
+  orderNr           TEXT,
+  start             TEXT NOT NULL,
+  end               TEXT NOT NULL,
+  queued            INTEGER NOT NULL DEFAULT 0,
+  durationMins      INTEGER NOT NULL DEFAULT 0,
+  status            TEXT DEFAULT 'Planned',
+  colors            TEXT,
+  printFile         TEXT,
+  remarks           TEXT,
+  linked_printer_id INTEGER   -- set when job is manually linked to a live printer for auto-status updates
 );
 
 CREATE TABLE closures (
@@ -470,6 +486,41 @@ No Bambu credentials go in `.env` — configure the BambuLab connection through 
 | **Render** | Free tier does not support persistent disks — swap SQLite for their free Postgres add-on (driver: `pg`). Paid tier works fine with a disk. |
 | **Fly.io** | Persistent volumes work. Deploy with `flyctl`. |
 | **DigitalOcean VPS** | Most control. Use nginx as a reverse proxy, PM2 as process manager, Let's Encrypt for HTTPS. SQLite just works as a file. |
+
+---
+
+## Testing
+
+The project ships with a Jest test suite covering core DB logic and utility functions.
+
+```sh
+npm test
+```
+
+Test files live in `tests/`:
+
+| File | What it covers |
+|------|---------------|
+| `tests/server.test.js` | Printer CRUD, job CRUD, cascading deletes, session validity logic — all against an in-memory SQLite DB |
+| `tests/utils.test.js` | `snap15`, `toDatetimeLocal`, interval overlap detection, `snapAvoidingJobs` logic |
+
+Tests are run automatically by Jest; no server process is needed. Add new tests alongside any non-trivial logic change.
+
+---
+
+## Day view — drag behaviour
+
+| Action | How |
+|--------|-----|
+| Move a job | Drag anywhere on the job block |
+| Resize a job | Drag the resize handle at the bottom edge |
+| Move to a different printer | Drag the job sideways into another printer column |
+| Create a new job | Click-and-drag on empty space in a column |
+| Schedule a queued job | Drag from the queue panel onto a column |
+
+**Snapping:** All drag operations snap to 15-minute boundaries. When a job is dragged close to another job's occupied zone (job time ± buffer), it snaps to the boundary of that zone instead, preventing overlap.
+
+**Buffers during drag:** Warm-up and cool-down buffer blocks move with the job in real time.
 
 ---
 
