@@ -926,6 +926,9 @@ input[type="color"] {
 .pin-btn:hover { opacity: 0.6; }
 .pin-btn.pinned { opacity: 1; color: #f59e0b; }
 .pin-btn.pinned:hover { opacity: 1; color: #f59e0b; }
+.bambu-linked-icon { font-size:14px; cursor:help; }
+.day-settings-btn { background:none; border:none; cursor:pointer; padding:4px 6px; font-size:14px; color:var(--text-muted); border-radius:4px; line-height:1; }
+.day-settings-btn:hover { background:var(--surface-hover,rgba(0,0,0,.06)); color:var(--text); }
 
 /* ======================== Today panel ======================== */
 .today-panel {

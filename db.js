@@ -70,5 +70,8 @@ if (!printerCols.some(c => c.name === 'warm_up_mins')) {
 if (!printerCols.some(c => c.name === 'cool_down_mins')) {
   db.exec('ALTER TABLE printers ADD COLUMN cool_down_mins INTEGER NOT NULL DEFAULT 15;');
 }
+if (!printerCols.some(c => c.name === 'favourite')) {
+  db.exec('ALTER TABLE printers ADD COLUMN favourite INTEGER NOT NULL DEFAULT 0;');
+}
 
 module.exports = db;

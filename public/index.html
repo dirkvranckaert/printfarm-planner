@@ -180,8 +180,29 @@
       </div>
       <div class="modal-body">
         <div id="printers-list"></div>
+        <div style="margin-top:10px">
+          <button type="button" id="btn-add-printer" class="btn btn-primary">+ Add Printer</button>
+        </div>
         <hr class="divider">
-        <h3 id="printer-form-title">Add Printer</h3>
+        <h3 style="font-size:14px;font-weight:600;margin-bottom:8px">Connected Accounts</h3>
+        <div id="connected-accounts-list"></div>
+      </div>
+      <div class="modal-footer">
+        <div class="modal-footer-right">
+          <button class="btn btn-secondary" data-close="printers-modal">Close</button>
+        </div>
+      </div>
+    </div>
+  </div>
+
+  <!-- ==================== Printer Dialog (Add/Edit) ==================== -->
+  <div id="printer-dialog" class="modal-overlay hidden">
+    <div class="modal">
+      <div class="modal-header">
+        <h2 id="printer-dialog-title">Add Printer</h2>
+        <button class="modal-close" data-close="printer-dialog">✕</button>
+      </div>
+      <div class="modal-body">
         <div class="form-group">
           <label for="printer-name">Name *</label>
           <input type="text" id="printer-name" placeholder="e.g. My P1S">
@@ -209,6 +230,13 @@
         <div id="printer-fields-bambulab" class="form-group">
           <label for="printer-bambu-serial">Serial Number <span style="font-weight:400;color:var(--text-muted)">(optional — for live status)</span></label>
           <input type="text" id="printer-bambu-serial" class="form-input" placeholder="e.g. 01P00A123456789" autocomplete="off">
+          <div id="printer-bambu-account-status" style="font-size:12px;margin-top:4px;color:var(--text-muted)"></div>
+        </div>
+        <div class="form-group">
+          <label class="radio-label" style="font-size:14px">
+            <input type="checkbox" id="printer-favourite">
+            <span>Show in day view (favourite)</span>
+          </label>
         </div>
         <div class="form-group" style="margin-bottom:0">
           <label>Buffer time <span style="font-weight:400;color:var(--text-muted)">(blocked on calendar around each job)</span></label>
@@ -225,9 +253,8 @@
         </div>
       </div>
       <div class="modal-footer">
-        <button id="btn-cancel-printer" class="btn btn-secondary hidden">Cancel Edit</button>
         <div class="modal-footer-right">
-          <button class="btn btn-secondary" data-close="printers-modal">Close</button>
+          <button class="btn btn-secondary" data-close="printer-dialog">Cancel</button>
           <button id="btn-save-printer" class="btn btn-primary">Add Printer</button>
         </div>
       </div>

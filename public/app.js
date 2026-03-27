@@ -307,6 +307,7 @@ let printerStatus    = {};       // keyed by "brand:serial" — live status from
 let topbarLimit      = 3;        // max chips shown; set from /api/config
 let topbarModeCache  = 'pinned'; // 'pinned' | 'active'; loaded on init
 let _lastTopbarIds   = null;     // comma-joined IDs of last rendered chips; null forces a rebuild
+let bambuAccountEmail = null;    // set when BambuLab account is connected
 
 // =============================================================================
 // Init
@@ -779,15 +780,20 @@ async function renderDay() {
 
   const dayClosure = closureForDay(navDate);
 
+  // Filter to favourite printers for day view; fall back to all if none are favourited
+  const dayPrinters     = printers.filter(p => p.favourite);
+  const visiblePrinters = dayPrinters.length ? dayPrinters : printers;
+
   // ---- Build HTML ----
   let h = '<div class="day-view">';
 
   // Header (printer columns)
   h += '<div class="day-view-header">';
   h += '<div class="day-time-gutter-header"></div>';
-  printers.forEach(p => {
+  visiblePrinters.forEach(p => {
     h += `<div class="day-printer-header" style="color:${p.color}">${escHtml(p.name)}</div>`;
   });
+  h += '<button class="day-settings-btn" onclick="openPrintersModal()" title="Printer settings (choose favourites for day view)">⚙</button>';
   h += '</div>';
 
   // Closure banner
@@ -809,7 +815,7 @@ async function renderDay() {
   h += '</div>';
 
   // One column per printer
-  printers.forEach(p => {
+  visiblePrinters.forEach(p => {
     h += `<div class="day-printer-col${dayClosure ? ' day-col-closed' : ''}" data-printer-id="${p.id}">`;
     if (dayClosure) h += '<div class="day-closed-overlay"></div>';
 
@@ -844,7 +850,7 @@ async function renderDay() {
         const bTop = Math.max(0, topPx - warmUp);
         const bHt  = topPx - bTop;
         if (bHt > 0) {
-          h += `<div class="buffer-block" style="top:${bTop}px;height:${bHt}px">${bHt >= 10 ? '<span class="buffer-label">Warm-up</span>' : ''}</div>`;
+          h += `<div class="buffer-block" data-job-id="${job.id}" data-buffer-type="warmup" style="top:${bTop}px;height:${bHt}px">${bHt >= 10 ? '<span class="buffer-label">Warm-up</span>' : ''}</div>`;
         }
       }
 
@@ -869,7 +875,7 @@ async function renderDay() {
         const bTop = topPx + htPx;
         const bHt  = Math.min(coolDown, DAY_MINS - bTop);
         if (bHt > 0) {
-          h += `<div class="buffer-block" style="top:${bTop}px;height:${bHt}px">${bHt >= 10 ? '<span class="buffer-label">Cool-down</span>' : ''}</div>`;
+          h += `<div class="buffer-block" data-job-id="${job.id}" data-buffer-type="cooldown" style="top:${bTop}px;height:${bHt}px">${bHt >= 10 ? '<span class="buffer-label">Cool-down</span>' : ''}</div>`;
         }
       }
     });
@@ -900,6 +906,40 @@ async function renderDay() {
 
 // Snap a pixel offset (= minutes at HOUR_HEIGHT=60) to the nearest 15-min boundary.
 function snap15(px) { return Math.round(px / 15) * 15; }
+
+// Returns a start position (in minutes) that avoids overlapping any other job's buffer zone on the same printer column.
+function snapAvoidingJobs(proposedStart, durationMins, printerId, excludeJobId) {
+  const printer = printers.find(p => p.id === printerId);
+  const myWu    = printer?.warm_up_mins  ?? 0;
+  const myCd    = printer?.cool_down_mins ?? 0;
+
+  const dayS = new Date(navDate); dayS.setHours(0,0,0,0);
+
+  // Build list of occupied intervals (excluding the dragged job itself)
+  const intervals = Object.values(jobsCache)
+    .filter(j => !j.queued && j.printerId === printerId && j.id !== excludeJobId)
+    .map(j => {
+      const s = (new Date(j.start).getTime() - dayS.getTime()) / 60_000;
+      const e = (new Date(j.end).getTime()   - dayS.getTime()) / 60_000;
+      return { start: s - myWu, end: e + myCd };
+    });
+
+  // My occupied interval
+  const myStart = proposedStart - myWu;
+  const myEnd   = proposedStart + durationMins + myCd;
+
+  for (const iv of intervals) {
+    if (myStart < iv.end && myEnd > iv.start) {
+      // Overlap detected: snap to the nearest boundary
+      const snapBefore = iv.start - durationMins - myCd; // place my job just before this one
+      const snapAfter  = iv.end   + myWu;                // place my job just after this one
+      const distBefore = Math.abs(proposedStart - snapBefore);
+      const distAfter  = Math.abs(proposedStart - snapAfter);
+      return Math.max(0, distBefore < distAfter ? snapBefore : snapAfter);
+    }
+  }
+  return proposedStart;
+}
 
 function updateDragPreview() {
   if (!drag) return;
@@ -983,18 +1023,51 @@ function onDragMove(e) {
     return;
   }
 
-  const rect = drag.colEl.getBoundingClientRect();
-  const y    = snap15(Math.max(0, Math.min(e.clientY - rect.top, DAY_MINS + 240)));
-
   if (drag.type === 'move') {
-    const newTop = Math.max(0, Math.min(y - drag.offsetMins, DAY_MINS + 240 - drag.durationMins));
+    // Check if cursor is over a different printer column
+    const allCols = document.querySelectorAll('.day-printer-col');
+    let hoveredCol = drag.colEl;
+    allCols.forEach(col => {
+      const r = col.getBoundingClientRect();
+      if (e.clientX >= r.left && e.clientX <= r.right) hoveredCol = col;
+    });
+
+    if (hoveredCol !== drag.colEl) {
+      // Move the job element to the new column
+      hoveredCol.appendChild(drag.jobEl);
+      if (drag.warmUpEl)   hoveredCol.appendChild(drag.warmUpEl);
+      if (drag.coolDownEl) hoveredCol.appendChild(drag.coolDownEl);
+      drag.colEl = hoveredCol;
+      drag.printerId = parseInt(hoveredCol.dataset.printerId);
+    }
+
+    const rect = drag.colEl.getBoundingClientRect();
+    const y    = snap15(Math.max(0, Math.min(e.clientY - rect.top, DAY_MINS + 240)));
+
+    const snapped = snapAvoidingJobs(snap15(Math.max(0, Math.min(y - drag.offsetMins, DAY_MINS + 240 - drag.durationMins))), drag.durationMins, drag.printerId, drag.jobId);
+    const newTop  = Math.max(0, Math.min(snapped, DAY_MINS + 240 - drag.durationMins));
     if (Math.abs(newTop - drag.currentTopMins) >= 1) drag.moved = true;
     drag.currentTopMins = newTop;
     drag.jobEl.style.top = newTop + 'px';
     drag.jobEl.style.opacity = '0.75';
     drag.jobEl.style.zIndex  = '10';
     expandDayBodyForDrag(newTop + drag.durationMins);
-  } else if (drag.type === 'resize') {
+    if (drag.warmUpEl) {
+      const bTop = Math.max(0, newTop - drag.warmUpMins);
+      const bHt  = newTop - bTop;
+      drag.warmUpEl.style.top    = bTop + 'px';
+      drag.warmUpEl.style.height = bHt  + 'px';
+    }
+    if (drag.coolDownEl) {
+      drag.coolDownEl.style.top = (newTop + drag.durationMins) + 'px';
+    }
+    return;
+  }
+
+  const rect = drag.colEl.getBoundingClientRect();
+  const y    = snap15(Math.max(0, Math.min(e.clientY - rect.top, DAY_MINS + 240)));
+
+  if (drag.type === 'resize') {
     const newEnd = Math.max(drag.startMins + 15, y);
     if (Math.abs(newEnd - drag.currentEndMins) >= 1) drag.moved = true;
     drag.currentEndMins = newEnd;
@@ -1068,7 +1141,7 @@ async function onDragEnd() {
   }
 
   // move or resize
-  const { type, jobId, job, moved, currentTopMins, currentEndMins, startMins, jobEl } = drag;
+  const { type, jobId, job, moved, currentTopMins, currentEndMins, startMins, jobEl, printerId: dragPrinterId } = drag;
   jobEl.style.opacity = '';
   jobEl.style.zIndex  = '';
   document.body.classList.remove('is-moving', 'is-resizing');
@@ -1086,7 +1159,7 @@ async function onDragEnd() {
     newStart.setHours(Math.floor(currentTopMins / 60), currentTopMins % 60, 0, 0);
     const durMs  = new Date(job.end) - new Date(job.start);
     const newEnd = new Date(newStart.getTime() + durMs);
-    await api('PATCH', `/api/jobs/${jobId}`, { start: toDatetimeLocal(newStart), end: toDatetimeLocal(newEnd) });
+    await api('PATCH', `/api/jobs/${jobId}`, { printerId: dragPrinterId, start: toDatetimeLocal(newStart), end: toDatetimeLocal(newEnd) });
   } else if (type === 'resize') {
     const newEnd = new Date(navDate);
     newEnd.setHours(Math.floor(currentEndMins / 60), currentEndMins % 60, 0, 0);
@@ -1120,6 +1193,7 @@ function attachDayEvents() {
       const colRect = colEl.getBoundingClientRect();
       const elRect  = el.getBoundingClientRect();
       const topMins = elRect.top - colRect.top;
+      const printer = printers.find(p => p.id === parseInt(colEl.dataset.printerId));
 
       drag = {
         type: 'move',
@@ -1131,6 +1205,11 @@ function attachDayEvents() {
         currentTopMins: topMins,
         durationMins: Math.round((new Date(job.end) - new Date(job.start)) / 60_000),
         moved: false,
+        warmUpEl:     colEl.querySelector(`.buffer-block[data-job-id="${jobId}"][data-buffer-type="warmup"]`),
+        coolDownEl:   colEl.querySelector(`.buffer-block[data-job-id="${jobId}"][data-buffer-type="cooldown"]`),
+        warmUpMins:   printer?.warm_up_mins  ?? 0,
+        coolDownMins: printer?.cool_down_mins ?? 0,
+        printerId:    printer?.id ?? job.printerId,
       };
       document.body.classList.add('is-moving');
       e.preventDefault();
@@ -1778,9 +1857,46 @@ async function deleteJob() {
 async function openPrintersModal() {
   editPrintId = null;
   await refreshPrinterList();
-  resetPrinterForm();
+  await renderConnectedAccounts();
+  document.getElementById('printers-modal').classList.remove('hidden');
+}
 
-  // Colour swatches
+async function renderConnectedAccounts() {
+  const list = document.getElementById('connected-accounts-list');
+  if (!list) return;
+  const config = await api('GET', '/api/brands/bambulab/config').catch(() => null);
+  bambuAccountEmail = config?.connected ? (config.email || null) : null;
+  if (config?.connected) {
+    list.innerHTML = `
+      <div class="printer-item">
+        <span style="font-size:18px">🌐</span>
+        <span class="printer-item-name"><strong>BambuLab</strong> — ${escHtml(config.email || '')}</span>
+        <div class="printer-item-actions">
+          <button class="btn btn-secondary btn-sm" onclick="bambuDisconnectFromPrinters()">Disconnect</button>
+        </div>
+      </div>`;
+  } else {
+    list.innerHTML = `
+      <div style="font-size:13px;color:var(--text-muted);margin-bottom:8px">No accounts connected.</div>
+      <button type="button" id="btn-bambu-link" class="btn btn-secondary" onclick="openBambuLinkDialog()">+ Connect BambuLab Account</button>`;
+  }
+}
+
+async function bambuDisconnectFromPrinters() {
+  if (!confirm('Disconnect from BambuLab? Live status updates will stop.')) return;
+  await api('DELETE', '/api/brands/bambulab/connect');
+  await renderConnectedAccounts();
+  await refreshPrinterList();
+}
+
+async function openBambuLinkDialog() {
+  // Re-use settings modal for now by opening it (the BambuLab section is there)
+  document.getElementById('printers-modal').classList.add('hidden');
+  await openSettingsModal();
+}
+
+async function openPrinterDialog(id) {
+  // Populate colour swatches
   const swatches = document.getElementById('color-swatches');
   swatches.innerHTML = PRESET_COLORS.map(c =>
     `<div class="color-swatch" style="background:${c}" data-color="${c}" title="${c}"></div>`
@@ -1789,7 +1905,12 @@ async function openPrintersModal() {
     s.addEventListener('click', () => { document.getElementById('printer-color').value = s.dataset.color; })
   );
 
-  document.getElementById('printers-modal').classList.remove('hidden');
+  if (id) {
+    editPrinter(id);
+  } else {
+    resetPrinterForm();
+  }
+  document.getElementById('printer-dialog').classList.remove('hidden');
   document.getElementById('printer-name').focus();
 }
 
@@ -1801,16 +1922,21 @@ async function refreshPrinterList() {
     return;
   }
   const pinnedCount = printers.filter(p => p.pinned).length;
-  list.innerHTML = printers.map(p => `
+  list.innerHTML = printers.map(p => {
+    const bambuIcon = (p.brand === 'bambulab' && p.bambu_serial && bambuAccountEmail)
+      ? `<span class="bambu-linked-icon" title="Connected to BambuLab account (${escHtml(bambuAccountEmail)})">🌐</span>`
+      : '';
+    return `
     <div class="printer-item">
       <div class="printer-color-dot" style="background:${p.color}"></div>
-      <span class="printer-item-name">${escHtml(p.name)}${printerStatusPillHtml(p)}</span>
+      <span class="printer-item-name">${escHtml(p.name)}${printerStatusPillHtml(p)}${bambuIcon}</span>
       <div class="printer-item-actions">
         <button class="btn-icon pin-btn${p.pinned ? ' pinned' : ''}" onclick="togglePrinterPinned(${p.id}, ${p.pinned ? 0 : 1})" title="${p.pinned ? 'Unpin from topbar' : (pinnedCount >= topbarLimit ? `Max ${topbarLimit} pinned` : 'Pin to topbar')}">⭐</button>
-        <button class="btn-icon" onclick="editPrinter(${p.id})" title="Edit">✏️</button>
+        <button class="btn-icon" onclick="openPrinterDialog(${p.id})" title="Edit">✏️</button>
         <button class="btn-icon danger" onclick="deletePrinter(${p.id})" title="Delete">🗑</button>
       </div>
-    </div>`).join('');
+    </div>`;
+  }).join('');
 }
 
 async function togglePrinterPinned(id, newVal) {
@@ -1849,10 +1975,10 @@ function resetPrinterForm() {
   document.getElementById('printer-brand-other').value  = '';
   document.getElementById('printer-warm-up').value      = '5';
   document.getElementById('printer-cool-down').value    = '15';
+  document.getElementById('printer-favourite').checked  = false;
   setBrand('bambulab');
-  document.getElementById('printer-form-title').textContent = 'Add Printer';
-  document.getElementById('btn-save-printer').textContent   = 'Add Printer';
-  document.getElementById('btn-cancel-printer').classList.add('hidden');
+  document.getElementById('printer-dialog-title').textContent = 'Add Printer';
+  document.getElementById('btn-save-printer').textContent     = 'Add Printer';
 }
 
 function editPrinter(id) {
@@ -1862,6 +1988,7 @@ function editPrinter(id) {
   document.getElementById('printer-name').value         = p.name;
   document.getElementById('printer-color').value        = p.color;
   document.getElementById('printer-bambu-serial').value = p.bambu_serial || '';
+  document.getElementById('printer-favourite').checked  = !!p.favourite;
   const knownBrands = ['bambulab', 'prusa', 'creality', 'klipper', 'octoprint'];
   const brand = p.brand || 'other';
   if (knownBrands.includes(brand)) {
@@ -1872,10 +1999,21 @@ function editPrinter(id) {
   }
   document.getElementById('printer-warm-up').value      = p.warm_up_mins  ?? 5;
   document.getElementById('printer-cool-down').value    = p.cool_down_mins ?? 15;
-  document.getElementById('printer-form-title').textContent = 'Edit Printer';
-  document.getElementById('btn-save-printer').textContent   = 'Save Changes';
-  document.getElementById('btn-cancel-printer').classList.remove('hidden');
-  document.getElementById('printer-name').focus();
+  document.getElementById('printer-dialog-title').textContent = 'Edit Printer';
+  document.getElementById('btn-save-printer').textContent     = 'Save Changes';
+  // Show BambuLab account status in dialog
+  const statusEl = document.getElementById('printer-bambu-account-status');
+  if (statusEl) {
+    if (p.brand === 'bambulab' && bambuAccountEmail) {
+      statusEl.textContent = `🌐 Connected to BambuLab account: ${bambuAccountEmail}`;
+      statusEl.style.color = 'var(--success, #22c55e)';
+    } else if (p.brand === 'bambulab') {
+      statusEl.textContent = 'No BambuLab account connected. Add one in "Connected Accounts".';
+      statusEl.style.color = 'var(--text-muted)';
+    } else {
+      statusEl.textContent = '';
+    }
+  }
 }
 
 async function savePrinter() {
@@ -1890,14 +2028,18 @@ async function savePrinter() {
     : null;
   const warm_up_mins   = parseInt(document.getElementById('printer-warm-up').value,  10) || 0;
   const cool_down_mins = parseInt(document.getElementById('printer-cool-down').value, 10) || 0;
+  const favourite      = document.getElementById('printer-favourite').checked ? 1 : 0;
   if (!name) return alert('Please enter a printer name.');
 
   const pinned = editPrintId !== null ? (printers.find(p => p.id === editPrintId)?.pinned ?? 0) : 0;
-  if (editPrintId !== null) await api('PUT', `/api/printers/${editPrintId}`, { name, color, brand, bambu_serial, pinned, warm_up_mins, cool_down_mins });
-  else                      await api('POST', '/api/printers', { name, color, brand, bambu_serial, pinned: 0, warm_up_mins, cool_down_mins });
+  if (editPrintId !== null) {
+    await api('PUT', `/api/printers/${editPrintId}`, { name, color, brand, bambu_serial, pinned, warm_up_mins, cool_down_mins, favourite });
+  } else {
+    await api('POST', '/api/printers', { name, color, brand, bambu_serial, pinned: 0, warm_up_mins, cool_down_mins, favourite });
+  }
 
+  document.getElementById('printer-dialog').classList.add('hidden');
   await refreshPrinterList();
-  resetPrinterForm();
   renderCalendar();
 }
 
@@ -2026,6 +2168,7 @@ async function openSettingsModal() {
 
 async function renderBambuConnectionState() {
   const config = await api('GET', '/api/brands/bambulab/config').catch(() => null);
+  bambuAccountEmail = config?.connected ? (config.email || null) : null;
   const stateLogin     = document.getElementById('bambu-state-login');
   const stateVerify    = document.getElementById('bambu-state-verify');
   const stateConnected = document.getElementById('bambu-state-connected');
@@ -2043,6 +2186,8 @@ async function renderBambuConnectionState() {
     if (config?.email) document.getElementById('bambu-email').value = config.email;
     if (config?.region) document.getElementById('bambu-region').value = config.region;
   }
+  // Also refresh connected accounts panel if printers modal is visible
+  if (!document.getElementById('printers-modal').classList.contains('hidden')) await renderConnectedAccounts();
 }
 
 async function bambuConnect() {
@@ -2435,7 +2580,7 @@ function setupListeners() {
   document.getElementById('btn-save-job').addEventListener('click',    saveJob);
   document.getElementById('btn-delete-job').addEventListener('click',  deleteJob);
   document.getElementById('btn-save-printer').addEventListener('click',  savePrinter);
-  document.getElementById('btn-cancel-printer').addEventListener('click', resetPrinterForm);
+  document.getElementById('btn-add-printer').addEventListener('click', () => openPrinterDialog(null));
   document.getElementById('brand-picker').addEventListener('click', e => {
     const btn = e.target.closest('.brand-btn');
     if (btn) setBrand(btn.dataset.brand);
@@ -2470,7 +2615,7 @@ function setupListeners() {
   document.addEventListener('keydown', e => {
     if (e.key !== 'Escape') return;
     hideCtxMenu();
-    ['job-modal', 'printers-modal', 'closures-modal', 'settings-modal', 'status-overview-modal'].forEach(id => {
+    ['job-modal', 'printers-modal', 'printer-dialog', 'closures-modal', 'settings-modal', 'status-overview-modal'].forEach(id => {
       if (!document.getElementById(id).classList.contains('hidden')) closeModal(id);
     });
   });

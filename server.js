@@ -141,20 +141,22 @@ app.get('/api/printers', (req, res) => {
   res.json(db.prepare('SELECT * FROM printers').all());
 });
 app.post('/api/printers', (req, res) => {
-  const { name, color, brand, bambu_serial, pinned, warm_up_mins, cool_down_mins } = req.body;
+  const { name, color, brand, bambu_serial, pinned, warm_up_mins, cool_down_mins, favourite } = req.body;
   const wu = warm_up_mins ?? 5;
   const cd = cool_down_mins ?? 15;
-  const result = db.prepare('INSERT INTO printers (name, color, brand, bambu_serial, pinned, warm_up_mins, cool_down_mins) VALUES (?, ?, ?, ?, ?, ?, ?)').run(name, color, brand || 'other', bambu_serial || null, pinned ? 1 : 0, wu, cd);
+  const fav = favourite ? 1 : 0;
+  const result = db.prepare('INSERT INTO printers (name, color, brand, bambu_serial, pinned, warm_up_mins, cool_down_mins, favourite) VALUES (?, ?, ?, ?, ?, ?, ?, ?)').run(name, color, brand || 'other', bambu_serial || null, pinned ? 1 : 0, wu, cd, fav);
   brands.subscribeForPrinter({ brand, bambu_serial });
-  res.status(201).json({ id: result.lastInsertRowid, name, color, brand: brand || 'other', bambu_serial: bambu_serial || null, pinned: pinned ? 1 : 0, warm_up_mins: wu, cool_down_mins: cd });
+  res.status(201).json({ id: result.lastInsertRowid, name, color, brand: brand || 'other', bambu_serial: bambu_serial || null, pinned: pinned ? 1 : 0, warm_up_mins: wu, cool_down_mins: cd, favourite: fav });
 });
 app.put('/api/printers/:id', (req, res) => {
-  const { name, color, brand, bambu_serial, pinned, warm_up_mins, cool_down_mins } = req.body;
+  const { name, color, brand, bambu_serial, pinned, warm_up_mins, cool_down_mins, favourite } = req.body;
   const wu = warm_up_mins ?? 5;
   const cd = cool_down_mins ?? 15;
-  db.prepare('UPDATE printers SET name=?, color=?, brand=?, bambu_serial=?, pinned=?, warm_up_mins=?, cool_down_mins=? WHERE id=?').run(name, color, brand || 'other', bambu_serial || null, pinned ? 1 : 0, wu, cd, req.params.id);
+  const fav = favourite ? 1 : 0;
+  db.prepare('UPDATE printers SET name=?, color=?, brand=?, bambu_serial=?, pinned=?, warm_up_mins=?, cool_down_mins=?, favourite=? WHERE id=?').run(name, color, brand || 'other', bambu_serial || null, pinned ? 1 : 0, wu, cd, fav, req.params.id);
   brands.subscribeForPrinter({ brand, bambu_serial });
-  res.json({ id: Number(req.params.id), name, color, brand: brand || 'other', bambu_serial: bambu_serial || null, pinned: pinned ? 1 : 0, warm_up_mins: wu, cool_down_mins: cd });
+  res.json({ id: Number(req.params.id), name, color, brand: brand || 'other', bambu_serial: bambu_serial || null, pinned: pinned ? 1 : 0, warm_up_mins: wu, cool_down_mins: cd, favourite: fav });
 });
 app.delete('/api/printers/:id', (req, res) => {
   db.prepare('DELETE FROM jobs WHERE printerId=?').run(req.params.id);
