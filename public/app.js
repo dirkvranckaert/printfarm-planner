@@ -308,6 +308,7 @@ let topbarLimit      = 3;        // max chips shown; set from /api/config
 let topbarModeCache  = 'pinned'; // 'pinned' | 'active'; loaded on init
 let _lastTopbarIds   = null;     // comma-joined IDs of last rendered chips; null forces a rebuild
 let bambuAccountEmail = null;    // set when BambuLab account is connected
+let pushSubscribed = false;
 
 // =============================================================================
 // Init
@@ -325,6 +326,11 @@ async function init() {
   if (config?.version) {
     const el = document.getElementById('app-version');
     if (el) el.textContent = `v${config.version}`;
+  }
+
+  // Register service worker for push notifications
+  if ('serviceWorker' in navigator) {
+    navigator.serviceWorker.register('/sw.js').catch(() => {});
   }
 
   // Apply saved theme before first render
@@ -2140,6 +2146,84 @@ async function deleteClosure(id) {
 }
 
 // =============================================================================
+// Push notifications
+// =============================================================================
+function urlBase64ToUint8Array(base64String) {
+  const padding = '='.repeat((4 - base64String.length % 4) % 4);
+  const base64 = (base64String + padding).replace(/-/g, '+').replace(/_/g, '/');
+  const rawData = atob(base64);
+  const output = new Uint8Array(rawData.length);
+  for (let i = 0; i < rawData.length; i++) output[i] = rawData.charCodeAt(i);
+  return output;
+}
+
+function renderPushSubscribeSection() {
+  const section = document.getElementById('push-subscribe-section');
+  const prefs   = document.getElementById('push-prefs-section');
+  if (!section) return;
+  if (!('serviceWorker' in navigator) || !('PushManager' in window)) {
+    section.innerHTML = '<p style="font-size:13px;color:var(--text-muted)">Push notifications are not supported by this browser.</p>';
+    return;
+  }
+  if (Notification.permission === 'denied') {
+    section.innerHTML = '<p style="font-size:13px;color:var(--text-muted)">Push notifications blocked by browser. Allow them in browser settings.</p>';
+    if (prefs) prefs.classList.add('hidden');
+    return;
+  }
+  if (pushSubscribed) {
+    section.innerHTML = '<div style="display:flex;align-items:center;gap:10px"><span style="font-size:13px;color:var(--success,#22c55e)">● Enabled</span><button type="button" id="btn-push-unsubscribe" class="btn btn-secondary btn-sm">Disable</button></div>';
+    document.getElementById('btn-push-unsubscribe').addEventListener('click', unsubscribePush);
+    if (prefs) prefs.classList.remove('hidden');
+  } else {
+    section.innerHTML = '<button type="button" id="btn-push-subscribe" class="btn btn-secondary">Enable Push Notifications</button>';
+    document.getElementById('btn-push-subscribe').addEventListener('click', subscribePush);
+    if (prefs) prefs.classList.add('hidden');
+  }
+}
+
+async function checkPushSubscription() {
+  if (!('serviceWorker' in navigator) || !('PushManager' in window)) return;
+  try {
+    const reg = await navigator.serviceWorker.ready;
+    const sub = await reg.pushManager.getSubscription();
+    pushSubscribed = !!sub;
+  } catch { pushSubscribed = false; }
+}
+
+async function subscribePush() {
+  try {
+    const permission = await Notification.requestPermission();
+    if (permission !== 'granted') { renderPushSubscribeSection(); return; }
+    const reg = await navigator.serviceWorker.ready;
+    const { publicKey } = await api('GET', '/api/push/public-key');
+    const sub = await reg.pushManager.subscribe({
+      userVisibleOnly: true,
+      applicationServerKey: urlBase64ToUint8Array(publicKey)
+    });
+    await api('POST', '/api/push/subscribe', sub.toJSON());
+    pushSubscribed = true;
+    renderPushSubscribeSection();
+  } catch (e) {
+    alert('Could not enable push notifications: ' + (e.message || e));
+  }
+}
+
+async function unsubscribePush() {
+  try {
+    const reg = await navigator.serviceWorker.ready;
+    const sub = await reg.pushManager.getSubscription();
+    if (sub) {
+      await api('DELETE', '/api/push/unsubscribe', sub.toJSON());
+      await sub.unsubscribe();
+    }
+    pushSubscribed = false;
+    renderPushSubscribeSection();
+  } catch (e) {
+    alert('Could not disable push notifications: ' + (e.message || e));
+  }
+}
+
+// =============================================================================
 // Settings modal
 // =============================================================================
 async function openSettingsModal() {
@@ -2165,6 +2249,19 @@ async function openSettingsModal() {
   const tm = await api('GET', '/api/settings/topbarMode');
   const tmRadio = document.querySelector(`input[name="topbar-mode"][value="${tm?.value ?? 'pinned'}"]`);
   if (tmRadio) tmRadio.checked = true;
+
+  // Push notification settings
+  await checkPushSubscription();
+  renderPushSubscribeSection();
+  const pnd = await api('GET', '/api/settings/push.notify.done').catch(() => null);
+  const pns = await api('GET', '/api/settings/push.notify.started').catch(() => null);
+  const pnu = await api('GET', '/api/settings/push.notify.upcoming').catch(() => null);
+  const cbDone     = document.getElementById('push-notify-done');
+  const cbStarted  = document.getElementById('push-notify-started');
+  const cbUpcoming = document.getElementById('push-notify-upcoming');
+  if (cbDone)     cbDone.checked     = pnd?.value !== false;
+  if (cbStarted)  cbStarted.checked  = pns?.value !== false;
+  if (cbUpcoming) cbUpcoming.checked = pnu?.value !== false;
 
   document.getElementById('settings-modal').classList.remove('hidden');
 }
@@ -2251,6 +2348,14 @@ async function saveSettings() {
   await api('PUT', '/api/settings/topbarMode', { value: topbarMode });
   topbarModeCache = topbarMode;
   _lastTopbarIds  = null; // force chip rebuild after mode change
+
+  // Save push notification preferences
+  const cbDone     = document.getElementById('push-notify-done');
+  const cbStarted  = document.getElementById('push-notify-started');
+  const cbUpcoming = document.getElementById('push-notify-upcoming');
+  if (cbDone)     await api('PUT', '/api/settings/push.notify.done',     { value: cbDone.checked });
+  if (cbStarted)  await api('PUT', '/api/settings/push.notify.started',  { value: cbStarted.checked });
+  if (cbUpcoming) await api('PUT', '/api/settings/push.notify.upcoming', { value: cbUpcoming.checked });
 
   closeModal('settings-modal');
   renderCalendar();

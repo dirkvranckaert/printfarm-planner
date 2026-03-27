@@ -379,6 +379,27 @@
         </div>
         <hr class="divider">
         <div class="form-group" style="margin-bottom:0">
+          <label>Push Notifications</label>
+          <div id="push-subscribe-section" style="margin-top:6px">
+            <!-- JS renders button + status here -->
+          </div>
+          <div id="push-prefs-section" class="hidden" style="margin-top:10px">
+            <label class="checkbox-label" style="font-size:13px">
+              <input type="checkbox" id="push-notify-done">
+              <span>Printer finished printing</span>
+            </label>
+            <label class="checkbox-label" style="font-size:13px;margin-top:4px">
+              <input type="checkbox" id="push-notify-started">
+              <span>Printer started printing</span>
+            </label>
+            <label class="checkbox-label" style="font-size:13px;margin-top:4px">
+              <input type="checkbox" id="push-notify-upcoming">
+              <span>Scheduled job about to start</span>
+            </label>
+          </div>
+        </div>
+        <hr class="divider">
+        <div class="form-group" style="margin-bottom:0">
           <label>Data</label>
           <div style="display:flex;gap:8px;margin-top:4px">
             <button type="button" id="btn-export" class="btn btn-secondary">↓ Export JSON</button>

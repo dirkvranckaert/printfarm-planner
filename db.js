@@ -75,6 +75,19 @@ if (!printerCols.some(c => c.name === 'favourite')) {
   db.exec('ALTER TABLE printers ADD COLUMN favourite INTEGER NOT NULL DEFAULT 1;');
 }
 
+// push_subscriptions table
+db.exec(`CREATE TABLE IF NOT EXISTS push_subscriptions (
+  id INTEGER PRIMARY KEY AUTOINCREMENT,
+  subscription TEXT NOT NULL,
+  created_at INTEGER NOT NULL DEFAULT (strftime('%s','now')*1000)
+);`);
+
+// start_push_sent column for upcoming job notifications
+const jobColsAfter = db.pragma('table_info(jobs)');
+if (!jobColsAfter.some(c => c.name === 'start_push_sent')) {
+  db.exec('ALTER TABLE jobs ADD COLUMN start_push_sent INTEGER NOT NULL DEFAULT 0');
+}
+
 // One-time migration: if the favourite column was previously added with DEFAULT 0
 // (all printers show favourite=0), set them all to 1 so they appear in day view.
 const favMigrated = db.prepare("SELECT value FROM settings WHERE key='favouriteMigrated'").get();

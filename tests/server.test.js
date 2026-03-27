@@ -162,6 +162,97 @@ describe('Job CRUD', () => {
   });
 });
 
+describe('Push notification helpers', () => {
+  test('buildDoneMessage with job, orderNr and customerName', () => {
+    const printer = { name: 'P1S' };
+    const job = { name: 'Keychain Dirk', orderNr: '100', customerName: 'Dirk' };
+    let body = `Printer ${printer.name} has done printing `;
+    if (job.orderNr) body += `order #${job.orderNr}: `;
+    body += `'${job.name}'`;
+    if (job.customerName) body += ` (${job.customerName})`;
+    expect(body).toBe("Printer P1S has done printing order #100: 'Keychain Dirk' (Dirk)");
+  });
+
+  test('buildDoneMessage with job, no orderNr, no customerName', () => {
+    const printer = { name: 'H2C' };
+    const job = { name: 'Name tag', orderNr: null, customerName: null };
+    let body = `Printer ${printer.name} has done printing `;
+    if (job.orderNr) body += `order #${job.orderNr}: `;
+    body += `'${job.name}'`;
+    if (job.customerName) body += ` (${job.customerName})`;
+    expect(body).toBe("Printer H2C has done printing 'Name tag'");
+  });
+
+  test('buildDoneMessage no job, file available', () => {
+    const printer = { name: 'P1S' };
+    const jobName = 'plate_001.gcode';
+    const body = `Printer ${printer.name} is done printing ${jobName}`;
+    expect(body).toBe('Printer P1S is done printing plate_001.gcode');
+  });
+
+  test('buildDoneMessage no job, no file', () => {
+    const printer = { name: 'P1S' };
+    const body = `Printer ${printer.name} has done printing`;
+    expect(body).toBe('Printer P1S has done printing');
+  });
+
+  test('buildUpcomingMessage with orderNr', () => {
+    const job = { name: 'Keychain', orderNr: '42', printerName: 'P1S' };
+    const body = job.orderNr
+      ? `It's time to start printing order #${job.orderNr} '${job.name}' on ${job.printerName}`
+      : `It's about time to start printing '${job.name}' on ${job.printerName}`;
+    expect(body).toBe("It's time to start printing order #42 'Keychain' on P1S");
+  });
+
+  test('buildUpcomingMessage without orderNr', () => {
+    const job = { name: 'Keychain', orderNr: null, printerName: 'H2C' };
+    const body = job.orderNr
+      ? `It's time to start printing order #${job.orderNr} '${job.name}' on ${job.printerName}`
+      : `It's about time to start printing '${job.name}' on ${job.printerName}`;
+    expect(body).toBe("It's about time to start printing 'Keychain' on H2C");
+  });
+
+  test('start_push_sent column exists and defaults to 0', () => {
+    const db = new (require('better-sqlite3'))(':memory:');
+    db.exec(`
+      CREATE TABLE printers (id INTEGER PRIMARY KEY AUTOINCREMENT, name TEXT NOT NULL, color TEXT NOT NULL);
+      CREATE TABLE jobs (
+        id INTEGER PRIMARY KEY AUTOINCREMENT,
+        printerId INTEGER NOT NULL,
+        name TEXT NOT NULL,
+        start TEXT NOT NULL,
+        end TEXT NOT NULL,
+        status TEXT DEFAULT 'Planned',
+        queued INTEGER DEFAULT 0,
+        start_push_sent INTEGER DEFAULT 0
+      );
+    `);
+    db.prepare('INSERT INTO printers (name, color) VALUES (?,?)').run('P1', '#f00');
+    const pid = db.prepare('SELECT id FROM printers').get().id;
+    db.prepare('INSERT INTO jobs (printerId, name, start, end) VALUES (?,?,?,?)').run(pid, 'Test', '2026-03-27T10:00', '2026-03-27T11:00');
+    const job = db.prepare('SELECT * FROM jobs').get();
+    expect(job.start_push_sent).toBe(0);
+    db.prepare('UPDATE jobs SET start_push_sent=1 WHERE id=?').run(job.id);
+    const updated = db.prepare('SELECT start_push_sent FROM jobs WHERE id=?').get(job.id);
+    expect(updated.start_push_sent).toBe(1);
+    db.close();
+  });
+
+  test('push_subscriptions table can store and retrieve subscription', () => {
+    const db = new (require('better-sqlite3'))(':memory:');
+    db.exec(`CREATE TABLE push_subscriptions (
+      id INTEGER PRIMARY KEY AUTOINCREMENT,
+      subscription TEXT NOT NULL
+    );`);
+    const sub = JSON.stringify({ endpoint: 'https://push.example.com/abc', keys: { p256dh: 'x', auth: 'y' } });
+    db.prepare('INSERT INTO push_subscriptions (subscription) VALUES (?)').run(sub);
+    const rows = db.prepare('SELECT * FROM push_subscriptions').all();
+    expect(rows).toHaveLength(1);
+    expect(JSON.parse(rows[0].subscription).endpoint).toBe('https://push.example.com/abc');
+    db.close();
+  });
+});
+
 describe('Session management', () => {
   let db;
 

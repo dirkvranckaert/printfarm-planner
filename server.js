@@ -4,6 +4,7 @@ const crypto  = require('crypto');
 const path    = require('path');
 const db     = require('./db');
 const brands = require('./brands');
+const push   = require('./push');
 
 const app = express();
 app.use(express.json());
@@ -64,6 +65,7 @@ const sseClients = new Set();
 
 // Connect all brand integrations on startup
 brands.connectAll(db);
+push.init(db);
 
 // Track previous stage per brandKey for auto-transition logic
 const prevStage = new Map();
@@ -74,32 +76,89 @@ brands.onUpdate((brandKey, status) => {
   const data = `data: ${JSON.stringify({ [brandKey]: status })}\n\n`;
   sseClients.forEach(res => res.write(data));
 
-  // Auto-transition jobs linked to this printer
   const prev = prevStage.get(brandKey);
   const curr = status.stage;
   if (curr && curr !== prev) {
     const serial = brandKey.includes(':') ? brandKey.split(':')[1] : null;
     if (serial) {
-      const printer = db.prepare('SELECT id FROM printers WHERE bambu_serial=?').get(serial);
+      const printer = db.prepare('SELECT id, name FROM printers WHERE bambu_serial=?').get(serial);
       if (printer) {
         const linked = db.prepare(
           "SELECT * FROM jobs WHERE linked_printer_id=? AND status != 'Done'"
         ).all(printer.id);
+
         linked.forEach(job => {
           if (curr === 'RUNNING' && job.status !== 'Printing') {
             db.prepare("UPDATE jobs SET status='Printing' WHERE id=?").run(job.id);
             sseClients.forEach(res => res.write(`data: ${JSON.stringify({ jobsUpdated: true })}\n\n`));
+            // Push: started printing
+            if (push.isEnabled('started')) {
+              push.sendToAll({ title: 'PrintFarm', body: `Printer ${printer.name} has started printing`, tag: `started-${printer.id}` });
+            }
           }
           if ((curr === 'FINISH' || curr === 'IDLE') && prev === 'RUNNING' && job.status === 'Printing') {
             db.prepare("UPDATE jobs SET status='Post Printing', linked_printer_id=NULL WHERE id=?").run(job.id);
             sseClients.forEach(res => res.write(`data: ${JSON.stringify({ jobsUpdated: true })}\n\n`));
+            // Push: done printing (with job info)
+            if (push.isEnabled('done')) {
+              let body = `Printer ${printer.name} has done printing `;
+              if (job.orderNr) body += `order #${job.orderNr}: `;
+              body += `'${job.name}'`;
+              if (job.customerName) body += ` (${job.customerName})`;
+              push.sendToAll({ title: 'PrintFarm', body, tag: `done-${printer.id}` });
+            }
           }
         });
+
+        // No linked job: push for stage transitions
+        if (linked.length === 0) {
+          if (curr === 'RUNNING' && prev !== 'RUNNING') {
+            if (push.isEnabled('started')) {
+              push.sendToAll({ title: 'PrintFarm', body: `Printer ${printer.name} has started printing`, tag: `started-${printer.id}` });
+            }
+          }
+          if ((curr === 'FINISH' || curr === 'IDLE') && prev === 'RUNNING') {
+            if (push.isEnabled('done')) {
+              const body = status.job_name
+                ? `Printer ${printer.name} is done printing ${status.job_name}`
+                : `Printer ${printer.name} has done printing`;
+              push.sendToAll({ title: 'PrintFarm', body, tag: `done-${printer.id}` });
+            }
+          }
+        }
       }
     }
   }
   prevStage.set(brandKey, curr);
 });
+
+// --- Upcoming job notifications ---
+setInterval(() => {
+  if (!push.isEnabled('upcoming')) return;
+  const now = Date.now();
+  const windowStart = new Date(now).toISOString().slice(0, 16); // YYYY-MM-DDTHH:MM
+  const windowEnd   = new Date(now + 5 * 60 * 1000).toISOString().slice(0, 16);
+  const jobs = db.prepare(`
+    SELECT jobs.*, printers.name AS printerName
+    FROM jobs
+    JOIN printers ON jobs.printerId = printers.id
+    WHERE jobs.status = 'Planned'
+      AND jobs.queued = 0
+      AND jobs.start_push_sent = 0
+      AND jobs.start >= ?
+      AND jobs.start <= ?
+  `).all(windowStart, windowEnd);
+  for (const job of jobs) {
+    let body;
+    if (job.orderNr) {
+      body = `It's time to start printing order #${job.orderNr} '${job.name}' on ${job.printerName}`;
+    } else {
+      body = `It's about time to start printing '${job.name}' on ${job.printerName}`;
+    }
+    push.sendToAll({ title: 'PrintFarm', body, tag: `upcoming-${job.id}` });
+    db.prepare('UPDATE jobs SET start_push_sent=1 WHERE id=?').run(job.id);
+  }
+}, 60_000);
 
 // --- Brand-specific API routers ---
 // Each brand module exposes an Express router for its own auth/config endpoints.
@@ -124,6 +183,32 @@ app.get('/api/printers/status/stream', (req, res) => {
 
   sseClients.add(res);
   req.on('close', () => sseClients.delete(res));
+});
+
+// --- Push notifications ---
+app.get('/api/push/public-key', (req, res) => {
+  const key = push.getPublicKey();
+  if (!key) return res.status(503).json({ error: 'VAPID not initialised' });
+  res.json({ publicKey: key });
+});
+
+app.post('/api/push/subscribe', (req, res) => {
+  const sub = req.body;
+  if (!sub?.endpoint) return res.status(400).json({ error: 'Invalid subscription' });
+  const str = JSON.stringify(sub);
+  // upsert by endpoint to avoid duplicates
+  const existing = db.prepare("SELECT id FROM push_subscriptions WHERE subscription LIKE ?").get(`%${sub.endpoint}%`);
+  if (!existing) {
+    db.prepare('INSERT INTO push_subscriptions (subscription) VALUES (?)').run(str);
+  }
+  res.json({ ok: true });
+});
+
+app.delete('/api/push/unsubscribe', (req, res) => {
+  const sub = req.body;
+  if (!sub?.endpoint) return res.status(400).json({ error: 'Invalid subscription' });
+  db.prepare("DELETE FROM push_subscriptions WHERE subscription LIKE ?").run(`%${sub.endpoint}%`);
+  res.json({ ok: true });
 });
 
 // --- App config (read-only, driven by env vars) ---
