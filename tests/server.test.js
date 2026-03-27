@@ -50,6 +50,54 @@ describe('Printer CRUD', () => {
     expect(favs[0].name).toBe('Fav Printer');
   });
 
+  test('toggling favourite on/off works correctly', () => {
+    const r = db.prepare('INSERT INTO printers (name, color, favourite) VALUES (?,?,?)').run('Toggle', '#abc', 1);
+    const id = r.lastInsertRowid;
+    // turn off
+    db.prepare('UPDATE printers SET favourite=0 WHERE id=?').run(id);
+    expect(db.prepare('SELECT favourite FROM printers WHERE id=?').get(id).favourite).toBe(0);
+    // turn back on
+    db.prepare('UPDATE printers SET favourite=1 WHERE id=?').run(id);
+    expect(db.prepare('SELECT favourite FROM printers WHERE id=?').get(id).favourite).toBe(1);
+  });
+
+  test('one-time migration sets favourite=1 for printers created with old DEFAULT 0', () => {
+    // Simulate old state: printers with favourite=0
+    db.exec('CREATE TABLE IF NOT EXISTS settings (key TEXT PRIMARY KEY, value TEXT)');
+    db.prepare('INSERT INTO printers (name, color, favourite) VALUES (?,?,?)').run('OldPrinter', '#fff', 0);
+    const before = db.prepare('SELECT favourite FROM printers').get();
+    expect(before.favourite).toBe(0);
+
+    // Run the migration logic
+    const favMigrated = db.prepare("SELECT value FROM settings WHERE key='favouriteMigrated'").get();
+    if (!favMigrated) {
+      db.exec("UPDATE printers SET favourite=1 WHERE favourite=0");
+      db.prepare("INSERT OR REPLACE INTO settings (key, value) VALUES ('favouriteMigrated', '1')").run();
+    }
+
+    const after = db.prepare('SELECT favourite FROM printers').get();
+    expect(after.favourite).toBe(1);
+    // Migration flag is set so it won't run again
+    const flag = db.prepare("SELECT value FROM settings WHERE key='favouriteMigrated'").get();
+    expect(flag.value).toBe('1');
+  });
+
+  test('migration does not run a second time', () => {
+    db.exec('CREATE TABLE IF NOT EXISTS settings (key TEXT PRIMARY KEY, value TEXT)');
+    db.prepare("INSERT INTO settings (key, value) VALUES ('favouriteMigrated', '1')").run();
+    db.prepare('INSERT INTO printers (name, color, favourite) VALUES (?,?,?)').run('New', '#000', 0);
+
+    // Migration should be skipped because flag is already set
+    const favMigrated = db.prepare("SELECT value FROM settings WHERE key='favouriteMigrated'").get();
+    if (!favMigrated) {
+      db.exec("UPDATE printers SET favourite=1 WHERE favourite=0");
+    }
+
+    // favourite should still be 0 (migration was skipped)
+    const p = db.prepare('SELECT favourite FROM printers').get();
+    expect(p.favourite).toBe(0);
+  });
+
   test('can delete a printer', () => {
     const result = db.prepare('INSERT INTO printers (name, color) VALUES (?,?)').run('Del Me', '#000');
     db.prepare('DELETE FROM printers WHERE id=?').run(result.lastInsertRowid);

@@ -1941,12 +1941,21 @@ async function refreshPrinterList() {
       <div class="printer-color-dot" style="background:${p.color}"></div>
       <span class="printer-item-name">${escHtml(p.name)}${printerStatusPillHtml(p)}${bambuIcon}</span>
       <div class="printer-item-actions">
+        <button class="btn-icon fav-btn${p.favourite ? ' fav-active' : ''}" onclick="togglePrinterFavourite(${p.id}, ${p.favourite ? 0 : 1})" title="${p.favourite ? 'Hide in day view' : 'Show in day view'}">👁</button>
         <button class="btn-icon pin-btn${p.pinned ? ' pinned' : ''}" onclick="togglePrinterPinned(${p.id}, ${p.pinned ? 0 : 1})" title="${p.pinned ? 'Unpin from topbar' : (pinnedCount >= topbarLimit ? `Max ${topbarLimit} pinned` : 'Pin to topbar')}">⭐</button>
         <button class="btn-icon" onclick="openPrinterDialog(${p.id})" title="Edit">✏️</button>
         <button class="btn-icon danger" onclick="deletePrinter(${p.id})" title="Delete">🗑</button>
       </div>
     </div>`;
   }).join('');
+}
+
+async function togglePrinterFavourite(id, newVal) {
+  const p = printers.find(x => x.id === id);
+  if (!p) return;
+  await api('PUT', `/api/printers/${id}`, { ...p, favourite: newVal });
+  await refreshPrinterList();
+  renderCalendar();
 }
 
 async function togglePrinterPinned(id, newVal) {

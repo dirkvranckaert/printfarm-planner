@@ -75,4 +75,12 @@ if (!printerCols.some(c => c.name === 'favourite')) {
   db.exec('ALTER TABLE printers ADD COLUMN favourite INTEGER NOT NULL DEFAULT 1;');
 }
 
+// One-time migration: if the favourite column was previously added with DEFAULT 0
+// (all printers show favourite=0), set them all to 1 so they appear in day view.
+const favMigrated = db.prepare("SELECT value FROM settings WHERE key='favouriteMigrated'").get();
+if (!favMigrated) {
+  db.exec("UPDATE printers SET favourite=1 WHERE favourite=0");
+  db.prepare("INSERT OR REPLACE INTO settings (key, value) VALUES ('favouriteMigrated', '1')").run();
+}
+
 module.exports = db;
