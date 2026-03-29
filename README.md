@@ -23,6 +23,7 @@ Built with Node.js + Express + SQLite. Protected by session-based cookie auth. D
 - **Multi-color / AMS info** — loaded filament slots shown in the status hover popup; supports single-AMS (P1S) and multi-AMS (H2C) setups
 - **Per-printer buffer times** — configurable warm-up and cool-down periods shown as cross-hatched blocks in day view; included in conflict detection and drag overlap prevention
 - **Connected Accounts** — BambuLab account linked/unlinked directly from the Printers modal; account status shown in the printer list and edit dialog
+- **Browser push notifications** — opt-in push alerts for printer started, printer finished (with job/customer/order details), and upcoming scheduled jobs; per-type on/off toggles in Settings
 
 ---
 
@@ -44,6 +45,7 @@ Built with Node.js + Express + SQLite. Protected by session-based cookie auth. D
 printfarm-planner/
 ├── server.js             ← Express app: static serving, session auth, REST API
 ├── db.js                 ← SQLite setup and schema initialisation
+├── push.js               ← Web Push module: VAPID key management, send to subscribers
 ├── bambu.js              ← BambuLab cloud MQTT client (low-level)
 ├── brands/
 │   ├── index.js          ← Brand registry — connectAll, onUpdate, getAllStatuses
@@ -60,6 +62,7 @@ printfarm-planner/
     ├── login.html        ← Login page (served unauthenticated)
     ├── app.js            ← All frontend logic; uses fetch() to call the REST API
     ├── style.css
+    ├── sw.js             ← Service worker: handles Web Push events, shows notifications
     └── favicon.svg
 ```
 
@@ -174,7 +177,7 @@ PrintFarm Planner connects to BambuLab's cloud MQTT to show real-time printer st
 4. If your account has 2-step verification, a code is sent to your email — enter it in the next step
 5. Once connected, the account is shown in the Connected Accounts list with a disconnect button
 
-Credentials are stored in the SQLite `settings` table (never in `.env`). You can disconnect at any time from the Connected Accounts panel. The BambuLab connection section in Settings is kept as an alternative entry point.
+Credentials are stored in the SQLite `settings` table (never in `.env`). You can disconnect at any time from the Connected Accounts panel.
 
 ### Assigning a serial number to a printer
 
@@ -217,6 +220,38 @@ BambuLab MQTT has two broker regions:
 
 - Must use a BambuLab account with email + password (Google/Apple login and accounts with hardware 2FA are not supported)
 - One account can monitor multiple printers — all printers on the same account share the same MQTT connection
+
+---
+
+## Push notifications
+
+PrintFarm Planner can send browser push notifications for key events. Notifications work even when the tab is not focused, and on mobile when the browser is in the background.
+
+### Setup
+
+1. Open **Settings** → **Push Notifications**
+2. Click **Enable Push Notifications** — the browser will prompt for permission
+3. Once subscribed, a green "Enabled" indicator appears and three per-type toggles are shown
+4. Click **Disable** at any time to unsubscribe
+
+Subscriptions are stored server-side (`push_subscriptions` table) so they survive page reloads. If the browser subscription expires or is revoked, the server removes the stale entry automatically.
+
+### Notification types
+
+| Type | Trigger | Message |
+|------|---------|---------|
+| **Printer finished** | Bambu stage → FINISH or IDLE after RUNNING | With linked job: `Printer P1S has done printing order #42: 'Keychains' (Dirk)` — order/customer included when available. Without linked job: uses Bambu's current file name, or a generic fallback. |
+| **Printer started** | Bambu stage → RUNNING | `Printer P1S has started printing` |
+| **Upcoming job** | Planned job with start within 5 min | `It's about time to start printing 'Keychains' on P1S` — with order number: `It's time to start printing order #42 'Keychains' on P1S`. Sent once per job (`start_push_sent` flag). |
+
+Each type can be individually enabled or disabled from Settings. All three are enabled by default once subscribed.
+
+### Technical notes
+
+- Uses the **Web Push API** with VAPID authentication (`web-push` npm package)
+- VAPID keys are auto-generated on first server startup and stored in the `settings` table
+- The service worker (`public/sw.js`) handles incoming push events and notification clicks
+- Clicking a notification focuses the existing app tab, or opens a new one if none is open
 
 ---
 
@@ -383,6 +418,11 @@ Known keys:
 | `theme` | string | `system` / `light` / `dark` |
 | `queueAutoExpand` | boolean | Expand queue panel on startup if not empty |
 | `topbarMode` | string | `pinned` (show ⭐ pinned printers) / `active` (show only printing printers) |
+| `push.notify.done` | boolean | Send push when a printer finishes (default: `true`) |
+| `push.notify.started` | boolean | Send push when a printer starts (default: `true`) |
+| `push.notify.upcoming` | boolean | Send push for Planned jobs starting within 5 min (default: `true`) |
+| `vapid.publicKey` | string | Auto-generated VAPID public key (managed by server, do not edit) |
+| `vapid.privateKey` | string | Auto-generated VAPID private key (managed by server, do not edit) |
 
 Values are JSON-serialised in the database, so `value` can be any JSON type.
 
@@ -391,6 +431,16 @@ Values are JSON-serialised in the database, so `value` can be any JSON type.
 | Method | Path | Description |
 |--------|------|-------------|
 | GET | `/api/printers/status/stream` | SSE stream — sends `data: { "brand:key": statusObj }` on each update; also sends a full snapshot on connect |
+
+### Push notifications
+
+| Method | Path | Description |
+|--------|------|-------------|
+| GET | `/api/push/public-key` | Returns `{ publicKey }` — the VAPID public key needed to subscribe |
+| POST | `/api/push/subscribe` | Save a push subscription — body: Web Push subscription object (`endpoint`, `keys`) |
+| DELETE | `/api/push/unsubscribe` | Remove a push subscription — body: same subscription object |
+
+Subscriptions are stored in the `push_subscriptions` table. Expired subscriptions (410/404 from the push service) are removed automatically. The server sends pushes for three event types — see Settings keys `push.notify.*` above to enable/disable each type.
 
 ### Brand-specific endpoints
 
@@ -419,7 +469,7 @@ CREATE TABLE printers (
   pinned         INTEGER NOT NULL DEFAULT 0,   -- 1 = show in topbar chips
   warm_up_mins   INTEGER NOT NULL DEFAULT 5,
   cool_down_mins INTEGER NOT NULL DEFAULT 15,
-  favourite      INTEGER NOT NULL DEFAULT 0    -- 1 = show in day view
+  favourite      INTEGER NOT NULL DEFAULT 1    -- 1 = show in day view
 );
 
 CREATE TABLE jobs (
@@ -436,7 +486,8 @@ CREATE TABLE jobs (
   colors            TEXT,
   printFile         TEXT,
   remarks           TEXT,
-  linked_printer_id INTEGER   -- set when job is manually linked to a live printer for auto-status updates
+  linked_printer_id INTEGER,  -- set when job is manually linked to a live printer for auto-status updates
+  start_push_sent   INTEGER NOT NULL DEFAULT 0  -- 1 once the "upcoming" push has been sent for this job
 );
 
 CREATE TABLE closures (
@@ -454,6 +505,12 @@ CREATE TABLE settings (
 CREATE TABLE sessions (
   token      TEXT PRIMARY KEY,
   expires_at INTEGER NOT NULL
+);
+
+CREATE TABLE push_subscriptions (
+  id           INTEGER PRIMARY KEY AUTOINCREMENT,
+  subscription TEXT NOT NULL,  -- JSON Web Push subscription object (endpoint + keys)
+  created_at   INTEGER NOT NULL DEFAULT (strftime('%s','now')*1000)
 );
 ```
 
@@ -501,7 +558,7 @@ Test files live in `tests/`:
 
 | File | What it covers |
 |------|---------------|
-| `tests/server.test.js` | Printer CRUD, job CRUD, cascading deletes, session validity logic — all against an in-memory SQLite DB |
+| `tests/server.test.js` | Printer CRUD, job CRUD, cascading deletes, session validity logic, push notification message formats, push DB schema — all against in-memory SQLite |
 | `tests/utils.test.js` | `snap15`, `toDatetimeLocal`, interval overlap detection, `snapAvoidingJobs` logic |
 
 Tests are run automatically by Jest; no server process is needed. Add new tests alongside any non-trivial logic change.

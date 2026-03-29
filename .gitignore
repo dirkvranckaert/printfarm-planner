@@ -24,6 +24,9 @@ yarn-error.log*
 # PM2 local runtime files
 .pm2/
 
+# Claude Code
+.claude/
+
 # Editor
 .vscode/
 .idea/
