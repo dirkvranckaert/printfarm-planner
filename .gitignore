@@ -27,6 +27,9 @@ yarn-error.log*
 # Claude Code
 .claude/
 
+# Deployment (server-specific, keep private)
+deploy.sh
+
 # Editor
 .vscode/
 .idea/
