@@ -310,6 +310,9 @@ let _lastTopbarIds   = null;     // comma-joined IDs of last rendered chips; nul
 let bambuAccountEmail = null;    // set when BambuLab account is connected
 let pushSubscribed = false;
 
+let sseSource = null;            // EventSource for live printer status
+let sseRetryTimer = null;        // setTimeout handle for SSE reconnect
+
 // =============================================================================
 // Init
 // =============================================================================
@@ -317,6 +320,43 @@ function applyTheme(mode) {
   if (mode === 'dark')       document.documentElement.setAttribute('data-theme', 'dark');
   else if (mode === 'light') document.documentElement.setAttribute('data-theme', 'light');
   else                       document.documentElement.removeAttribute('data-theme');
+}
+
+// =============================================================================
+// SSE connection with auto-reconnect
+// =============================================================================
+function connectSSE() {
+  if (sseRetryTimer) { clearTimeout(sseRetryTimer); sseRetryTimer = null; }
+  if (sseSource) { sseSource.close(); sseSource = null; }
+
+  sseSource = new EventSource('/api/printers/status/stream');
+
+  sseSource.onmessage = (e) => {
+    try {
+      const updates = JSON.parse(e.data);
+      if (updates.jobsUpdated) { renderCalendar(); return; }
+      Object.assign(printerStatus, updates);
+      renderTopbarStatus();
+    } catch (_) {}
+  };
+
+  sseSource.onerror = () => {
+    // Close and schedule reconnect — browser SSE auto-reconnect can stall after
+    // the tab returns from background, so we manage reconnection ourselves.
+    if (sseSource) { sseSource.close(); sseSource = null; }
+    if (!sseRetryTimer) {
+      sseRetryTimer = setTimeout(() => { sseRetryTimer = null; connectSSE(); }, 5000);
+    }
+  };
+}
+
+// Re-fetch all data and reconnect SSE when the tab becomes visible again.
+// Handles the case where the browser put the SSE stream to sleep in the background.
+async function onPageVisible() {
+  printers = await api('GET', '/api/printers').catch(() => printers);
+  await renderCalendar();
+  renderTopbarStatus();
+  if (!sseSource || sseSource.readyState === EventSource.CLOSED) connectSSE();
 }
 
 async function init() {
@@ -356,19 +396,7 @@ async function init() {
   if (tmSetting?.value) topbarModeCache = tmSetting.value;
 
   // Connect to live Bambu printer status stream
-  const sse = new EventSource('/api/printers/status/stream');
-  sse.onmessage = (e) => {
-    try {
-      const updates = JSON.parse(e.data);
-      if (updates.jobsUpdated) {
-        renderCalendar();
-        return;
-      }
-      Object.assign(printerStatus, updates);
-      renderTopbarStatus();
-    } catch (_) {}
-  };
-  sse.onerror = () => {}; // silently ignore — server may not have Bambu configured
+  connectSSE();
 
   renderCalendar();
   renderTopbarStatus();
@@ -2524,6 +2552,11 @@ async function openStatusOverview() {
 // Event listeners
 // =============================================================================
 function setupListeners() {
+  // Refresh all data when the tab comes back to the foreground
+  document.addEventListener('visibilitychange', () => {
+    if (document.visibilityState === 'visible') onPageVisible();
+  });
+
   // Clicking the date label opens the native date picker
   document.getElementById('date-label').addEventListener('click', () => {
     const inp = document.getElementById('date-jump');

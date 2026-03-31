@@ -19,7 +19,7 @@ Built with Node.js + Express + SQLite. Protected by session-based cookie auth. D
 - Dark / light / system theme (persisted per-browser via settings)
 - Session-based login page (no browser credential dialog); sessions survive server restarts
 - Sign out link
-- **Live printer status** via brand integrations — progress %, temperatures, remaining time
+- **Live printer status** via brand integrations — progress %, temperatures, remaining time; auto-refreshes on tab focus and reconnects the SSE stream after the browser suspends it in the background
 - **Multi-color / AMS info** — loaded filament slots shown in the status hover popup; supports single-AMS (P1S) and multi-AMS (H2C) setups
 - **Per-printer buffer times** — configurable warm-up and cool-down periods shown as cross-hatched blocks in day view; included in conflict detection and drag overlap prevention
 - **Connected Accounts** — BambuLab account linked/unlinked directly from the Printers modal; account status shown in the printer list and edit dialog
