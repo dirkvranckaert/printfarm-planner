@@ -1704,7 +1704,7 @@ async function duplicateJob(jobId) {
     name:         job.name + ' (copy)',
     start:        toDatetimeLocal(now),
     end:          end,
-    durationMins: job.durationMins ?? (durMs > 0 ? Math.round(durMs / 60_000) : 0),
+    durationMins: job.durationMins || (durMs > 0 ? Math.round(durMs / 60_000) : 0),
     customerName: job.customerName,
     orderNr:      job.orderNr,
     colors:       job.colors,
