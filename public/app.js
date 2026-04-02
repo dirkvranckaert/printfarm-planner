@@ -1696,13 +1696,15 @@ async function duplicateJob(jobId) {
   const job = await api('GET', `/api/jobs/${jobId}`);
   if (!job) return;
   const now = new Date();
-  const durMs = job.start && job.end ? new Date(job.end) - new Date(job.start) : 0;
+  const durMs = job.start && job.end ? new Date(job.end) - new Date(job.start)
+              : (job.durationMins ?? 0) * 60_000;
   const end = durMs > 0 ? toDatetimeLocal(new Date(now.getTime() + durMs)) : '';
   openJobModal(null, {
     printerId:    job.printerId,
     name:         job.name + ' (copy)',
     start:        toDatetimeLocal(now),
     end:          end,
+    durationMins: job.durationMins ?? (durMs > 0 ? Math.round(durMs / 60_000) : 0),
     customerName: job.customerName,
     orderNr:      job.orderNr,
     colors:       job.colors,
@@ -1784,6 +1786,14 @@ async function openJobModal(jobId = null, prefill = {}) {
     document.getElementById('job-remarks').value   = prefill.remarks      ?? '';
     editingJobStatus = prefill.status ?? 'Planned';
     setQueuedMode(isQueued);
+    // Populate duration fields from prefill
+    const dur = prefill.durationMins ?? 0;
+    if (dur > 0) {
+      document.getElementById('job-queue-dur-h').value = Math.floor(dur / 60);
+      document.getElementById('job-queue-dur-m').value = dur % 60;
+      document.getElementById('job-duration-h').value  = Math.floor(dur / 60);
+      document.getElementById('job-duration-m').value  = dur % 60;
+    }
   }
 
   // Populate customer suggestions from past jobs
