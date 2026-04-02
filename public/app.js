@@ -1695,12 +1695,14 @@ function getJobStatus() {
 async function duplicateJob(jobId) {
   const job = await api('GET', `/api/jobs/${jobId}`);
   if (!job) return;
-  const now = toDatetimeLocal(new Date());
+  const now = new Date();
+  const durMs = job.start && job.end ? new Date(job.end) - new Date(job.start) : 0;
+  const end = durMs > 0 ? toDatetimeLocal(new Date(now.getTime() + durMs)) : '';
   openJobModal(null, {
     printerId:    job.printerId,
     name:         job.name + ' (copy)',
-    start:        now,
-    end:          '',
+    start:        toDatetimeLocal(now),
+    end:          end,
     customerName: job.customerName,
     orderNr:      job.orderNr,
     colors:       job.colors,
