@@ -1786,13 +1786,11 @@ async function openJobModal(jobId = null, prefill = {}) {
     document.getElementById('job-remarks').value   = prefill.remarks      ?? '';
     editingJobStatus = prefill.status ?? 'Planned';
     setQueuedMode(isQueued);
-    // Populate duration fields from prefill
+    // Populate queue duration fields from prefill
     const dur = prefill.durationMins ?? 0;
     if (dur > 0) {
       document.getElementById('job-queue-dur-h').value = Math.floor(dur / 60);
       document.getElementById('job-queue-dur-m').value = dur % 60;
-      document.getElementById('job-duration-h').value  = Math.floor(dur / 60);
-      document.getElementById('job-duration-m').value  = dur % 60;
     }
   }
 
@@ -1804,6 +1802,12 @@ async function openJobModal(jobId = null, prefill = {}) {
 
   // Always open in duration mode; derive h/m from start+end when available
   setEndMode('duration', startVal, endVal);
+
+  // Override schedule duration from prefill.durationMins (after setEndMode which may reset to 1h default)
+  if (!editJobId && prefill.durationMins > 0) {
+    document.getElementById('job-duration-h').value = Math.floor(prefill.durationMins / 60);
+    document.getElementById('job-duration-m').value = prefill.durationMins % 60;
+  }
 
   document.getElementById('job-modal').classList.remove('hidden');
   if (scheduleMode) document.getElementById('job-start-date').focus();
