@@ -310,6 +310,9 @@ let _lastTopbarIds   = null;     // comma-joined IDs of last rendered chips; nul
 let bambuAccountEmail = null;    // set when BambuLab account is connected
 let pushSubscribed = false;
 
+let mobilePrinterIdx = 0;       // currently selected printer index in mobile day view
+let isTouchDevice = false;      // set on first touch event
+
 let sseSource = null;            // EventSource for live printer status
 let sseRetryTimer = null;        // setTimeout handle for SSE reconnect
 
@@ -599,6 +602,9 @@ async function renderCalendar() {
   else if (view === 'week')     await renderWeek();
   else if (view === 'upcoming') await renderUpcoming();
   else                          await renderMonth();
+
+  // Clear mobile printer switcher when not in day view
+  if (view !== 'day') document.getElementById('mobile-printer-switcher').innerHTML = '';
 
   const scr2 = document.getElementById('day-scroll');
   if (scr2 && savedScroll > 0) scr2.scrollTop = savedScroll;
@@ -945,6 +951,9 @@ async function renderDay() {
     });
   }
 
+  // Mobile: render printer switcher tabs & activate single column
+  renderMobilePrinterSwitcher(visiblePrinters);
+
   attachDayEvents();
 }
 
@@ -1216,7 +1225,7 @@ async function onDragEnd() {
 }
 
 function attachDayEvents() {
-  // Click job → edit  |  right-click → context menu  |  mousedown → move
+  // Click job → edit  |  right-click / long-press → context menu  |  mousedown → move
   document.querySelectorAll('.job-block').forEach(el => {
     el.addEventListener('click', e => {
       e.stopPropagation();
@@ -1224,6 +1233,11 @@ function attachDayEvents() {
       openJobModal(parseInt(el.dataset.jobId));
     });
     el.addEventListener('contextmenu', e => showCtxMenu(e, parseInt(el.dataset.jobId)));
+
+    // Long-press on touch → bottom sheet
+    addLongPress(el, () => {
+      showBottomSheet(parseInt(el.dataset.jobId));
+    });
 
     el.addEventListener('mousedown', e => {
       if (e.button !== 0) return;
@@ -1314,6 +1328,9 @@ function attachDayEvents() {
       e.preventDefault();
     });
   });
+
+  // Apply mobile single-column mode
+  applyMobilePrinterFilter();
 }
 
 function scrollToNow() {
@@ -1402,6 +1419,7 @@ async function renderWeek() {
       openJobModal(parseInt(el.dataset.jobId));
     });
     el.addEventListener('contextmenu', e => showCtxMenu(e, parseInt(el.dataset.jobId)));
+    addLongPress(el, () => showBottomSheet(parseInt(el.dataset.jobId)));
   });
 
   // Click cell → new job
@@ -1489,6 +1507,7 @@ async function renderMonth() {
       openJobModal(parseInt(el.dataset.jobId));
     });
     el.addEventListener('contextmenu', e => showCtxMenu(e, parseInt(el.dataset.jobId)));
+    addLongPress(el, () => showBottomSheet(parseInt(el.dataset.jobId)));
   });
 
   document.querySelectorAll('.month-day-cell').forEach(cell => {
@@ -1575,6 +1594,7 @@ async function renderUpcoming() {
       openJobModal(parseInt(el.dataset.jobId));
     });
     el.addEventListener('contextmenu', e => showCtxMenu(e, parseInt(el.dataset.jobId)));
+    addLongPress(el, () => showBottomSheet(parseInt(el.dataset.jobId)));
   });
 }
 
@@ -1592,11 +1612,212 @@ function renderEmpty(container) {
 }
 
 // =============================================================================
+// Mobile helpers
+// =============================================================================
+function isMobileView() { return window.innerWidth <= 480; }
+
+// Detect touch device on first touch
+document.addEventListener('touchstart', () => { isTouchDevice = true; }, { once: true, passive: true });
+
+// ---- Bottom sheet (mobile context menu) ----
+let bsJobId = null;
+
+function showBottomSheet(jobId) {
+  bsJobId = jobId;
+  const job = jobsCache[jobId];
+  if (!job) return;
+
+  // Header
+  const header = document.getElementById('bs-header');
+  header.textContent = job.orderNr ? `#${job.orderNr} — ${job.name}` : job.name;
+
+  // Mark active status
+  const currentStatus = job.status ?? 'Planned';
+  document.querySelectorAll('.bs-status-btn').forEach(btn => {
+    btn.classList.toggle('ctx-status-active', btn.dataset.status === currentStatus);
+  });
+
+  // Link/unlink
+  const ctxPrinter = printers.find(p => p.id === job.printerId);
+  const linkItem = document.getElementById('bs-link-item');
+  const linkSep  = document.getElementById('bs-link-sep');
+  const isLinked = !!job.linked_printer_id;
+  const isRunning = getPrinterLiveStatus(ctxPrinter)?.stage === 'RUNNING';
+  const printerBusy = isRunning && !isLinked &&
+    Object.values(jobsCache).some(j => j.id !== jobId && j.linked_printer_id === ctxPrinter?.id);
+
+  if (isLinked) {
+    linkItem.classList.remove('hidden');
+    linkSep.classList.remove('hidden');
+    linkItem.textContent = '🔗 Unlink from printer';
+    linkItem.dataset.action = 'unlink';
+  } else if (isRunning && !printerBusy) {
+    linkItem.classList.remove('hidden');
+    linkSep.classList.remove('hidden');
+    linkItem.textContent = '🔗 Link to printer';
+    linkItem.dataset.action = 'link';
+  } else {
+    linkItem.classList.add('hidden');
+    linkSep.classList.add('hidden');
+  }
+
+  const overlay = document.getElementById('bottom-sheet-overlay');
+  const sheet   = document.getElementById('bottom-sheet');
+  overlay.classList.add('open');
+  // Force reflow before adding open class for transition
+  sheet.offsetHeight;
+  sheet.classList.add('open');
+}
+
+function hideBottomSheet() {
+  const overlay = document.getElementById('bottom-sheet-overlay');
+  const sheet   = document.getElementById('bottom-sheet');
+  sheet.classList.remove('open');
+  overlay.classList.remove('open');
+  bsJobId = null;
+}
+
+function setupBottomSheet() {
+  document.getElementById('bottom-sheet-overlay').addEventListener('click', hideBottomSheet);
+  // Swipe down to dismiss
+  let startY = 0;
+  const sheet = document.getElementById('bottom-sheet');
+  sheet.addEventListener('touchstart', e => { startY = e.touches[0].clientY; }, { passive: true });
+  sheet.addEventListener('touchmove', e => {
+    const dy = e.touches[0].clientY - startY;
+    if (dy > 60) hideBottomSheet();
+  }, { passive: true });
+
+  document.getElementById('bs-edit').addEventListener('click', () => {
+    if (bsJobId !== null) openJobModal(bsJobId);
+    hideBottomSheet();
+  });
+  document.querySelectorAll('.bs-status-btn').forEach(btn => {
+    btn.addEventListener('click', async () => {
+      if (bsJobId !== null) {
+        const scr = document.getElementById('day-scroll');
+        const savedScroll = scr ? scr.scrollTop : 0;
+        await api('PATCH', `/api/jobs/${bsJobId}`, { status: btn.dataset.status });
+        await renderCalendar();
+        const scr2 = document.getElementById('day-scroll');
+        if (scr2) scr2.scrollTop = savedScroll;
+      }
+      hideBottomSheet();
+    });
+  });
+  document.getElementById('bs-duplicate').addEventListener('click', () => {
+    if (bsJobId !== null) duplicateJob(bsJobId);
+    hideBottomSheet();
+  });
+  document.getElementById('bs-delete').addEventListener('click', async () => {
+    if (bsJobId !== null && confirm('Delete this print job?')) {
+      await api('DELETE', `/api/jobs/${bsJobId}`);
+      renderCalendar();
+    }
+    hideBottomSheet();
+  });
+  document.getElementById('bs-link-item').addEventListener('click', async () => {
+    if (bsJobId === null) return;
+    const btn = document.getElementById('bs-link-item');
+    if (btn.dataset.action === 'unlink') {
+      await api('PATCH', `/api/jobs/${bsJobId}`, { linked_printer_id: null });
+    } else {
+      const job = jobsCache[bsJobId];
+      await api('PATCH', `/api/jobs/${bsJobId}`, { linked_printer_id: job?.printerId ?? null, status: 'Printing' });
+    }
+    hideBottomSheet();
+    renderCalendar();
+  });
+}
+
+// ---- Mobile printer switcher ----
+function renderMobilePrinterSwitcher(visiblePrinters) {
+  const container = document.getElementById('mobile-printer-switcher');
+  if (!isMobileView() || !visiblePrinters.length) {
+    container.innerHTML = '';
+    return;
+  }
+  // Clamp index
+  if (mobilePrinterIdx >= visiblePrinters.length) mobilePrinterIdx = 0;
+
+  container.innerHTML = visiblePrinters.map((p, i) =>
+    `<button class="mobile-printer-tab${i === mobilePrinterIdx ? ' active' : ''}"
+             data-idx="${i}" style="${i === mobilePrinterIdx ? `border-bottom-color:${p.color};color:${p.color}` : ''}">${escHtml(p.name)}</button>`
+  ).join('');
+
+  container.querySelectorAll('.mobile-printer-tab').forEach(btn => {
+    btn.addEventListener('click', () => {
+      mobilePrinterIdx = parseInt(btn.dataset.idx);
+      renderCalendar();
+    });
+  });
+}
+
+function applyMobilePrinterFilter() {
+  if (!isMobileView()) return;
+  const cols = document.querySelectorAll('.day-printer-col');
+  cols.forEach((col, i) => {
+    col.classList.toggle('mobile-active', i === mobilePrinterIdx);
+  });
+}
+
+// ---- Long-press handler for touch devices ----
+function addLongPress(el, callback, duration = 500) {
+  let timer = null;
+  let triggered = false;
+
+  el.addEventListener('touchstart', e => {
+    triggered = false;
+    timer = setTimeout(() => {
+      triggered = true;
+      // Light haptic feedback if available
+      if (navigator.vibrate) navigator.vibrate(30);
+      callback(e);
+    }, duration);
+  }, { passive: true });
+
+  el.addEventListener('touchmove', () => {
+    if (timer) { clearTimeout(timer); timer = null; }
+  }, { passive: true });
+
+  el.addEventListener('touchend', e => {
+    if (timer) { clearTimeout(timer); timer = null; }
+    if (triggered) { e.preventDefault(); triggered = false; }
+  });
+
+  el.addEventListener('touchcancel', () => {
+    if (timer) { clearTimeout(timer); timer = null; }
+    triggered = false;
+  }, { passive: true });
+}
+
+// ---- Touch drag support for day view ----
+function onTouchDragMove(e) {
+  if (!drag) return;
+  const touch = e.touches[0];
+  // Reuse the same logic as mouse drag
+  onDragMove({ clientX: touch.clientX, clientY: touch.clientY, preventDefault() {} });
+  e.preventDefault(); // prevent scroll while dragging
+}
+
+function onTouchDragEnd(e) {
+  if (!drag) return;
+  onDragEnd();
+}
+
+// =============================================================================
 // Context menu
 // =============================================================================
 function showCtxMenu(e, jobId) {
   e.preventDefault();
   e.stopPropagation();
+
+  // On touch devices, use the bottom sheet instead of the context menu
+  if (isTouchDevice || isMobileView()) {
+    showBottomSheet(jobId);
+    return;
+  }
+
   ctxJobId = jobId;
 
   // Mark active status
@@ -2647,9 +2868,21 @@ function setupListeners() {
     if (!e.target.closest('[data-job-id]')) hideCtxMenu();
   });
 
-  // Drag events (document-level so mouse can leave the column)
+  // Drag events (document-level so mouse/touch can leave the column)
   document.addEventListener('mousemove', onDragMove);
   document.addEventListener('mouseup',   onDragEnd);
+  document.addEventListener('touchmove', onTouchDragMove, { passive: false });
+  document.addEventListener('touchend',  onTouchDragEnd);
+
+  // Bottom sheet (mobile context menu)
+  setupBottomSheet();
+
+  // Re-render on resize (mobile ↔ desktop layout switch)
+  let resizeTimer = null;
+  window.addEventListener('resize', () => {
+    clearTimeout(resizeTimer);
+    resizeTimer = setTimeout(() => renderCalendar(), 250);
+  });
 
   document.getElementById('btn-prev').addEventListener('click',  () => navigate(-1));
   document.getElementById('btn-next').addEventListener('click',  () => navigate(+1));

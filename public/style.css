@@ -1449,3 +1449,279 @@ body.is-resizing,    body.is-resizing    * { cursor: ns-resize  !important; user
 .ams-slot-mat { font-size: 11px; font-weight: 700; line-height: 1.2; }
 .ams-slot-k   { font-size: 9px; opacity: .8; }
 .ams-slot-id  { font-size: 9px; opacity: .6; margin-top: 1px; }
+
+/* ================================================================
+   MOBILE RESPONSIVE
+   ================================================================ */
+
+/* ---- Bottom sheet (touch context menu) ---- */
+.bottom-sheet-overlay {
+  position: fixed;
+  inset: 0;
+  background: rgba(0,0,0,.45);
+  z-index: 500;
+  opacity: 0;
+  transition: opacity .2s;
+  display: none;
+}
+.bottom-sheet-overlay.open { display: block; opacity: 1; }
+.bottom-sheet {
+  position: fixed;
+  bottom: 0;
+  left: 0;
+  right: 0;
+  background: var(--surface);
+  border-radius: 14px 14px 0 0;
+  box-shadow: 0 -4px 24px rgba(0,0,0,.18);
+  z-index: 501;
+  transform: translateY(100%);
+  transition: transform .25s cubic-bezier(.32,.72,0,1);
+  max-height: 85vh;
+  overflow-y: auto;
+  -webkit-overflow-scrolling: touch;
+  padding-bottom: env(safe-area-inset-bottom, 8px);
+}
+.bottom-sheet.open { transform: translateY(0); }
+.bottom-sheet-handle {
+  width: 36px;
+  height: 4px;
+  background: var(--border);
+  border-radius: 2px;
+  margin: 10px auto 6px;
+}
+.bottom-sheet-header {
+  padding: 4px 16px 10px;
+  font-weight: 700;
+  font-size: 14px;
+  color: var(--text);
+  border-bottom: 1px solid var(--border);
+  overflow: hidden;
+  text-overflow: ellipsis;
+  white-space: nowrap;
+}
+.bottom-sheet-item {
+  display: flex;
+  align-items: center;
+  gap: 10px;
+  width: 100%;
+  padding: 14px 18px;
+  background: none;
+  border: none;
+  font: inherit;
+  font-size: 15px;
+  color: var(--text);
+  cursor: pointer;
+  text-align: left;
+}
+.bottom-sheet-item:active { background: var(--bg); }
+.bottom-sheet-item.danger { color: var(--danger); }
+.bottom-sheet-item.ctx-status-active { font-weight: 700; }
+.bottom-sheet-item.ctx-status-active::before { content: '✓ '; }
+.bottom-sheet-sep { height: 1px; background: var(--border); margin: 2px 0; }
+
+/* ---- Mobile printer switcher (day view) ---- */
+.mobile-printer-switcher {
+  display: none; /* shown via media query */
+  overflow-x: auto;
+  -webkit-overflow-scrolling: touch;
+  gap: 0;
+  padding: 0 12px;
+  background: var(--surface);
+  border-bottom: 1px solid var(--border);
+  flex-shrink: 0;
+}
+.mobile-printer-tab {
+  flex-shrink: 0;
+  padding: 8px 14px;
+  border: none;
+  background: none;
+  font: inherit;
+  font-size: 13px;
+  font-weight: 600;
+  color: var(--text-muted);
+  cursor: pointer;
+  white-space: nowrap;
+  border-bottom: 3px solid transparent;
+  transition: color .15s, border-color .15s;
+}
+.mobile-printer-tab.active {
+  color: var(--text);
+  border-bottom-color: var(--primary);
+}
+
+/* ================================================================
+   Breakpoint: tablets (max-width: 768px)
+   ================================================================ */
+@media (max-width: 768px) {
+  /* Topbar: compact */
+  .topbar { padding: 0 10px; height: 48px; }
+  .app-title { font-size: 15px; }
+  .topbar-right { gap: 5px; }
+  .topbar-right .btn { padding: 5px 10px; font-size: 12px; }
+
+  /* Toolbar: stack nav + views */
+  .calendar-toolbar {
+    flex-wrap: wrap;
+    padding: 6px 10px;
+    gap: 6px;
+  }
+  .nav-group { gap: 4px; }
+  .date-label { font-size: 13px; }
+  .btn-nav { padding: 5px 9px; font-size: 15px; }
+  .view-group { gap: 3px; }
+  .btn-view { padding: 4px 9px; font-size: 12px; }
+
+  /* Day view: remove min-width so columns can shrink */
+  .day-printer-header { min-width: 0; padding: 6px 8px; font-size: 12px; }
+  .day-printer-col { min-width: 0; }
+
+  /* Week view: let it scroll but smaller text */
+  .week-table { min-width: 0; }
+  .week-table th, .week-table td { padding: 4px 3px; font-size: 11px; }
+  .week-printer-label { padding: 4px 6px; font-size: 11px; }
+  .week-job-chip { font-size: 10px; padding: 1px 4px; }
+
+  /* Month view */
+  .month-day-cell { min-height: 60px; padding: 3px; }
+  .month-job-chip { font-size: 10px; padding: 1px 3px; }
+  .month-day-header { padding: 4px; font-size: 10px; }
+
+  /* Modals: bigger on tablet */
+  .modal { width: 95vw; max-width: 95vw; }
+  .modal-wide { width: 95vw; }
+
+  /* Upcoming view */
+  .upcoming-view { padding: 12px 10px; }
+  .upcoming-job-row { flex-wrap: wrap; gap: 6px; padding: 8px 8px; }
+  .upcoming-job-time { min-width: 100px; font-size: 11px; }
+
+  /* Status overview */
+  .so-row { grid-template-columns: 60px 1fr 90px auto; }
+  .so-row-printer { display: none; }
+
+  /* Queue panel */
+  .queue-panel-inner { padding: 8px 10px; gap: 10px; }
+}
+
+/* ================================================================
+   Breakpoint: phones (max-width: 480px)
+   ================================================================ */
+@media (max-width: 480px) {
+  /* Topbar: minimal */
+  .topbar { padding: 0 8px; height: 44px; }
+  .app-title { font-size: 14px; }
+  .topbar-right .btn { padding: 4px 8px; font-size: 11px; }
+
+  /* Toolbar: stack vertically */
+  .calendar-toolbar {
+    flex-direction: column;
+    align-items: stretch;
+    padding: 6px 8px;
+    gap: 4px;
+  }
+  .nav-group { justify-content: center; }
+  .view-group { justify-content: center; flex-wrap: wrap; }
+  .date-label { font-size: 12px; }
+
+  /* Hide week view button on phone (too cramped) */
+  #btn-week { display: none; }
+
+  /* Today panel button — shorter text */
+  #btn-today-panel { font-size: 11px; padding: 4px 7px; }
+
+  /* Mobile printer switcher visible */
+  .mobile-printer-switcher { display: flex; }
+
+  /* Day view: single column mode */
+  .day-view-header { display: none; }
+  .day-printer-col { display: none; }
+  .day-printer-col.mobile-active { display: block; flex: 1; min-width: 0; }
+  .day-view-body { min-width: 0; }
+  .day-view-scroll { overflow-x: hidden; }
+  .day-settings-btn { display: none; }
+
+  /* Job blocks: larger touch targets */
+  .job-block { padding: 5px 8px 5px 10px; font-size: 13px; left: 2px; right: 2px; }
+  .job-block-name { font-size: 13px; }
+  .job-resize-handle { height: 12px; }
+  .job-resize-handle::after { width: 32px; height: 4px; margin-top: 3px; }
+
+  /* Modals: full-screen on phones */
+  .modal-overlay { align-items: flex-end; }
+  .modal {
+    width: 100vw;
+    max-width: 100vw;
+    max-height: 100vh;
+    border-radius: 14px 14px 0 0;
+  }
+  .modal-body { padding: 14px; }
+  .modal-header { padding: 12px 14px; }
+  .modal-footer { padding: 10px 14px; }
+
+  /* Form inputs: larger for touch */
+  input[type="text"],
+  input[type="datetime-local"],
+  input[type="date"],
+  input[type="time"],
+  input[type="number"],
+  select,
+  textarea {
+    padding: 10px 12px;
+    font-size: 16px; /* prevents iOS zoom on focus */
+  }
+
+  /* Month view: 3-letter day names are fine, reduce cell */
+  .month-day-cell { min-height: 50px; }
+  .month-day-number { font-size: 11px; }
+  .month-job-chip { font-size: 9px; }
+
+  /* Week view (if somehow visible) */
+  .week-table th { font-size: 10px; padding: 3px 2px; }
+  .week-table td { font-size: 10px; padding: 2px; min-width: 50px; }
+
+  /* Upcoming: stack layout */
+  .upcoming-job-row {
+    flex-direction: column;
+    align-items: flex-start;
+    gap: 4px;
+    padding: 10px 8px;
+  }
+  .upcoming-job-time { min-width: auto; }
+  .upcoming-job-meta { align-self: flex-start; }
+
+  /* Status overview: simpler grid */
+  .so-row { grid-template-columns: 1fr auto; gap: 4px; padding: 8px 10px; }
+  .so-row-ordernr, .so-row-customer, .so-row-printer, .so-row-date { display: none; }
+  .so-row-name { font-size: 13px; }
+
+  /* Queue items: wrap better */
+  .queue-item { flex-wrap: wrap; padding: 8px; }
+  .queue-item-info { flex-wrap: wrap; }
+  .queue-drag-handle { padding: 4px 6px; font-size: 18px; }
+
+  /* Today panel */
+  .today-util-name { width: 80px; font-size: 11px; }
+  .today-job-time { width: 70px; font-size: 10px; }
+
+  /* Printer status panel: single column */
+  .printer-status-panel { grid-template-columns: 1fr !important; }
+}
+
+/* Safe area padding for notched phones */
+@supports (padding-bottom: env(safe-area-inset-bottom)) {
+  @media (max-width: 480px) {
+    .modal-footer { padding-bottom: calc(10px + env(safe-area-inset-bottom)); }
+    .bottom-sheet { padding-bottom: env(safe-area-inset-bottom); }
+  }
+}
+
+/* Touch device: no hover effects that get stuck */
+@media (hover: none) {
+  .job-block:hover { filter: none; }
+  .week-job-chip:hover { filter: none; }
+  .month-job-chip:hover { filter: none; }
+  .month-day-cell:hover { background: inherit; }
+  .month-day-cell.today:hover { background: var(--primary-tint2); }
+  .week-table td:hover { background: inherit; }
+  .week-table td.today-col:hover { background: var(--primary-tint); }
+}

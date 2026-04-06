@@ -2,10 +2,16 @@
 <html lang="en">
 <head>
   <meta charset="UTF-8">
-  <meta name="viewport" content="width=device-width, initial-scale=1.0">
+  <meta name="viewport" content="width=device-width, initial-scale=1.0, viewport-fit=cover">
   <title>PrintFarm Planner</title>
   <link rel="icon" type="image/svg+xml" href="favicon.svg">
   <link rel="apple-touch-icon" href="favicon.svg">
+  <link rel="manifest" href="manifest.json">
+  <meta name="theme-color" content="#0f766e">
+  <meta name="apple-mobile-web-app-capable" content="yes">
+  <meta name="apple-mobile-web-app-status-bar-style" content="black-translucent">
+  <meta name="apple-mobile-web-app-title" content="PrintFarm">
+  <meta name="mobile-web-app-capable" content="yes">
   <link rel="stylesheet" href="style.css">
 </head>
 <body>
@@ -64,6 +70,9 @@
 
   <!-- Queue panel -->
   <div id="queue-panel" class="queue-panel hidden"></div>
+
+  <!-- Mobile printer switcher (phones only — shown in day view) -->
+  <div id="mobile-printer-switcher" class="mobile-printer-switcher"></div>
 
   <!-- Calendar output -->
   <main id="calendar-container"></main>
@@ -455,7 +464,7 @@
     </div>
   </div>
 
-  <!-- Custom context menu -->
+  <!-- Custom context menu (desktop) -->
   <div id="ctx-menu" class="ctx-menu hidden">
     <button class="ctx-item" id="ctx-edit">✏️ Edit</button>
     <div class="ctx-separator"></div>
@@ -469,6 +478,25 @@
     <div class="ctx-separator" id="ctx-link-sep" style="display:none"></div>
     <button class="ctx-item" id="ctx-duplicate">📋 Duplicate</button>
     <button class="ctx-item ctx-item-danger" id="ctx-delete">🗑 Delete</button>
+  </div>
+
+  <!-- Bottom sheet (mobile context menu) -->
+  <div id="bottom-sheet-overlay" class="bottom-sheet-overlay"></div>
+  <div id="bottom-sheet" class="bottom-sheet">
+    <div class="bottom-sheet-handle"></div>
+    <div class="bottom-sheet-header" id="bs-header"></div>
+    <button class="bottom-sheet-item" id="bs-edit">✏️ Edit</button>
+    <div class="bottom-sheet-sep"></div>
+    <button class="bottom-sheet-item bs-status-btn" data-status="Planned">Planned</button>
+    <button class="bottom-sheet-item bs-status-btn" data-status="Awaiting">Awaiting confirmation</button>
+    <button class="bottom-sheet-item bs-status-btn" data-status="Printing">Printing</button>
+    <button class="bottom-sheet-item bs-status-btn" data-status="Post Printing">Post Printing</button>
+    <button class="bottom-sheet-item bs-status-btn" data-status="Done">Done</button>
+    <div class="bottom-sheet-sep"></div>
+    <button class="bottom-sheet-item hidden" id="bs-link-item"></button>
+    <div class="bottom-sheet-sep hidden" id="bs-link-sep"></div>
+    <button class="bottom-sheet-item" id="bs-duplicate">📋 Duplicate</button>
+    <button class="bottom-sheet-item danger" id="bs-delete">🗑 Delete</button>
   </div>
 
   <!-- ==================== Status Overview Modal ==================== -->
