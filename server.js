@@ -50,8 +50,8 @@ app.get('/logout', (req, res) => {
 
 // --- Session auth middleware ---
 app.use((req, res, next) => {
-  // Allow favicon through unauthenticated
-  if (req.path === '/favicon.svg') return next();
+  // Allow PWA assets through unauthenticated
+  if (req.path === '/favicon.svg' || req.path === '/manifest.json' || req.path === '/sw.js') return next();
   const token = parseCookieToken(req);
   if (token && isValidSession(token)) return next();
   if (req.path.startsWith('/api/')) return res.status(401).json({ error: 'Unauthorized' });
