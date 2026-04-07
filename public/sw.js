@@ -24,6 +24,8 @@ self.addEventListener('fetch', event => {
   const url = new URL(event.request.url);
 
   // API requests: always network
+  // Only handle http(s) requests — skip extensions, data URIs, etc.
+  if (url.protocol !== 'https:' && url.protocol !== 'http:') return;
   if (url.pathname.startsWith('/api/') || url.pathname === '/login' || url.pathname === '/logout') {
     return;
   }
