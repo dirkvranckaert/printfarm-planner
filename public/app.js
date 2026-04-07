@@ -3001,6 +3001,196 @@ function setupListeners() {
 }
 
 // =============================================================================
+// 3MF Import for Scheduling
+// =============================================================================
+let import3mfParsed = null;
+let import3mfBuffer = null;
+let import3mfBusy = false;
+
+function initImport3mf() {
+  document.getElementById('btn-import-3mf')?.addEventListener('click', () => {
+    document.getElementById('topbar-menu')?.classList.remove('open');
+    const input = document.createElement('input');
+    input.type = 'file';
+    input.accept = '.3mf';
+    input.onchange = () => start3mfImport(input.files?.[0]);
+    input.click();
+  });
+
+  document.getElementById('btn-import3mf-save')?.addEventListener('click', confirm3mfSchedule);
+}
+
+async function start3mfImport(file) {
+  if (!file || import3mfBusy) return;
+  import3mfBusy = true;
+
+  // Show progress
+  document.getElementById('import3mf-title').textContent = 'Importing 3MF...';
+  document.getElementById('import3mf-body').innerHTML = `
+    <div style="text-align:center;padding:24px">
+      <p>${escHtml(file.name)} (${(file.size / 1048576).toFixed(1)} MB)</p>
+      <div style="width:100%;height:8px;background:var(--border);border-radius:4px;margin:12px 0">
+        <div id="import3mf-progress" style="height:100%;width:0%;background:var(--primary);border-radius:4px;transition:width .15s"></div>
+      </div>
+      <span id="import3mf-status" style="color:var(--text-muted);font-size:13px">Uploading... 0%</span>
+    </div>`;
+  document.getElementById('btn-import3mf-save').style.display = 'none';
+  document.getElementById('import3mf-modal').classList.remove('hidden');
+
+  const fileBuffer = await file.arrayBuffer();
+  import3mfBuffer = { name: file.name, buffer: fileBuffer };
+
+  const xhr = new XMLHttpRequest();
+  xhr.open('POST', '/api/parse-3mf');
+  xhr.setRequestHeader('Content-Type', 'application/octet-stream');
+
+  xhr.upload.addEventListener('progress', e => {
+    if (!e.lengthComputable) return;
+    const pct = Math.round((e.loaded / e.total) * 100);
+    const bar = document.getElementById('import3mf-progress');
+    const label = document.getElementById('import3mf-status');
+    if (bar) bar.style.width = pct + '%';
+    if (label) label.textContent = pct < 100 ? `Uploading... ${pct}%` : 'Parsing...';
+  });
+
+  xhr.addEventListener('load', () => {
+    import3mfBusy = false;
+    document.getElementById('btn-import3mf-save').style.display = '';
+    let parsed;
+    try { parsed = JSON.parse(xhr.responseText); } catch { alert('Failed to parse response'); closeModal('import3mf-modal'); return; }
+    if (xhr.status >= 400) { alert('Error: ' + (parsed.error || '')); closeModal('import3mf-modal'); return; }
+    if (!parsed.plates?.length) { alert('No plates found in this 3MF file.'); closeModal('import3mf-modal'); return; }
+    if (!parsed.sliced) { alert('This 3MF is not sliced. Please slice it first.'); closeModal('import3mf-modal'); return; }
+    import3mfParsed = parsed;
+    show3mfSchedulePreview(parsed, file.name);
+  });
+
+  xhr.addEventListener('error', () => {
+    import3mfBusy = false;
+    alert('Upload failed');
+    closeModal('import3mf-modal');
+  });
+
+  xhr.send(file);
+}
+
+function show3mfSchedulePreview(parsed, filename) {
+  const printerLabel = parsed.printerName ? ` (${parsed.printerName})` : '';
+  document.getElementById('import3mf-title').textContent = `Schedule from 3MF — ${parsed.plates.length} plate${parsed.plates.length > 1 ? 's' : ''}${printerLabel}`;
+
+  // Fuzzy match printer name
+  const norm = s => s.toLowerCase().replace(/[\s\-_]+/g, '').replace('lab', '');
+  let matchedPrinterId = '';
+  if (parsed.printerName) {
+    const pNorm = norm(parsed.printerName);
+    const match = printers.find(pr => { const n = norm(pr.name); return pNorm.includes(n) || n.includes(pNorm); });
+    if (match) matchedPrinterId = match.id;
+  }
+
+  const today = new Date().toISOString().slice(0, 10);
+  const totalMins = parsed.plates.reduce((s, pl) => s + (pl.printTimeMinutes || 0), 0);
+
+  const rows = parsed.plates.map((pl, i) => {
+    const thumb = parsed.thumbnails?.[pl.index];
+    const nameDefault = pl.plateName || pl.objects?.join(', ') || `Plate ${pl.index}`;
+    const typeInfo = pl.filamentType || '';
+    const colorDots = (pl.filaments || []).map(f =>
+      f.color ? `<span style="display:inline-block;width:12px;height:12px;border-radius:3px;background:${f.color};border:1px solid rgba(0,0,0,.15);vertical-align:middle" title="${ntc.name(f.color)?.[1] || f.color}"></span>` : ''
+    ).join(' ');
+
+    return `<div style="display:flex;gap:12px;padding:12px;background:var(--bg);border:1px solid var(--border);border-radius:6px">
+      ${thumb ? `<img src="${thumb}" style="width:64px;height:64px;object-fit:cover;border-radius:4px;border:1px solid var(--border);flex-shrink:0" alt="">` : ''}
+      <div style="flex:1;min-width:0">
+        <div style="display:flex;align-items:center;gap:8px;margin-bottom:4px">
+          <strong>Plate ${pl.index}</strong>
+          <span style="color:var(--text-muted);font-size:12px">${typeInfo}</span>
+          ${colorDots}
+        </div>
+        <div style="display:grid;grid-template-columns:1fr 1fr;gap:4px 12px;font-size:13px">
+          <div><label style="font-size:11px;color:var(--text-muted)">Name</label><input type="text" value="${escHtml(nameDefault)}" data-sched-name="${i}" style="width:100%;padding:4px 8px;font-size:13px"></div>
+          <div><label style="font-size:11px;color:var(--text-muted)">Duration</label><div style="font-weight:600;padding:4px 0">${Math.floor(pl.printTimeMinutes / 60)}h ${Math.round(pl.printTimeMinutes % 60)}m</div></div>
+          <div><label style="font-size:11px;color:var(--text-muted)">Plastic</label><div style="padding:4px 0">${(pl.weightGrams || 0).toFixed(1)}g</div></div>
+          <div><label style="font-size:11px;color:var(--text-muted)">Objects</label><div style="padding:4px 0">${pl.objectCount || pl.objects?.length || 1}</div></div>
+          <div><label style="font-size:11px;color:var(--text-muted)">Printer</label><select data-sched-printer="${i}" style="width:100%;padding:4px 8px;font-size:13px">
+            <option value="">-- Select --</option>
+            ${printers.map(pr => `<option value="${pr.id}" ${pr.id == matchedPrinterId ? 'selected' : ''}>${escHtml(pr.name)}</option>`).join('')}
+          </select></div>
+          <div><label style="font-size:11px;color:var(--text-muted)">Customer</label><input type="text" value="" data-sched-customer="${i}" style="width:100%;padding:4px 8px;font-size:13px" placeholder="Optional"></div>
+        </div>
+      </div>
+    </div>`;
+  });
+
+  document.getElementById('import3mf-body').innerHTML = `
+    <div style="display:flex;flex-direction:column;gap:12px">
+      <div style="display:flex;gap:12px;align-items:end;padding:8px 0;border-bottom:1px solid var(--border)">
+        <div><label style="font-size:12px;font-weight:600;color:var(--text-muted)">Start Date</label><input type="date" id="sched-start-date" value="${today}" style="padding:6px 10px;font-size:14px"></div>
+        <div><label style="font-size:12px;font-weight:600;color:var(--text-muted)">Start Time</label><input type="time" id="sched-start-time" value="08:00" style="padding:6px 10px;font-size:14px"></div>
+        <div style="font-size:13px;color:var(--text-muted)">Total: ${Math.floor(totalMins / 60)}h ${Math.round(totalMins % 60)}m across ${parsed.plates.length} plate${parsed.plates.length > 1 ? 's' : ''}</div>
+      </div>
+      ${rows.join('')}
+    </div>`;
+}
+
+async function confirm3mfSchedule() {
+  if (!import3mfParsed) return;
+  const btn = document.getElementById('btn-import3mf-save');
+  btn.disabled = true;
+  btn.textContent = 'Scheduling...';
+
+  try {
+    const startDate = document.getElementById('sched-start-date').value;
+    const startTime = document.getElementById('sched-start-time').value;
+    if (!startDate) { alert('Start date required'); return; }
+
+    const plates = import3mfParsed.plates.map((pl, i) => {
+      const colors = (pl.filaments || []).map(f => {
+        const profile = import3mfParsed.filamentProfiles?.[f.id - 1];
+        return {
+          color: f.color || '#888888',
+          name: (typeof ntc !== 'undefined' ? ntc.name(f.color || '#888888')?.[1] : '') || f.color,
+          brand: profile?.vendor && profile.vendor !== 'Generic' ? profile.vendor : '',
+        };
+      });
+
+      return {
+        plateIndex: pl.index,
+        name: document.querySelector(`[data-sched-name="${i}"]`)?.value || `Plate ${pl.index}`,
+        printerId: parseInt(document.querySelector(`[data-sched-printer="${i}"]`)?.value) || null,
+        customerName: document.querySelector(`[data-sched-customer="${i}"]`)?.value || null,
+        durationMins: Math.round(pl.printTimeMinutes || 0),
+        colors,
+      };
+    });
+
+    const res = await fetch('/api/import-3mf-schedule', {
+      method: 'POST',
+      headers: {
+        'Content-Type': 'application/octet-stream',
+        'X-Schedule': JSON.stringify({ plates, startDate, startTime }),
+      },
+      body: import3mfBuffer.buffer,
+    });
+
+    if (!res.ok) {
+      const err = await res.json().catch(() => ({}));
+      alert('Failed: ' + (err.error || res.statusText));
+      return;
+    }
+
+    closeModal('import3mf-modal');
+    import3mfParsed = null;
+    import3mfBuffer = null;
+
+    // Reload and render
+    await renderCalendar();
+  } finally {
+    btn.disabled = false;
+    btn.textContent = 'Schedule Jobs';
+  }
+}
+
+// =============================================================================
 // Bootstrap
 // =============================================================================
-document.addEventListener('DOMContentLoaded', init);
+document.addEventListener('DOMContentLoaded', () => { init(); initImport3mf(); });

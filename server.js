@@ -1,10 +1,15 @@
 require('dotenv').config();
 const express = require('express');
 const crypto  = require('crypto');
+const fs      = require('fs');
 const path    = require('path');
 const db     = require('./db');
 const brands = require('./brands');
 const push   = require('./push');
+const { parse3mf, extractThumbnails } = require('./parse3mf');
+
+const UPLOADS_DIR = path.join(__dirname, 'data', 'uploads');
+if (!fs.existsSync(UPLOADS_DIR)) fs.mkdirSync(UPLOADS_DIR, { recursive: true });
 
 const app = express();
 app.use(express.json());
@@ -368,6 +373,105 @@ app.post('/api/import', (req, res) => {
     }
   })();
   res.json({ ok: true });
+});
+
+/* ------------------------------------------------------------------ */
+/*  3MF import for scheduling                                          */
+/* ------------------------------------------------------------------ */
+app.post('/api/parse-3mf', express.raw({ type: '*/*', limit: '500mb' }), (req, res) => {
+  try {
+    if (!req.body?.length) return res.status(400).json({ error: 'Empty body' });
+    const result = parse3mf(req.body);
+    const thumbs = extractThumbnails(req.body);
+    result.thumbnails = {};
+    for (const t of thumbs) result.thumbnails[t.plateIndex] = 'data:image/png;base64,' + t.buffer.toString('base64');
+    res.json(result);
+  } catch (err) {
+    res.status(400).json({ error: 'Failed to parse 3MF: ' + err.message });
+  }
+});
+
+app.post('/api/import-3mf-schedule', express.raw({ type: '*/*', limit: '500mb' }), (req, res) => {
+  try {
+    // Parse the schedule data from headers (body is the 3MF file)
+    const schedule = JSON.parse(req.headers['x-schedule'] || '{}');
+    const { plates, startDate, startTime } = schedule;
+    if (!plates?.length || !startDate) return res.status(400).json({ error: 'plates and startDate required' });
+
+    // Save the 3MF file
+    const fileId = crypto.randomBytes(8).toString('hex');
+    const storedName = `${fileId}.3mf`;
+    fs.writeFileSync(path.join(UPLOADS_DIR, storedName), req.body);
+
+    // Extract thumbnails and save as images
+    const thumbs = extractThumbnails(req.body);
+    const thumbMap = {};
+    for (const t of thumbs) {
+      const imgId = crypto.randomBytes(8).toString('hex') + '.png';
+      fs.writeFileSync(path.join(UPLOADS_DIR, imgId), t.buffer);
+      thumbMap[t.plateIndex] = imgId;
+    }
+
+    // Schedule jobs sequentially from the start date/time
+    let currentStart = new Date(`${startDate}T${startTime || '08:00'}:00`);
+    const createdJobs = [];
+
+    for (const pl of plates) {
+      const durationMins = pl.durationMins || 0;
+      const endDate = new Date(currentStart.getTime() + durationMins * 60 * 1000);
+
+      const warmUp = 5; // default warm-up
+      const coolDown = 15; // default cool-down
+
+      const thumbFile = thumbMap[pl.plateIndex] || null;
+      const colorsStr = pl.colors ? JSON.stringify(pl.colors) : null;
+
+      const result = db.prepare(
+        'INSERT INTO jobs (printerId, name, customerName, orderNr, start, end, status, colors, printFile, remarks, queued, durationMins) VALUES (?,?,?,?,?,?,?,?,?,?,?,?)'
+      ).run(
+        pl.printerId || null,
+        pl.name || `Plate ${pl.plateIndex}`,
+        pl.customerName || null,
+        null,
+        currentStart.toISOString(),
+        endDate.toISOString(),
+        'Planned',
+        colorsStr,
+        storedName,
+        pl.remarks || (thumbFile ? `[thumb:${thumbFile}]` : null),
+        0,
+        durationMins
+      );
+
+      createdJobs.push({
+        id: result.lastInsertRowid,
+        name: pl.name,
+        printerId: pl.printerId,
+        start: currentStart.toISOString(),
+        end: endDate.toISOString(),
+        durationMins,
+        thumbFile,
+      });
+
+      // Next job starts after cool-down gap
+      currentStart = new Date(endDate.getTime() + coolDown * 60 * 1000);
+    }
+
+    res.status(201).json({ jobs: createdJobs, file: storedName });
+  } catch (err) {
+    res.status(400).json({ error: err.message });
+  }
+});
+
+// Serve uploaded images/thumbnails
+app.get('/api/uploads/:filename', (req, res) => {
+  const filepath = path.join(UPLOADS_DIR, req.params.filename);
+  if (!fs.existsSync(filepath)) return res.status(404).json({ error: 'Not found' });
+  const ext = path.extname(req.params.filename).toLowerCase();
+  const mime = { '.png': 'image/png', '.jpg': 'image/jpeg', '.3mf': 'application/octet-stream' };
+  res.setHeader('Content-Type', mime[ext] || 'application/octet-stream');
+  res.setHeader('Cache-Control', 'public, max-age=86400');
+  res.sendFile(filepath);
 });
 
 app.listen(process.env.PORT || 3000, () => {

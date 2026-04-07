@@ -35,6 +35,7 @@
           <button class="topbar-menu-item" id="btn-manage-printers">⚙ Printers</button>
           <button class="topbar-menu-item" id="btn-manage-closures">🔒 Closures</button>
           <button class="topbar-menu-item" id="btn-status-overview">📊 Job Status</button>
+          <button class="topbar-menu-item" id="btn-import-3mf">📦 Import 3MF</button>
           <button class="topbar-menu-item" id="btn-settings">⚙ Settings</button>
           <div class="topbar-menu-divider"></div>
           <a href="/logout" class="topbar-menu-item topbar-menu-signout">Sign out</a>
@@ -515,6 +516,22 @@
     </div>
   </div>
 
+  <!-- 3MF Import Modal -->
+  <div class="modal-overlay hidden" id="import3mf-modal">
+    <div class="modal modal-wide">
+      <div class="modal-header">
+        <h2 id="import3mf-title">Import 3MF</h2>
+        <button class="btn-icon modal-close" data-close="import3mf-modal">&times;</button>
+      </div>
+      <div class="modal-body" id="import3mf-body"></div>
+      <div class="modal-footer">
+        <button class="btn" data-close="import3mf-modal">Cancel</button>
+        <button class="btn btn-primary" id="btn-import3mf-save">Schedule Jobs</button>
+      </div>
+    </div>
+  </div>
+
+  <script src="ntc.js"></script>
   <script src="app.js"></script>
 </body>
 </html>
