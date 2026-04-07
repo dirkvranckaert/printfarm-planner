@@ -1557,7 +1557,7 @@ async function renderUpcoming() {
       const closure = closureForDay(day);
       const isToday = toDateKey(day) === toDateKey(new Date());
       h += `<div class="upcoming-day-section">`;
-      h += `<div class="upcoming-day-header${isToday ? ' upcoming-day-today' : ''}">${fmtDate(day, 'DDDD, D MMMM YYYY')}</div>`;
+      h += `<div class="upcoming-day-header${isToday ? ' upcoming-day-today' : ''}" data-date="${toDateKey(day)}" style="cursor:pointer">${fmtDate(day, 'DDDD, D MMMM YYYY')}</div>`;
       if (closure) {
         h += `<div class="closure-banner">🔒 Closed${closure.label ? ': ' + escHtml(closure.label) : ''}</div>`;
       }
@@ -1595,6 +1595,16 @@ async function renderUpcoming() {
     });
     el.addEventListener('contextmenu', e => showCtxMenu(e, parseInt(el.dataset.jobId)));
     addLongPress(el, () => showBottomSheet(parseInt(el.dataset.jobId)));
+  });
+
+  // Click day header → jump to that day in day view
+  container.querySelectorAll('.upcoming-day-header[data-date]').forEach(el => {
+    el.addEventListener('click', () => {
+      navDate = new Date(el.dataset.date + 'T00:00:00');
+      view = 'day';
+      renderCalendar();
+      setTimeout(scrollToNow, 80);
+    });
   });
 }
 
