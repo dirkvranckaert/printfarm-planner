@@ -760,7 +760,7 @@ h3 { font-size: 14px; font-weight: 600; margin-bottom: 12px; }
 
 /* ======================== Settings modal ======================== */
 .modal-sm       { width: 320px; }
-.modal-settings { width: 360px; }
+.modal-settings { width: 480px; }
 
 /* Status color rows in settings */
 .status-color-rows { display: flex; flex-direction: column; gap: 8px; margin-top: 6px; }
@@ -1783,3 +1783,10 @@ body.is-resizing,    body.is-resizing    * { cursor: ns-resize  !important; user
   text-transform: uppercase; letter-spacing: 0.5px;
   color: var(--danger); opacity: .8;
 }
+
+/* Themed scrollbar */
+::-webkit-scrollbar { width: 8px; height: 8px; }
+::-webkit-scrollbar-track { background: var(--bg); }
+::-webkit-scrollbar-thumb { background: var(--border); border-radius: 4px; }
+::-webkit-scrollbar-thumb:hover { background: var(--text-muted); }
+* { scrollbar-width: thin; scrollbar-color: var(--border) var(--bg); }
