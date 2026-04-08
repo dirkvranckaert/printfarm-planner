@@ -518,7 +518,7 @@ function findNextValidStart(candidate, durationMins, printerId) {
 
   while (iterations++ < MAX_ITER) {
     // 1. Advance past closed days
-    if (restr.enabled && restr.closedDays?.length) {
+    if (restr.closedDays?.length) {
       let dayChecks = 0;
       while (restr.closedDays.includes(current.getDay()) && dayChecks++ < 8) {
         current.setDate(current.getDate() + 1);
@@ -527,7 +527,7 @@ function findNextValidStart(candidate, durationMins, printerId) {
       }
     }
 
-    // 2. Advance past silent hours
+    // 2. Advance past silent hours (only when enabled)
     if (restr.enabled && restr.silentStart && restr.silentEnd) {
       if (isInSilentHours(current, restr.silentStart, restr.silentEnd)) {
         current = advanceToSilentEnd(current, restr.silentEnd);
