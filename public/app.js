@@ -2024,8 +2024,15 @@ async function openJobModal(jobId = null, prefill = {}) {
     document.getElementById('job-colors').value    = job.colors       ?? '';
     document.getElementById('job-printfile').value = job.printFile    ?? '';
     document.getElementById('job-bedtype').value   = job.bedType      ?? '';
-    // Show color swatches if JSON
-    document.getElementById('job-colors-display').innerHTML = renderColorDetail(job.colors);
+    // Show color swatches if JSON — hide raw text input when JSON
+    const colorsDisplay = document.getElementById('job-colors-display');
+    const colorsInput = document.getElementById('job-colors');
+    colorsDisplay.innerHTML = renderColorDetail(job.colors);
+    if (job.colors && job.colors.startsWith('[')) {
+      colorsInput.style.display = 'none';
+    } else {
+      colorsInput.style.display = '';
+    }
     // Show thumbnail if available
     const thumbGroup = document.getElementById('job-thumb-group');
     if (job.thumbFile) {
@@ -2068,6 +2075,7 @@ async function openJobModal(jobId = null, prefill = {}) {
     document.getElementById('job-customer').value  = prefill.customerName ?? '';
     document.getElementById('job-ordernr').value   = prefill.orderNr      ?? '';
     document.getElementById('job-colors').value    = prefill.colors       ?? '';
+    document.getElementById('job-colors').style.display = '';
     document.getElementById('job-printfile').value = prefill.printFile    ?? '';
     document.getElementById('job-bedtype').value   = prefill.bedType      ?? '';
     document.getElementById('job-printfile').style.display = '';
@@ -3099,7 +3107,10 @@ function initImport3mf() {
       if (file) {
         e.preventDefault();
         // Pre-set the start date to the current navDate
-        import3mfDefaultDate = navDate ? new Date(navDate) : new Date();
+        // Use navDate but never earlier than today
+        const today = new Date(); today.setHours(0,0,0,0);
+        const nd = navDate ? new Date(navDate) : today;
+        import3mfDefaultDate = nd < today ? today : nd;
         start3mfImport(file);
       }
     });
@@ -3190,7 +3201,7 @@ function show3mfSchedulePreview(parsed, filename) {
       ${thumb ? `<img src="${thumb}" style="width:64px;height:64px;object-fit:cover;border-radius:4px;border:1px solid var(--border);flex-shrink:0" alt="">` : ''}
       <div style="flex:1;min-width:0">
         <div style="display:flex;align-items:center;gap:8px;margin-bottom:4px">
-          <strong>Plate ${pl.index}</strong>
+          <label style="display:inline-flex;align-items:center;gap:4px;cursor:pointer"><input type="checkbox" checked data-sched-check="${i}" style="width:auto"> <strong>Plate ${pl.index}</strong></label>
           <span style="color:var(--text-muted);font-size:12px">${typeInfo}${pl.bedType ? ` / ${formatBedType(pl.bedType)}` : ''}</span>
           ${colorDots}
         </div>
@@ -3233,6 +3244,8 @@ async function confirm3mfSchedule() {
     if (!startDate) { alert('Start date required'); return; }
 
     const plates = import3mfParsed.plates.map((pl, i) => {
+      const check = document.querySelector(`[data-sched-check="${i}"]`);
+      if (check && !check.checked) return null;
       const colors = (pl.filaments || []).map(f => {
         const profile = import3mfParsed.filamentProfiles?.[f.id - 1];
         return {
@@ -3254,11 +3267,14 @@ async function confirm3mfSchedule() {
       };
     });
 
+    const selectedPlates = plates.filter(Boolean);
+    if (!selectedPlates.length) { alert('No plates selected'); return; }
+
     const res = await fetch('/api/import-3mf-schedule', {
       method: 'POST',
       headers: {
         'Content-Type': 'application/octet-stream',
-        'X-Schedule': JSON.stringify({ plates, startDate, startTime }),
+        'X-Schedule': JSON.stringify({ plates: selectedPlates, startDate, startTime }),
       },
       body: import3mfBuffer.buffer,
     });
