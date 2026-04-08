@@ -2042,7 +2042,8 @@ async function openJobModal(jobId = null, prefill = {}) {
     // Show download link if printFile is an uploaded file
     const pfDisplay = document.getElementById('job-printfile-display');
     if (job.printFile && !job.printFile.includes('/')) {
-      pfDisplay.innerHTML = `<a href="/api/uploads/${escHtml(job.printFile)}" download style="color:var(--primary);font-size:13px">Download 3MF</a>`;
+      const dlName = `${job.orderNr ? job.orderNr + '_' : ''}${job.name.replace(/[^a-zA-Z0-9_-]/g, '_')}.3mf`;
+      pfDisplay.innerHTML = `<a href="/api/uploads/${escHtml(job.printFile)}" download="${escHtml(dlName)}" style="color:var(--primary);font-size:13px">📦 ${escHtml(dlName)}</a>`;
       document.getElementById('job-printfile').style.display = 'none';
     } else {
       pfDisplay.innerHTML = '';
@@ -3185,7 +3186,7 @@ function show3mfSchedulePreview(parsed, filename) {
   }
 
   const defaultDate = import3mfDefaultDate || new Date();
-  const today = defaultDate.toISOString().slice(0, 10);
+  const today = `${defaultDate.getFullYear()}-${String(defaultDate.getMonth()+1).padStart(2,'0')}-${String(defaultDate.getDate()).padStart(2,'0')}`;
   import3mfDefaultDate = null; // reset
   const totalMins = parsed.plates.reduce((s, pl) => s + (pl.printTimeMinutes || 0), 0);
 
@@ -3226,10 +3227,25 @@ function show3mfSchedulePreview(parsed, filename) {
       <div style="display:flex;gap:12px;align-items:end;padding:8px 0;border-bottom:1px solid var(--border)">
         <div><label style="font-size:12px;font-weight:600;color:var(--text-muted)">Start Date</label><input type="date" id="sched-start-date" value="${today}" style="padding:6px 10px;font-size:14px"></div>
         <div><label style="font-size:12px;font-weight:600;color:var(--text-muted)">Start Time</label><input type="time" id="sched-start-time" value="08:00" style="padding:6px 10px;font-size:14px"></div>
-        <div style="font-size:13px;color:var(--text-muted)">Total: ${Math.floor(totalMins / 60)}h ${Math.round(totalMins % 60)}m across ${parsed.plates.length} plate${parsed.plates.length > 1 ? 's' : ''}</div>
+        <div style="font-size:13px;color:var(--text-muted)" id="sched-total-label">Total: ${Math.floor(totalMins / 60)}h ${Math.round(totalMins % 60)}m across ${parsed.plates.length} plate${parsed.plates.length > 1 ? 's' : ''}</div>
       </div>
       ${rows.join('')}
     </div>`;
+
+  // Update totals when checkboxes change
+  setTimeout(() => {
+    document.querySelectorAll('[data-sched-check]').forEach(cb => {
+      cb.addEventListener('change', () => {
+        let mins = 0, count = 0;
+        parsed.plates.forEach((pl, i) => {
+          const checked = document.querySelector(`[data-sched-check="${i}"]`)?.checked;
+          if (checked) { mins += pl.printTimeMinutes || 0; count++; }
+        });
+        const label = document.getElementById('sched-total-label');
+        if (label) label.textContent = `Total: ${Math.floor(mins/60)}h ${Math.round(mins%60)}m across ${count} plate${count !== 1 ? 's' : ''}`;
+      });
+    });
+  }, 0);
 }
 
 async function confirm3mfSchedule() {

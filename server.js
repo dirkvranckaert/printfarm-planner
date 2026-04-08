@@ -258,6 +258,47 @@ app.delete('/api/printers/:id', (req, res) => {
 app.get('/api/jobs', (req, res) => {
   res.json(db.prepare('SELECT * FROM jobs').all());
 });
+// Attach a 3MF to an existing job (must be before :id routes)
+app.post('/api/jobs/:id/attach-3mf', express.raw({ type: '*/*', limit: '500mb' }), (req, res) => {
+  try {
+    const job = db.prepare('SELECT * FROM jobs WHERE id=?').get(req.params.id);
+    if (!job) return res.status(404).json({ error: 'Job not found' });
+    const plateIndex = parseInt(req.headers['x-plate-index'] || '1');
+
+    const fileId = crypto.randomBytes(8).toString('hex');
+    const storedName = `${fileId}.3mf`;
+    fs.writeFileSync(path.join(UPLOADS_DIR, storedName), req.body);
+
+    const parsed = parse3mf(req.body);
+    const plate = parsed.plates.find(p => p.index === plateIndex) || parsed.plates[0];
+
+    const thumbs = extractThumbnails(req.body);
+    const thumb = thumbs.find(t => t.plateIndex === plateIndex) || thumbs[0];
+    let thumbFile = null;
+    if (thumb) {
+      thumbFile = crypto.randomBytes(8).toString('hex') + '.png';
+      fs.writeFileSync(path.join(UPLOADS_DIR, thumbFile), thumb.buffer);
+    }
+
+    const colors = plate ? plate.filaments.map(f => {
+      const profile = parsed.filamentProfiles?.[f.id - 1];
+      return { color: f.color || '#888888', name: '', brand: profile?.vendor && profile.vendor !== 'Generic' ? profile.vendor : '' };
+    }) : [];
+
+    const durationMins = plate ? Math.round(plate.printTimeMinutes) : job.durationMins;
+    const colorsStr = colors.length ? JSON.stringify(colors) : job.colors;
+    const newEnd = new Date(new Date(job.start).getTime() + durationMins * 60 * 1000).toISOString();
+    const bedType = plate?.bedType || null;
+
+    db.prepare('UPDATE jobs SET printFile=?, thumbFile=?, colors=?, durationMins=?, end=?, bedType=? WHERE id=?')
+      .run(storedName, thumbFile, colorsStr, durationMins, newEnd, bedType, req.params.id);
+
+    res.json(db.prepare('SELECT * FROM jobs WHERE id=?').get(req.params.id));
+  } catch (err) {
+    res.status(400).json({ error: err.message });
+  }
+});
+
 app.get('/api/jobs/:id', (req, res) => {
   const row = db.prepare('SELECT * FROM jobs WHERE id=?').get(req.params.id);
   if (!row) return res.status(404).json(null);
@@ -475,55 +516,6 @@ app.post('/api/import-3mf-schedule', express.raw({ type: '*/*', limit: '500mb' }
   }
 });
 
-// Attach a 3MF to an existing job (pick a plate)
-app.post('/api/jobs/:id/attach-3mf', express.raw({ type: '*/*', limit: '500mb' }), (req, res) => {
-  try {
-    const job = db.prepare('SELECT * FROM jobs WHERE id=?').get(req.params.id);
-    if (!job) return res.status(404).json({ error: 'Job not found' });
-    const plateIndex = parseInt(req.headers['x-plate-index'] || '1');
-
-    // Save the 3MF file
-    const fileId = crypto.randomBytes(8).toString('hex');
-    const storedName = `${fileId}.3mf`;
-    fs.writeFileSync(path.join(UPLOADS_DIR, storedName), req.body);
-
-    // Parse it
-    const parsed = parse3mf(req.body);
-    const plate = parsed.plates.find(p => p.index === plateIndex) || parsed.plates[0];
-
-    // Extract thumbnail for this plate
-    const thumbs = extractThumbnails(req.body);
-    const thumb = thumbs.find(t => t.plateIndex === plateIndex) || thumbs[0];
-    let thumbFile = null;
-    if (thumb) {
-      thumbFile = crypto.randomBytes(8).toString('hex') + '.png';
-      fs.writeFileSync(path.join(UPLOADS_DIR, thumbFile), thumb.buffer);
-    }
-
-    // Build colors (names will be resolved client-side via ntc.js)
-    const colors = plate ? plate.filaments.map(f => {
-      const profile = parsed.filamentProfiles?.[f.id - 1];
-      return {
-        color: f.color || '#888888',
-        name: '',
-        brand: profile?.vendor && profile.vendor !== 'Generic' ? profile.vendor : '',
-      };
-    }) : [];
-
-    // Update job
-    const durationMins = plate ? Math.round(plate.printTimeMinutes) : job.durationMins;
-    const colorsStr = colors.length ? JSON.stringify(colors) : job.colors;
-    const newEnd = new Date(new Date(job.start).getTime() + durationMins * 60 * 1000).toISOString();
-
-    const bedType = plate?.bedType || null;
-    db.prepare('UPDATE jobs SET printFile=?, thumbFile=?, colors=?, durationMins=?, end=?, bedType=? WHERE id=?')
-      .run(storedName, thumbFile, colorsStr, durationMins, newEnd, bedType, req.params.id);
-
-    res.json(db.prepare('SELECT * FROM jobs WHERE id=?').get(req.params.id));
-  } catch (err) {
-    res.status(400).json({ error: err.message });
-  }
-});
 
 // Serve uploaded images/thumbnails
 app.get('/api/uploads/:filename', (req, res) => {
