@@ -3138,7 +3138,7 @@ function show3mfSchedulePreview(parsed, filename) {
           <div><label style="font-size:11px;color:var(--text-muted)">Duration</label><div style="font-weight:600;padding:4px 0">${Math.floor(pl.printTimeMinutes / 60)}h ${Math.round(pl.printTimeMinutes % 60)}m</div></div>
           <div><label style="font-size:11px;color:var(--text-muted)">Plastic</label><div style="padding:4px 0">${(pl.weightGrams || 0).toFixed(1)}g</div></div>
           <div><label style="font-size:11px;color:var(--text-muted)">Objects</label><div style="padding:4px 0">${pl.objectCount || pl.objects?.length || 1}</div></div>
-          <div><label style="font-size:11px;color:var(--text-muted)">Printer</label><select data-sched-printer="${i}" style="width:100%;padding:4px 8px;font-size:13px">
+          <div style="grid-column:1/-1"><label style="font-size:11px;color:var(--text-muted)">Printer</label><select data-sched-printer="${i}" style="width:100%;padding:4px 8px;font-size:13px">
             <option value="">-- Select --</option>
             ${printers.map(pr => `<option value="${pr.id}" ${pr.id == matchedPrinterId ? 'selected' : ''}>${escHtml(pr.name)}</option>`).join('')}
           </select></div>
