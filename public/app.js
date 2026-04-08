@@ -3006,6 +3006,7 @@ function setupListeners() {
 let import3mfParsed = null;
 let import3mfBuffer = null;
 let import3mfBusy = false;
+let import3mfDefaultDate = null;
 
 function initImport3mf() {
   document.getElementById('btn-import-3mf')?.addEventListener('click', () => {
@@ -3018,6 +3019,30 @@ function initImport3mf() {
   });
 
   document.getElementById('btn-import3mf-save')?.addEventListener('click', confirm3mfSchedule);
+
+  // Drag & drop 3MF onto the calendar
+  const calContainer = document.getElementById('calendar-container');
+  if (calContainer) {
+    calContainer.addEventListener('dragover', e => {
+      if (Array.from(e.dataTransfer?.items || []).some(i => i.kind === 'file')) {
+        e.preventDefault();
+        calContainer.classList.add('cal-drop-active');
+      }
+    });
+    calContainer.addEventListener('dragleave', e => {
+      if (!calContainer.contains(e.relatedTarget)) calContainer.classList.remove('cal-drop-active');
+    });
+    calContainer.addEventListener('drop', e => {
+      calContainer.classList.remove('cal-drop-active');
+      const file = Array.from(e.dataTransfer?.files || []).find(f => f.name.toLowerCase().endsWith('.3mf'));
+      if (file) {
+        e.preventDefault();
+        // Pre-set the start date to the current navDate
+        import3mfDefaultDate = navDate ? new Date(navDate) : new Date();
+        start3mfImport(file);
+      }
+    });
+  }
 }
 
 async function start3mfImport(file) {
@@ -3087,7 +3112,9 @@ function show3mfSchedulePreview(parsed, filename) {
     if (match) matchedPrinterId = match.id;
   }
 
-  const today = new Date().toISOString().slice(0, 10);
+  const defaultDate = import3mfDefaultDate || new Date();
+  const today = defaultDate.toISOString().slice(0, 10);
+  import3mfDefaultDate = null; // reset
   const totalMins = parsed.plates.reduce((s, pl) => s + (pl.printTimeMinutes || 0), 0);
 
   const rows = parsed.plates.map((pl, i) => {
@@ -3116,6 +3143,7 @@ function show3mfSchedulePreview(parsed, filename) {
             ${printers.map(pr => `<option value="${pr.id}" ${pr.id == matchedPrinterId ? 'selected' : ''}>${escHtml(pr.name)}</option>`).join('')}
           </select></div>
           <div><label style="font-size:11px;color:var(--text-muted)">Customer</label><input type="text" value="" data-sched-customer="${i}" style="width:100%;padding:4px 8px;font-size:13px" placeholder="Optional"></div>
+          <div><label style="font-size:11px;color:var(--text-muted)">Order #</label><input type="text" value="" data-sched-ordernr="${i}" style="width:100%;padding:4px 8px;font-size:13px" placeholder="Optional"></div>
         </div>
       </div>
     </div>`;
@@ -3158,6 +3186,7 @@ async function confirm3mfSchedule() {
         name: document.querySelector(`[data-sched-name="${i}"]`)?.value || `Plate ${pl.index}`,
         printerId: parseInt(document.querySelector(`[data-sched-printer="${i}"]`)?.value) || null,
         customerName: document.querySelector(`[data-sched-customer="${i}"]`)?.value || null,
+        orderNr: document.querySelector(`[data-sched-ordernr="${i}"]`)?.value || null,
         durationMins: Math.round(pl.printTimeMinutes || 0),
         colors,
       };

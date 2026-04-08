@@ -432,7 +432,7 @@ app.post('/api/import-3mf-schedule', express.raw({ type: '*/*', limit: '500mb' }
         pl.printerId || null,
         pl.name || `Plate ${pl.plateIndex}`,
         pl.customerName || null,
-        null,
+        pl.orderNr || null,
         currentStart.toISOString(),
         endDate.toISOString(),
         'Planned',

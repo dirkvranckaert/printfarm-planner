@@ -1725,3 +1725,11 @@ body.is-resizing,    body.is-resizing    * { cursor: ns-resize  !important; user
   .week-table td:hover { background: inherit; }
   .week-table td.today-col:hover { background: var(--primary-tint); }
 }
+
+/* Calendar 3MF drop zone */
+.cal-drop-active {
+  outline: 3px dashed var(--primary);
+  outline-offset: -3px;
+  background: rgba(20,184,166,.05);
+}
+
