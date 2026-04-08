@@ -2745,6 +2745,38 @@ async function openSettingsModal() {
   if (cbUpcoming) cbUpcoming.checked = pnu?.value !== false;
 
   document.getElementById('settings-modal').classList.remove('hidden');
+
+  // Load connected apps
+  loadConnectedApps();
+}
+
+async function loadConnectedApps() {
+  const el = document.getElementById('connected-apps-panel');
+  if (!el) return;
+  try {
+    const data = await api('GET', '/api/discover');
+    const config = await api('GET', '/api/config');
+    let html = '';
+
+    if (!config.sharedAuth) {
+      html = '<span style="color:var(--text-muted)">Shared auth not configured. Set <code>SHARED_AUTH_SECRET</code> in .env.</span>';
+    } else {
+      const appNames = { calculator: '3D Project Calculator', filament: 'Filament Manager' };
+      const keys = Object.keys(data.apps || {});
+      if (!keys.length) {
+        html = '<span style="color:var(--text-muted)">No sibling app URLs configured.</span>';
+      } else {
+        html = keys.map(k => {
+          const a = data.apps[k];
+          const dot = a.available ? '\ud83d\udfe2' : '\ud83d\udd34';
+          const name = appNames[k] || k;
+          const info = a.available ? `v${a.version || '?'}` : 'Unreachable';
+          return `<div style="padding:4px 0">${dot} <strong>${escHtml(name)}</strong> — ${escHtml(info)}</div>`;
+        }).join('');
+      }
+    }
+    el.innerHTML = html;
+  } catch { el.innerHTML = '<span style="color:var(--danger)">Failed to load</span>'; }
 }
 
 async function bambuConnect() {
