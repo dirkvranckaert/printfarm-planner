@@ -156,6 +156,7 @@ function parse3mf(input) {
           result.plates[i - 1].objects = objects;
         }
         result.plates[i - 1].plateName = plateNames[i] || null;
+        result.plates[i - 1].bedType = data.bed_type || null;
       } else if (!result.sliced) {
         result.plates.push({
           index: i,
@@ -166,6 +167,7 @@ function parse3mf(input) {
           objects,
           filaments: [],
           layerHeight: data.bbox_objects?.[0]?.layer_height || null,
+          bedType: data.bed_type || null,
         });
       }
     }

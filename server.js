@@ -289,6 +289,16 @@ app.patch('/api/jobs/:id', (req, res) => {
   res.json({ id: Number(req.params.id), ...req.body });
 });
 app.delete('/api/jobs/:id', (req, res) => {
+  // Clean up uploaded files
+  const job = db.prepare('SELECT printFile, thumbFile FROM jobs WHERE id=?').get(req.params.id);
+  if (job) {
+    if (job.thumbFile) { try { fs.unlinkSync(path.join(UPLOADS_DIR, job.thumbFile)); } catch {} }
+    // Only delete 3MF file if no other jobs reference it
+    if (job.printFile) {
+      const others = db.prepare('SELECT COUNT(*) as c FROM jobs WHERE printFile=? AND id!=?').get(job.printFile, req.params.id);
+      if (others.c === 0) { try { fs.unlinkSync(path.join(UPLOADS_DIR, job.printFile)); } catch {} }
+    }
+  }
   db.prepare('DELETE FROM jobs WHERE id=?').run(req.params.id);
   res.status(204).end();
 });
@@ -427,7 +437,7 @@ app.post('/api/import-3mf-schedule', express.raw({ type: '*/*', limit: '500mb' }
       const colorsStr = pl.colors ? JSON.stringify(pl.colors) : null;
 
       const result = db.prepare(
-        'INSERT INTO jobs (printerId, name, customerName, orderNr, start, end, status, colors, printFile, remarks, queued, durationMins) VALUES (?,?,?,?,?,?,?,?,?,?,?,?)'
+        'INSERT INTO jobs (printerId, name, customerName, orderNr, start, end, status, colors, printFile, remarks, queued, durationMins, thumbFile) VALUES (?,?,?,?,?,?,?,?,?,?,?,?,?)'
       ).run(
         pl.printerId || null,
         pl.name || `Plate ${pl.plateIndex}`,
@@ -438,9 +448,10 @@ app.post('/api/import-3mf-schedule', express.raw({ type: '*/*', limit: '500mb' }
         'Planned',
         colorsStr,
         storedName,
-        pl.remarks || (thumbFile ? `[thumb:${thumbFile}]` : null),
+        null,
         0,
-        durationMins
+        durationMins,
+        thumbFile || null
       );
 
       createdJobs.push({
@@ -458,6 +469,55 @@ app.post('/api/import-3mf-schedule', express.raw({ type: '*/*', limit: '500mb' }
     }
 
     res.status(201).json({ jobs: createdJobs, file: storedName });
+  } catch (err) {
+    res.status(400).json({ error: err.message });
+  }
+});
+
+// Attach a 3MF to an existing job (pick a plate)
+app.post('/api/jobs/:id/attach-3mf', express.raw({ type: '*/*', limit: '500mb' }), (req, res) => {
+  try {
+    const job = db.prepare('SELECT * FROM jobs WHERE id=?').get(req.params.id);
+    if (!job) return res.status(404).json({ error: 'Job not found' });
+    const plateIndex = parseInt(req.headers['x-plate-index'] || '1');
+
+    // Save the 3MF file
+    const fileId = crypto.randomBytes(8).toString('hex');
+    const storedName = `${fileId}.3mf`;
+    fs.writeFileSync(path.join(UPLOADS_DIR, storedName), req.body);
+
+    // Parse it
+    const parsed = parse3mf(req.body);
+    const plate = parsed.plates.find(p => p.index === plateIndex) || parsed.plates[0];
+
+    // Extract thumbnail for this plate
+    const thumbs = extractThumbnails(req.body);
+    const thumb = thumbs.find(t => t.plateIndex === plateIndex) || thumbs[0];
+    let thumbFile = null;
+    if (thumb) {
+      thumbFile = crypto.randomBytes(8).toString('hex') + '.png';
+      fs.writeFileSync(path.join(UPLOADS_DIR, thumbFile), thumb.buffer);
+    }
+
+    // Build colors (names will be resolved client-side via ntc.js)
+    const colors = plate ? plate.filaments.map(f => {
+      const profile = parsed.filamentProfiles?.[f.id - 1];
+      return {
+        color: f.color || '#888888',
+        name: '',
+        brand: profile?.vendor && profile.vendor !== 'Generic' ? profile.vendor : '',
+      };
+    }) : [];
+
+    // Update job
+    const durationMins = plate ? Math.round(plate.printTimeMinutes) : job.durationMins;
+    const colorsStr = colors.length ? JSON.stringify(colors) : job.colors;
+    const newEnd = new Date(new Date(job.start).getTime() + durationMins * 60 * 1000).toISOString();
+
+    db.prepare('UPDATE jobs SET printFile=?, thumbFile=?, colors=?, durationMins=?, end=? WHERE id=?')
+      .run(storedName, thumbFile, colorsStr, durationMins, newEnd, req.params.id);
+
+    res.json(db.prepare('SELECT * FROM jobs WHERE id=?').get(req.params.id));
   } catch (err) {
     res.status(400).json({ error: err.message });
   }

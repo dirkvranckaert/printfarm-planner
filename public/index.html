@@ -158,13 +158,23 @@
             </div>
           </div>
         </div>
+        <div class="form-group" id="job-thumb-group" style="display:none">
+          <label>Preview</label>
+          <img id="job-thumb-img" style="max-width:120px;max-height:120px;border-radius:6px;border:1px solid var(--border)" alt="">
+        </div>
         <div class="form-group">
           <label for="job-colors">Color(s) / Filament</label>
           <input type="text" id="job-colors" placeholder="e.g. White PLA + Black PETG (optional)">
+          <div id="job-colors-display" style="margin-top:4px"></div>
         </div>
         <div class="form-group">
-          <label for="job-printfile">Print File</label>
+          <label>Print File</label>
           <input type="text" id="job-printfile" placeholder="e.g. /path/to/file.3mf (optional)">
+          <div id="job-printfile-display" style="margin-top:4px"></div>
+          <div id="job-3mf-attach" style="margin-top:6px">
+            <button type="button" class="btn btn-sm" id="btn-attach-3mf" onclick="document.getElementById('attach-3mf-input').click()">Attach 3MF</button>
+            <input type="file" id="attach-3mf-input" accept=".3mf" style="display:none">
+          </div>
         </div>
         <div class="form-group">
           <label for="job-remarks">Remarks</label>

@@ -88,6 +88,12 @@ if (!jobColsAfter.some(c => c.name === 'start_push_sent')) {
   db.exec('ALTER TABLE jobs ADD COLUMN start_push_sent INTEGER NOT NULL DEFAULT 0');
 }
 
+// Add thumbFile column for 3MF plate thumbnails
+const jobColsThumb = db.pragma('table_info(jobs)');
+if (!jobColsThumb.some(c => c.name === 'thumbFile')) {
+  db.exec('ALTER TABLE jobs ADD COLUMN thumbFile TEXT');
+}
+
 // One-time migration: if the favourite column was previously added with DEFAULT 0
 // (all printers show favourite=0), set them all to 1 so they appear in day view.
 const favMigrated = db.prepare("SELECT value FROM settings WHERE key='favouriteMigrated'").get();

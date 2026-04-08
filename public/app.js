@@ -556,6 +556,40 @@ function escHtml(s) {
     .replace(/>/g,'&gt;').replace(/"/g,'&quot;');
 }
 
+function formatBedType(raw) {
+  if (!raw) return '';
+  const map = {
+    'textured_plate': 'Textured',
+    'cool_plate': 'Cool Plate',
+    'hot_plate': 'Smooth (High Temp)',
+    'eng_plate': 'Engineering',
+    'smooth_plate': 'Smooth',
+  };
+  return map[raw] || raw.replace(/_/g, ' ').replace(/\b\w/g, c => c.toUpperCase());
+}
+
+function renderColorSwatches(colorsStr) {
+  if (!colorsStr) return '';
+  try {
+    const arr = JSON.parse(colorsStr);
+    if (!Array.isArray(arr) || !arr.length) return '';
+    return `<span class="color-swatches">${arr.map(c =>
+      `<span class="color-dot" style="background:${escHtml(c.color)}" title="${escHtml(c.name || '')}${c.brand ? ' (' + escHtml(c.brand) + ')' : ''}"></span>`
+    ).join('')}</span>`;
+  } catch { return escHtml(colorsStr); }
+}
+
+function renderColorDetail(colorsStr) {
+  if (!colorsStr) return '';
+  try {
+    const arr = JSON.parse(colorsStr);
+    if (!Array.isArray(arr) || !arr.length) return '';
+    return `<div class="color-detail">${arr.map(c =>
+      `<span class="color-chip"><span class="color-dot" style="background:${escHtml(c.color)}"></span>${escHtml(c.name || '')}${c.brand ? ` <span style="opacity:.6">(${escHtml(c.brand)})</span>` : ''}</span>`
+    ).join('')}</div>`;
+  } catch { return escHtml(colorsStr); }
+}
+
 // =============================================================================
 // Conflict detection
 // =============================================================================
@@ -917,6 +951,8 @@ async function renderDay() {
                 <span class="job-status-badge" style="${statusBadgeStyle(status)}">${escHtml(status)}</span>
               </div>`;
       if (job.customerName) h += `<span class="job-block-customer">${escHtml(job.customerName)}</span>`;
+      if (job.colors) h += renderColorSwatches(job.colors);
+      if (htPx >= 80 && job.thumbFile) h += `<img src="/api/uploads/${escHtml(job.thumbFile)}" class="job-block-thumb" alt="">`;
       if (endMins <= DAY_MINS) h += '<div class="job-resize-handle"></div>';
       h += '</div>';
 
@@ -1986,6 +2022,23 @@ async function openJobModal(jobId = null, prefill = {}) {
     document.getElementById('job-ordernr').value   = job.orderNr      ?? '';
     document.getElementById('job-colors').value    = job.colors       ?? '';
     document.getElementById('job-printfile').value = job.printFile    ?? '';
+    // Show color swatches if JSON
+    document.getElementById('job-colors-display').innerHTML = renderColorDetail(job.colors);
+    // Show thumbnail if available
+    const thumbGroup = document.getElementById('job-thumb-group');
+    if (job.thumbFile) {
+      document.getElementById('job-thumb-img').src = `/api/uploads/${job.thumbFile}`;
+      thumbGroup.style.display = '';
+    } else { thumbGroup.style.display = 'none'; }
+    // Show download link if printFile is an uploaded file
+    const pfDisplay = document.getElementById('job-printfile-display');
+    if (job.printFile && !job.printFile.includes('/')) {
+      pfDisplay.innerHTML = `<a href="/api/uploads/${escHtml(job.printFile)}" download style="color:var(--primary);font-size:13px">Download 3MF</a>`;
+      document.getElementById('job-printfile').style.display = 'none';
+    } else {
+      pfDisplay.innerHTML = '';
+      document.getElementById('job-printfile').style.display = '';
+    }
     document.getElementById('job-remarks').value   = job.remarks      ?? '';
     editingJobStatus = job.status ?? 'Planned';
     setQueuedMode(isQueued);
@@ -2014,6 +2067,10 @@ async function openJobModal(jobId = null, prefill = {}) {
     document.getElementById('job-ordernr').value   = prefill.orderNr      ?? '';
     document.getElementById('job-colors').value    = prefill.colors       ?? '';
     document.getElementById('job-printfile').value = prefill.printFile    ?? '';
+    document.getElementById('job-printfile').style.display = '';
+    document.getElementById('job-printfile-display').innerHTML = '';
+    document.getElementById('job-colors-display').innerHTML = '';
+    document.getElementById('job-thumb-group').style.display = 'none';
     document.getElementById('job-remarks').value   = prefill.remarks      ?? '';
     editingJobStatus = prefill.status ?? 'Planned';
     setQueuedMode(isQueued);
@@ -3130,7 +3187,7 @@ function show3mfSchedulePreview(parsed, filename) {
       <div style="flex:1;min-width:0">
         <div style="display:flex;align-items:center;gap:8px;margin-bottom:4px">
           <strong>Plate ${pl.index}</strong>
-          <span style="color:var(--text-muted);font-size:12px">${typeInfo}</span>
+          <span style="color:var(--text-muted);font-size:12px">${typeInfo}${pl.bedType ? ` / ${formatBedType(pl.bedType)}` : ''}</span>
           ${colorDots}
         </div>
         <div style="display:grid;grid-template-columns:1fr 1fr;gap:4px 12px;font-size:13px">
@@ -3220,6 +3277,52 @@ async function confirm3mfSchedule() {
 }
 
 // =============================================================================
+// Attach 3MF to existing job
+// =============================================================================
+function initAttach3mf() {
+  document.getElementById('attach-3mf-input')?.addEventListener('change', async function() {
+    const file = this.files?.[0];
+    if (!file || !editJobId) return;
+    this.value = '';
+
+    // Parse first to check plates
+    const parseRes = await fetch('/api/parse-3mf', {
+      method: 'POST',
+      headers: { 'Content-Type': 'application/octet-stream' },
+      body: await file.arrayBuffer(),
+    });
+    if (!parseRes.ok) { alert('Failed to parse 3MF'); return; }
+    const parsed = await parseRes.json();
+    if (!parsed.sliced || !parsed.plates?.length) { alert('3MF must be sliced'); return; }
+
+    let plateIndex = 1;
+    if (parsed.plates.length > 1) {
+      const names = parsed.plates.map(p => `Plate ${p.index}: ${p.objects?.join(', ') || 'unnamed'} (${Math.floor(p.printTimeMinutes/60)}h ${Math.round(p.printTimeMinutes%60)}m)`);
+      const choice = prompt(`Multiple plates found. Enter plate number (1-${parsed.plates.length}):\n\n${names.join('\n')}`, '1');
+      if (!choice) return;
+      plateIndex = parseInt(choice) || 1;
+    }
+
+    const btn = document.getElementById('btn-attach-3mf');
+    btn.disabled = true; btn.textContent = 'Uploading...';
+
+    const res = await fetch(`/api/jobs/${editJobId}/attach-3mf`, {
+      method: 'POST',
+      headers: { 'Content-Type': 'application/octet-stream', 'X-Plate-Index': plateIndex },
+      body: await file.arrayBuffer(),
+    });
+
+    btn.disabled = false; btn.textContent = 'Attach 3MF';
+    if (!res.ok) { alert('Failed to attach 3MF'); return; }
+
+    // Refresh - close and reopen the job modal with updated data
+    const updated = await res.json();
+    closeModal('job-modal');
+    await renderCalendar();
+  });
+}
+
+// =============================================================================
 // Bootstrap
 // =============================================================================
-document.addEventListener('DOMContentLoaded', () => { init(); initImport3mf(); });
+document.addEventListener('DOMContentLoaded', () => { init(); initImport3mf(); initAttach3mf(); });

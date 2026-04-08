@@ -1733,3 +1733,25 @@ body.is-resizing,    body.is-resizing    * { cursor: ns-resize  !important; user
   background: rgba(20,184,166,.05);
 }
 
+
+/* Color swatches in job blocks */
+.color-swatches { display: inline-flex; gap: 2px; margin-top: 2px; }
+.color-dot {
+  display: inline-block; width: 10px; height: 10px;
+  border-radius: 2px; border: 1px solid rgba(0,0,0,.15); flex-shrink: 0;
+}
+.color-detail { display: flex; flex-wrap: wrap; gap: 6px; margin-top: 4px; }
+.color-chip {
+  display: inline-flex; align-items: center; gap: 4px;
+  font-size: 12px; padding: 2px 6px;
+  background: var(--bg); border: 1px solid var(--border);
+  border-radius: 12px;
+}
+.color-chip .color-dot { width: 12px; height: 12px; }
+
+/* Job block thumbnail */
+.job-block-thumb {
+  display: block; max-width: 48px; max-height: 48px;
+  border-radius: 4px; margin-top: 4px; opacity: .8;
+  object-fit: cover;
+}
