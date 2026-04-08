@@ -3316,47 +3316,83 @@ async function confirm3mfSchedule() {
 // =============================================================================
 // Attach 3MF to existing job
 // =============================================================================
+let attachJobId = null;
+let attach3mfBuffer = null;
+let attach3mfParsed = null;
+
 function initAttach3mf() {
   document.getElementById('attach-3mf-input')?.addEventListener('change', async function() {
     const file = this.files?.[0];
     if (!file || !editJobId) return;
     this.value = '';
+    attachJobId = editJobId;
+    attach3mfBuffer = await file.arrayBuffer();
 
-    // Parse first to check plates
+    // Close job modal, show import modal with progress
+    closeModal('job-modal');
+    document.getElementById('import3mf-title').textContent = 'Attaching 3MF...';
+    document.getElementById('import3mf-body').innerHTML = `<div style="text-align:center;padding:24px"><p>Parsing ${escHtml(file.name)}...</p></div>`;
+    document.getElementById('btn-import3mf-save').style.display = 'none';
+    document.getElementById('import3mf-modal').classList.remove('hidden');
+
     const parseRes = await fetch('/api/parse-3mf', {
       method: 'POST',
       headers: { 'Content-Type': 'application/octet-stream' },
-      body: await file.arrayBuffer(),
+      body: attach3mfBuffer,
     });
-    if (!parseRes.ok) { alert('Failed to parse 3MF'); return; }
-    const parsed = await parseRes.json();
-    if (!parsed.sliced || !parsed.plates?.length) { alert('3MF must be sliced'); return; }
-
-    let plateIndex = 1;
-    if (parsed.plates.length > 1) {
-      const names = parsed.plates.map(p => `Plate ${p.index}: ${p.objects?.join(', ') || 'unnamed'} (${Math.floor(p.printTimeMinutes/60)}h ${Math.round(p.printTimeMinutes%60)}m)`);
-      const choice = prompt(`Multiple plates found. Enter plate number (1-${parsed.plates.length}):\n\n${names.join('\n')}`, '1');
-      if (!choice) return;
-      plateIndex = parseInt(choice) || 1;
+    if (!parseRes.ok) { alert('Failed to parse 3MF'); closeModal('import3mf-modal'); return; }
+    attach3mfParsed = await parseRes.json();
+    if (!attach3mfParsed.sliced || !attach3mfParsed.plates?.length) {
+      alert('3MF must be sliced'); closeModal('import3mf-modal'); return;
     }
 
-    const btn = document.getElementById('btn-attach-3mf');
-    btn.disabled = true; btn.textContent = 'Uploading...';
-
-    const res = await fetch(`/api/jobs/${editJobId}/attach-3mf`, {
-      method: 'POST',
-      headers: { 'Content-Type': 'application/octet-stream', 'X-Plate-Index': plateIndex },
-      body: await file.arrayBuffer(),
-    });
-
-    btn.disabled = false; btn.textContent = 'Attach 3MF';
-    if (!res.ok) { alert('Failed to attach 3MF'); return; }
-
-    // Refresh - close and reopen the job modal with updated data
-    const updated = await res.json();
-    closeModal('job-modal');
-    await renderCalendar();
+    showAttachPlatePreview();
   });
+}
+
+function showAttachPlatePreview() {
+  const parsed = attach3mfParsed;
+  document.getElementById('import3mf-title').textContent = `Select plate to attach (${parsed.plates.length} plate${parsed.plates.length > 1 ? 's' : ''})`;
+
+  const rows = parsed.plates.map((pl, i) => {
+    const thumb = parsed.thumbnails?.[pl.index];
+    const nameDefault = pl.plateName || pl.objects?.join(', ') || `Plate ${pl.index}`;
+    const typeInfo = pl.filamentType || '';
+    const colorDots = (pl.filaments || []).map(f =>
+      f.color ? `<span style="display:inline-block;width:12px;height:12px;border-radius:3px;background:${f.color};border:1px solid rgba(0,0,0,.15)" title="${typeof ntc !== 'undefined' ? ntc.name(f.color)?.[1] || '' : ''}"></span>` : ''
+    ).join(' ');
+
+    return `<div class="attach-plate-option" data-plate-index="${pl.index}" onclick="confirmAttachPlate(${pl.index})" style="display:flex;gap:12px;padding:12px;background:var(--bg);border:1px solid var(--border);border-radius:6px;cursor:pointer;transition:border-color .15s">
+      ${thumb ? `<img src="${thumb}" style="width:64px;height:64px;object-fit:cover;border-radius:4px;border:1px solid var(--border)" alt="">` : ''}
+      <div style="flex:1">
+        <strong>${escHtml(nameDefault)}</strong>
+        <span style="color:var(--text-muted);font-size:12px">${typeInfo}${pl.bedType ? ` / ${formatBedType(pl.bedType)}` : ''}</span>
+        ${colorDots}
+        <div style="font-size:13px;margin-top:4px">${Math.floor(pl.printTimeMinutes/60)}h ${Math.round(pl.printTimeMinutes%60)}m — ${(pl.weightGrams||0).toFixed(1)}g</div>
+      </div>
+    </div>`;
+  });
+
+  document.getElementById('import3mf-body').innerHTML = `<div style="display:flex;flex-direction:column;gap:8px">${rows.join('')}</div>`;
+  document.getElementById('btn-import3mf-save').style.display = 'none'; // selection by clicking a plate
+}
+
+async function confirmAttachPlate(plateIndex) {
+  const btn = document.querySelector(`.attach-plate-option[data-plate-index="${plateIndex}"]`);
+  if (btn) { btn.style.opacity = '.5'; btn.style.pointerEvents = 'none'; btn.innerHTML += '<div style="text-align:center;padding:4px;color:var(--primary)">Attaching...</div>'; }
+
+  const res = await fetch(`/api/jobs/${attachJobId}/attach-3mf`, {
+    method: 'POST',
+    headers: { 'Content-Type': 'application/octet-stream', 'X-Plate-Index': String(plateIndex) },
+    body: attach3mfBuffer,
+  });
+
+  if (!res.ok) { alert('Failed to attach 3MF'); }
+  closeModal('import3mf-modal');
+  attachJobId = null;
+  attach3mfBuffer = null;
+  attach3mfParsed = null;
+  await renderCalendar();
 }
 
 // =============================================================================

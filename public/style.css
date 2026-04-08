@@ -1762,3 +1762,6 @@ body.is-resizing,    body.is-resizing    * { cursor: ns-resize  !important; user
   background: rgba(255,255,255,.15); border-radius: 3px;
   margin-top: 2px; opacity: .7;
 }
+
+/* Attach plate selection */
+.attach-plate-option:hover { border-color: var(--primary) !important; }
