@@ -579,6 +579,62 @@ function renderColorSwatches(colorsStr) {
   } catch { return escHtml(colorsStr); }
 }
 
+function parseColorsField(val) {
+  if (!val) return [];
+  try { const arr = JSON.parse(val); if (Array.isArray(arr)) return arr; } catch {}
+  // Legacy: plain text like "White PLA + Black PETG" → one entry per segment
+  if (val.trim()) return val.split(/[+,;]/).map(s => ({ color: '#888888', name: s.trim(), brand: '' })).filter(c => c.name);
+  return [];
+}
+
+function renderColorEditor(colors) {
+  const rows = colors.map((c, i) => renderColorEditorRow(c, i)).join('');
+  return `<div id="job-color-rows">${rows}</div>
+    <button type="button" class="btn btn-sm" style="margin-top:4px" onclick="addJobColorRow()">+ Add Color</button>`;
+}
+
+function renderColorEditorRow(c, i) {
+  const name = c.name || (typeof ntc !== 'undefined' && c.color ? (ntc.name(c.color)?.[1] || '') : '');
+  return `<div class="color-edit-row" data-cidx="${i}">
+    <input type="color" value="${c.color || '#888888'}" class="color-picker" data-cf="color" onchange="updateJobColorName(this)">
+    <input type="text" value="${escHtml(name)}" placeholder="Name" class="color-name-input" data-cf="name">
+    <input type="text" value="${escHtml(c.brand || '')}" placeholder="Brand" class="color-brand-input" data-cf="brand">
+    <button type="button" class="btn-icon" onclick="this.closest('.color-edit-row').remove()" title="Remove">&times;</button>
+  </div>`;
+}
+
+function addJobColorRow() {
+  const list = document.getElementById('job-color-rows');
+  const i = list.children.length;
+  const div = document.createElement('div');
+  div.className = 'color-edit-row';
+  div.dataset.cidx = i;
+  div.innerHTML = `<input type="color" value="#888888" class="color-picker" data-cf="color" onchange="updateJobColorName(this)">
+    <input type="text" value="" placeholder="Name" class="color-name-input" data-cf="name">
+    <input type="text" value="" placeholder="Brand" class="color-brand-input" data-cf="brand">
+    <button type="button" class="btn-icon" onclick="this.closest('.color-edit-row').remove()" title="Remove">&times;</button>`;
+  list.appendChild(div);
+}
+
+function updateJobColorName(colorInput) {
+  const row = colorInput.closest('.color-edit-row');
+  const nameInput = row.querySelector('[data-cf="name"]');
+  if (!nameInput.value.trim() && typeof ntc !== 'undefined') {
+    nameInput.value = ntc.name(colorInput.value)?.[1] || '';
+  }
+}
+
+function collectJobColors() {
+  const rows = document.querySelectorAll('#job-color-rows .color-edit-row');
+  if (!rows.length) return '';
+  const arr = Array.from(rows).map(row => ({
+    color: row.querySelector('[data-cf="color"]').value,
+    name: row.querySelector('[data-cf="name"]').value.trim() || (typeof ntc !== 'undefined' ? ntc.name(row.querySelector('[data-cf="color"]').value)?.[1] || '' : ''),
+    brand: row.querySelector('[data-cf="brand"]').value.trim(),
+  }));
+  return JSON.stringify(arr);
+}
+
 function renderColorDetail(colorsStr) {
   if (!colorsStr) return '';
   try {
@@ -2024,15 +2080,8 @@ async function openJobModal(jobId = null, prefill = {}) {
     document.getElementById('job-colors').value    = job.colors       ?? '';
     document.getElementById('job-printfile').value = job.printFile    ?? '';
     document.getElementById('job-bedtype').value   = job.bedType      ?? '';
-    // Show color swatches if JSON — hide raw text input when JSON
-    const colorsDisplay = document.getElementById('job-colors-display');
-    const colorsInput = document.getElementById('job-colors');
-    colorsDisplay.innerHTML = renderColorDetail(job.colors);
-    if (job.colors && job.colors.startsWith('[')) {
-      colorsInput.style.display = 'none';
-    } else {
-      colorsInput.style.display = '';
-    }
+    // Populate color editor
+    document.getElementById('job-colors-editor').innerHTML = renderColorEditor(parseColorsField(job.colors));
     // Show thumbnail if available
     const thumbGroup = document.getElementById('job-thumb-group');
     if (job.thumbFile) {
@@ -2076,12 +2125,11 @@ async function openJobModal(jobId = null, prefill = {}) {
     document.getElementById('job-customer').value  = prefill.customerName ?? '';
     document.getElementById('job-ordernr').value   = prefill.orderNr      ?? '';
     document.getElementById('job-colors').value    = prefill.colors       ?? '';
-    document.getElementById('job-colors').style.display = '';
+    document.getElementById('job-colors-editor').innerHTML = renderColorEditor(parseColorsField(prefill.colors));
     document.getElementById('job-printfile').value = prefill.printFile    ?? '';
     document.getElementById('job-bedtype').value   = prefill.bedType      ?? '';
     document.getElementById('job-printfile').style.display = '';
     document.getElementById('job-printfile-display').innerHTML = '';
-    document.getElementById('job-colors-display').innerHTML = '';
     document.getElementById('job-thumb-group').style.display = 'none';
     document.getElementById('job-remarks').value   = prefill.remarks      ?? '';
     editingJobStatus = prefill.status ?? 'Planned';
@@ -2121,7 +2169,7 @@ async function saveJob() {
   const printerId    = parseInt(document.getElementById('job-printer').value);
   const customerName = document.getElementById('job-customer').value.trim();
   const orderNr      = document.getElementById('job-ordernr').value.trim();
-  const colors       = document.getElementById('job-colors').value.trim();
+  const colors       = collectJobColors() || document.getElementById('job-colors').value.trim();
   const printFile    = document.getElementById('job-printfile').value.trim();
   const bedType      = document.getElementById('job-bedtype').value || null;
   const remarks      = document.getElementById('job-remarks').value.trim();

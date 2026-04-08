@@ -1765,3 +1765,14 @@ body.is-resizing,    body.is-resizing    * { cursor: ns-resize  !important; user
 
 /* Attach plate selection */
 .attach-plate-option:hover { border-color: var(--primary) !important; }
+
+/* Color editor in job modal */
+.color-edit-row {
+  display: flex; align-items: center; gap: 8px; margin-bottom: 6px;
+}
+.color-picker {
+  width: 36px !important; height: 32px; padding: 2px !important;
+  border: 1px solid var(--border) !important; border-radius: 6px; cursor: pointer; flex-shrink: 0;
+}
+.color-name-input { flex: 1; min-width: 80px; }
+.color-brand-input { width: 100px !important; flex-shrink: 0; }
