@@ -1755,3 +1755,10 @@ body.is-resizing,    body.is-resizing    * { cursor: ns-resize  !important; user
   border-radius: 4px; margin-top: 4px; opacity: .8;
   object-fit: cover;
 }
+
+/* Bed type badge in job blocks */
+.job-block-bedtype {
+  display: inline-block; font-size: 10px; padding: 1px 5px;
+  background: rgba(255,255,255,.15); border-radius: 3px;
+  margin-top: 2px; opacity: .7;
+}

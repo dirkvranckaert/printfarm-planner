@@ -88,10 +88,13 @@ if (!jobColsAfter.some(c => c.name === 'start_push_sent')) {
   db.exec('ALTER TABLE jobs ADD COLUMN start_push_sent INTEGER NOT NULL DEFAULT 0');
 }
 
-// Add thumbFile column for 3MF plate thumbnails
+// Add thumbFile and bedType columns for 3MF data
 const jobColsThumb = db.pragma('table_info(jobs)');
 if (!jobColsThumb.some(c => c.name === 'thumbFile')) {
   db.exec('ALTER TABLE jobs ADD COLUMN thumbFile TEXT');
+}
+if (!jobColsThumb.some(c => c.name === 'bedType')) {
+  db.exec('ALTER TABLE jobs ADD COLUMN bedType TEXT');
 }
 
 // One-time migration: if the favourite column was previously added with DEFAULT 0

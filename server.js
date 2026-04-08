@@ -264,23 +264,23 @@ app.get('/api/jobs/:id', (req, res) => {
   res.json(row);
 });
 app.post('/api/jobs', (req, res) => {
-  const { printerId, name, customerName, orderNr, start, end, status, colors, printFile, remarks, queued, durationMins } = req.body;
+  const { printerId, name, customerName, orderNr, start, end, status, colors, printFile, remarks, queued, durationMins, bedType } = req.body;
   const isQueued = queued ? 1 : 0;
   const result = db.prepare(
-    'INSERT INTO jobs (printerId, name, customerName, orderNr, start, end, status, colors, printFile, remarks, queued, durationMins) VALUES (?,?,?,?,?,?,?,?,?,?,?,?)'
-  ).run(printerId, name, customerName, orderNr, isQueued ? '' : (start ?? ''), isQueued ? '' : (end ?? ''), status ?? 'Planned', colors, printFile, remarks, isQueued, durationMins ?? 0);
+    'INSERT INTO jobs (printerId, name, customerName, orderNr, start, end, status, colors, printFile, remarks, queued, durationMins, bedType) VALUES (?,?,?,?,?,?,?,?,?,?,?,?,?)'
+  ).run(printerId, name, customerName, orderNr, isQueued ? '' : (start ?? ''), isQueued ? '' : (end ?? ''), status ?? 'Planned', colors, printFile, remarks, isQueued, durationMins ?? 0, bedType ?? null);
   res.status(201).json({ id: result.lastInsertRowid, ...req.body, queued: isQueued });
 });
 app.put('/api/jobs/:id', (req, res) => {
-  const { printerId, name, customerName, orderNr, start, end, status, colors, printFile, remarks, queued, durationMins } = req.body;
+  const { printerId, name, customerName, orderNr, start, end, status, colors, printFile, remarks, queued, durationMins, bedType } = req.body;
   const isQueued = queued ? 1 : 0;
   db.prepare(
-    'UPDATE jobs SET printerId=?, name=?, customerName=?, orderNr=?, start=?, end=?, status=?, colors=?, printFile=?, remarks=?, queued=?, durationMins=? WHERE id=?'
-  ).run(printerId, name, customerName, orderNr, isQueued ? '' : (start ?? ''), isQueued ? '' : (end ?? ''), status, colors, printFile, remarks, isQueued, durationMins ?? 0, req.params.id);
+    'UPDATE jobs SET printerId=?, name=?, customerName=?, orderNr=?, start=?, end=?, status=?, colors=?, printFile=?, remarks=?, queued=?, durationMins=?, bedType=? WHERE id=?'
+  ).run(printerId, name, customerName, orderNr, isQueued ? '' : (start ?? ''), isQueued ? '' : (end ?? ''), status, colors, printFile, remarks, isQueued, durationMins ?? 0, bedType ?? null, req.params.id);
   res.json({ id: Number(req.params.id), ...req.body, queued: isQueued });
 });
 app.patch('/api/jobs/:id', (req, res) => {
-  const allowed = ['printerId', 'name', 'customerName', 'orderNr', 'start', 'end', 'status', 'colors', 'printFile', 'remarks', 'queued', 'durationMins', 'linked_printer_id'];
+  const allowed = ['printerId', 'name', 'customerName', 'orderNr', 'start', 'end', 'status', 'colors', 'printFile', 'remarks', 'queued', 'durationMins', 'linked_printer_id', 'bedType'];
   const fields = Object.entries(req.body).filter(([k]) => allowed.includes(k));
   if (!fields.length) return res.status(400).json({ error: 'no valid fields' });
   const setClauses = fields.map(([k]) => `${k}=?`).join(', ');
@@ -437,7 +437,7 @@ app.post('/api/import-3mf-schedule', express.raw({ type: '*/*', limit: '500mb' }
       const colorsStr = pl.colors ? JSON.stringify(pl.colors) : null;
 
       const result = db.prepare(
-        'INSERT INTO jobs (printerId, name, customerName, orderNr, start, end, status, colors, printFile, remarks, queued, durationMins, thumbFile) VALUES (?,?,?,?,?,?,?,?,?,?,?,?,?)'
+        'INSERT INTO jobs (printerId, name, customerName, orderNr, start, end, status, colors, printFile, remarks, queued, durationMins, thumbFile, bedType) VALUES (?,?,?,?,?,?,?,?,?,?,?,?,?,?)'
       ).run(
         pl.printerId || null,
         pl.name || `Plate ${pl.plateIndex}`,
@@ -451,7 +451,8 @@ app.post('/api/import-3mf-schedule', express.raw({ type: '*/*', limit: '500mb' }
         null,
         0,
         durationMins,
-        thumbFile || null
+        thumbFile || null,
+        pl.bedType || null
       );
 
       createdJobs.push({
@@ -514,8 +515,9 @@ app.post('/api/jobs/:id/attach-3mf', express.raw({ type: '*/*', limit: '500mb' }
     const colorsStr = colors.length ? JSON.stringify(colors) : job.colors;
     const newEnd = new Date(new Date(job.start).getTime() + durationMins * 60 * 1000).toISOString();
 
-    db.prepare('UPDATE jobs SET printFile=?, thumbFile=?, colors=?, durationMins=?, end=? WHERE id=?')
-      .run(storedName, thumbFile, colorsStr, durationMins, newEnd, req.params.id);
+    const bedType = plate?.bedType || null;
+    db.prepare('UPDATE jobs SET printFile=?, thumbFile=?, colors=?, durationMins=?, end=?, bedType=? WHERE id=?')
+      .run(storedName, thumbFile, colorsStr, durationMins, newEnd, bedType, req.params.id);
 
     res.json(db.prepare('SELECT * FROM jobs WHERE id=?').get(req.params.id));
   } catch (err) {

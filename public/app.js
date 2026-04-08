@@ -952,6 +952,7 @@ async function renderDay() {
               </div>`;
       if (job.customerName) h += `<span class="job-block-customer">${escHtml(job.customerName)}</span>`;
       if (job.colors) h += renderColorSwatches(job.colors);
+      if (job.bedType) h += `<span class="job-block-bedtype">${formatBedType(job.bedType)}</span>`;
       if (htPx >= 80 && job.thumbFile) h += `<img src="/api/uploads/${escHtml(job.thumbFile)}" class="job-block-thumb" alt="">`;
       if (endMins <= DAY_MINS) h += '<div class="job-resize-handle"></div>';
       h += '</div>';
@@ -2022,6 +2023,7 @@ async function openJobModal(jobId = null, prefill = {}) {
     document.getElementById('job-ordernr').value   = job.orderNr      ?? '';
     document.getElementById('job-colors').value    = job.colors       ?? '';
     document.getElementById('job-printfile').value = job.printFile    ?? '';
+    document.getElementById('job-bedtype').value   = job.bedType      ?? '';
     // Show color swatches if JSON
     document.getElementById('job-colors-display').innerHTML = renderColorDetail(job.colors);
     // Show thumbnail if available
@@ -2067,6 +2069,7 @@ async function openJobModal(jobId = null, prefill = {}) {
     document.getElementById('job-ordernr').value   = prefill.orderNr      ?? '';
     document.getElementById('job-colors').value    = prefill.colors       ?? '';
     document.getElementById('job-printfile').value = prefill.printFile    ?? '';
+    document.getElementById('job-bedtype').value   = prefill.bedType      ?? '';
     document.getElementById('job-printfile').style.display = '';
     document.getElementById('job-printfile-display').innerHTML = '';
     document.getElementById('job-colors-display').innerHTML = '';
@@ -2111,6 +2114,7 @@ async function saveJob() {
   const orderNr      = document.getElementById('job-ordernr').value.trim();
   const colors       = document.getElementById('job-colors').value.trim();
   const printFile    = document.getElementById('job-printfile').value.trim();
+  const bedType      = document.getElementById('job-bedtype').value || null;
   const remarks      = document.getElementById('job-remarks').value.trim();
   const status       = editingJobStatus;
 
@@ -2122,7 +2126,7 @@ async function saveJob() {
     const qm = parseInt(document.getElementById('job-queue-dur-m').value) || 0;
     if (qh === 0 && qm === 0) return alert('Please enter an expected duration.');
     const durationMins = qh * 60 + qm;
-    const data = { printerId, name, customerName, orderNr, colors, printFile, remarks, status, queued: true, durationMins };
+    const data = { printerId, name, customerName, orderNr, colors, printFile, bedType, remarks, status, queued: true, durationMins };
     if (wasEditing) await api('PUT', `/api/jobs/${editJobId}`, data);
     else            await api('POST', '/api/jobs', data);
     closeModal('job-modal');
@@ -2159,7 +2163,7 @@ async function saveJob() {
     }
   }
 
-  const data = { printerId, name, customerName, orderNr, colors, printFile, remarks, start, end, status, queued: false };
+  const data = { printerId, name, customerName, orderNr, colors, printFile, bedType, remarks, start, end, status, queued: false };
   if (wasEditing) await api('PUT', `/api/jobs/${editJobId}`, data);
   else            await api('POST', '/api/jobs', data);
 
@@ -3245,6 +3249,7 @@ async function confirm3mfSchedule() {
         customerName: document.querySelector(`[data-sched-customer="${i}"]`)?.value || null,
         orderNr: document.querySelector(`[data-sched-ordernr="${i}"]`)?.value || null,
         durationMins: Math.round(pl.printTimeMinutes || 0),
+        bedType: pl.bedType || null,
         colors,
       };
     });
