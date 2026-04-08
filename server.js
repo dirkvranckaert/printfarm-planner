@@ -7,6 +7,7 @@ const db     = require('./db');
 const brands = require('./brands');
 const push   = require('./push');
 const { parse3mf, extractThumbnails } = require('./parse3mf');
+const sharedAuth = require('./shared-auth');
 
 const UPLOADS_DIR = path.join(__dirname, 'data', 'uploads');
 if (!fs.existsSync(UPLOADS_DIR)) fs.mkdirSync(UPLOADS_DIR, { recursive: true });
@@ -40,7 +41,10 @@ app.post('/login', (req, res) => {
   if (username === process.env.ADMIN_USER && password === process.env.ADMIN_PASS) {
     const token = crypto.randomBytes(32).toString('hex');
     db.prepare('INSERT INTO sessions (token, expires_at) VALUES (?,?)').run(token, Date.now() + SESSION_TTL);
-    res.setHeader('Set-Cookie', `pf_session=${token}; HttpOnly; Path=/; Max-Age=604800`);
+    const cookies = [`pf_session=${token}; HttpOnly; Path=/; Max-Age=604800`];
+    const sharedCookie = sharedAuth.createSharedCookie(username);
+    if (sharedCookie) cookies.push(sharedCookie);
+    res.setHeader('Set-Cookie', cookies);
     return res.json({ ok: true });
   }
   res.status(401).json({ ok: false });
@@ -49,16 +53,21 @@ app.post('/login', (req, res) => {
 app.get('/logout', (req, res) => {
   const token = parseCookieToken(req);
   if (token) db.prepare('DELETE FROM sessions WHERE token=?').run(token);
-  res.setHeader('Set-Cookie', 'pf_session=; HttpOnly; Path=/; Max-Age=0');
+  const cookies = ['pf_session=; HttpOnly; Path=/; Max-Age=0'];
+  const clearShared = sharedAuth.clearSharedCookie();
+  if (clearShared) cookies.push(clearShared);
+  res.setHeader('Set-Cookie', cookies);
   res.redirect('/login');
 });
 
 // --- Session auth middleware ---
 app.use((req, res, next) => {
   // Allow PWA assets through unauthenticated
-  if (req.path === '/favicon.svg' || req.path === '/manifest.json' || req.path === '/sw.js') return next();
+  if (['/favicon.svg', '/manifest.json', '/sw.js', '/api/config'].includes(req.path)) return next();
   const token = parseCookieToken(req);
   if (token && isValidSession(token)) return next();
+  // Also accept shared JWT if enabled
+  if (sharedAuth.validateSharedToken(req)) return next();
   if (req.path.startsWith('/api/')) return res.status(401).json({ error: 'Unauthorized' });
   res.redirect('/login');
 });
@@ -222,8 +231,21 @@ const { version } = require('./package.json');
 app.get('/api/config', (req, res) => {
   res.json({
     version,
+    appName: 'PrintFarm Planner',
+    appId: 'printfarm-planner',
+    sharedAuth: sharedAuth.isEnabled(),
     topbarPrinterLimit: parseInt(process.env.TOPBAR_PRINTER_LIMIT, 10) || 3,
   });
+});
+
+// App discovery endpoint
+app.get('/api/discover', async (req, res) => {
+  const apps = {};
+  const calcUrl = process.env.CALCULATOR_URL || '';
+  const filamentUrl = process.env.FILAMENT_URL || '';
+  if (calcUrl) apps.calculator = await sharedAuth.discoverApp(calcUrl);
+  if (filamentUrl) apps.filament = await sharedAuth.discoverApp(filamentUrl);
+  res.json({ sharedAuth: sharedAuth.isEnabled(), apps });
 });
 
 // --- Printers ---
