@@ -468,11 +468,13 @@ app.post('/api/import-3mf-schedule', express.raw({ type: '*/*', limit: '500mb' }
     const createdJobs = [];
 
     for (const pl of plates) {
+      // Get printer's warm-up and cool-down times
+      const printer = pl.printerId ? db.prepare('SELECT warm_up_mins, cool_down_mins FROM printers WHERE id=?').get(pl.printerId) : null;
+      const warmUp = printer?.warm_up_mins ?? 5;
+      const coolDown = printer?.cool_down_mins ?? 15;
+
       const durationMins = pl.durationMins || 0;
       const endDate = new Date(currentStart.getTime() + durationMins * 60 * 1000);
-
-      const warmUp = 5; // default warm-up
-      const coolDown = 15; // default cool-down
 
       const thumbFile = thumbMap[pl.plateIndex] || null;
       const colorsStr = pl.colors ? JSON.stringify(pl.colors) : null;
@@ -506,8 +508,10 @@ app.post('/api/import-3mf-schedule', express.raw({ type: '*/*', limit: '500mb' }
         thumbFile,
       });
 
-      // Next job starts after cool-down gap
-      currentStart = new Date(endDate.getTime() + coolDown * 60 * 1000);
+      // Next job starts after cool-down of this job + warm-up of next job
+      // (warm-up of next will be looked up in next iteration, so just add cool-down here
+      //  and let the next iteration's start account for its own warm-up)
+      currentStart = new Date(endDate.getTime() + (coolDown + warmUp) * 60 * 1000);
     }
 
     res.status(201).json({ jobs: createdJobs, file: storedName });
