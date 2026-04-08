@@ -2747,7 +2747,6 @@ async function openSettingsModal() {
   // Load scheduling restrictions
   const schedRestr = await api('GET', '/api/settings/schedulingRestrictions');
   const sr = schedRestr?.value || {};
-  document.getElementById('setting-sched-enabled').checked = !!sr.enabled;
   document.getElementById('setting-silent-start').value = sr.silentStart || '21:00';
   document.getElementById('setting-silent-end').value = sr.silentEnd || '06:30';
   document.querySelectorAll('.sched-closed-day').forEach(cb => {
@@ -2884,7 +2883,7 @@ async function saveSettings() {
   const closedDays = [];
   document.querySelectorAll('.sched-closed-day:checked').forEach(cb => closedDays.push(parseInt(cb.value)));
   await api('PUT', '/api/settings/schedulingRestrictions', { value: {
-    enabled: document.getElementById('setting-sched-enabled').checked,
+    enabled: true, // always enforced
     silentStart: document.getElementById('setting-silent-start').value || '21:00',
     silentEnd: document.getElementById('setting-silent-end').value || '06:30',
     closedDays,

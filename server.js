@@ -527,8 +527,8 @@ function findNextValidStart(candidate, durationMins, printerId) {
       }
     }
 
-    // 2. Advance past silent hours (only when enabled)
-    if (restr.enabled && restr.silentStart && restr.silentEnd) {
+    // 2. Advance past silent hours
+    if (restr.silentStart && restr.silentEnd) {
       if (isInSilentHours(current, restr.silentStart, restr.silentEnd)) {
         current = advanceToSilentEnd(current, restr.silentEnd);
         continue; // re-check closed days
