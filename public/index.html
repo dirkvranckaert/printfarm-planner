@@ -498,6 +498,14 @@
     <div class="ctx-separator"></div>
     <button class="ctx-item hidden" id="ctx-link-item"></button>
     <div class="ctx-separator" id="ctx-link-sep" style="display:none"></div>
+    <div id="ctx-conflict-section" class="hidden">
+      <div class="ctx-separator"></div>
+      <div class="ctx-label">Resolve conflict</div>
+      <button class="ctx-item" id="ctx-move-after">⏭ Move after conflicting job</button>
+      <button class="ctx-item" id="ctx-move-next-day">📅 Move to next day</button>
+      <button class="ctx-item" id="ctx-move-printer">🖨 Move to another printer</button>
+    </div>
+    <div class="ctx-separator"></div>
     <button class="ctx-item" id="ctx-duplicate">📋 Duplicate</button>
     <button class="ctx-item ctx-item-danger" id="ctx-delete">🗑 Delete</button>
   </div>
@@ -517,6 +525,14 @@
     <div class="bottom-sheet-sep"></div>
     <button class="bottom-sheet-item hidden" id="bs-link-item"></button>
     <div class="bottom-sheet-sep hidden" id="bs-link-sep"></div>
+    <div id="bs-conflict-section" class="hidden">
+      <div class="bottom-sheet-sep"></div>
+      <div style="padding:4px 18px;font-size:10px;font-weight:700;text-transform:uppercase;letter-spacing:0.5px;color:var(--danger);opacity:.8">Resolve conflict</div>
+      <button class="bottom-sheet-item" id="bs-move-after">⏭ Move after conflicting job</button>
+      <button class="bottom-sheet-item" id="bs-move-next-day">📅 Move to next day</button>
+      <button class="bottom-sheet-item" id="bs-move-printer">🖨 Move to another printer</button>
+    </div>
+    <div class="bottom-sheet-sep"></div>
     <button class="bottom-sheet-item" id="bs-duplicate">📋 Duplicate</button>
     <button class="bottom-sheet-item danger" id="bs-delete">🗑 Delete</button>
   </div>

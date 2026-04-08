@@ -446,8 +446,8 @@ app.post('/api/import-3mf-schedule', express.raw({ type: '*/*', limit: '500mb' }
   try {
     // Parse the schedule data from headers (body is the 3MF file)
     const schedule = JSON.parse(req.headers['x-schedule'] || '{}');
-    const { plates, startDate, startTime } = schedule;
-    if (!plates?.length || !startDate) return res.status(400).json({ error: 'plates and startDate required' });
+    const { plates, startISO, startDate, startTime } = schedule;
+    if (!plates?.length || (!startISO && !startDate)) return res.status(400).json({ error: 'plates and start time required' });
 
     // Save the 3MF file
     const fileId = crypto.randomBytes(8).toString('hex');
@@ -464,7 +464,7 @@ app.post('/api/import-3mf-schedule', express.raw({ type: '*/*', limit: '500mb' }
     }
 
     // Schedule jobs sequentially from the start date/time
-    let currentStart = new Date(`${startDate}T${startTime || '08:00'}:00`);
+    let currentStart = startISO ? new Date(startISO) : new Date(`${startDate}T${startTime || '08:00'}:00`);
     const createdJobs = [];
 
     for (const pl of plates) {

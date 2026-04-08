@@ -295,6 +295,7 @@ let editJobId      = null;
 let editPrintId    = null;
 let savedScrollTop = 0;    // scroll position saved before opening job modal
 let ctxJobId       = null; // job ID targeted by the current context menu
+let lastConflictIds = new Set(); // conflict IDs from last render
 let drag           = null; // active drag state
 let showTodayPanel    = false;
 let showQueuePanel    = false;
@@ -669,6 +670,72 @@ function detectConflicts(jobs, printerMap) {
   return ids;
 }
 
+// =============================================================================
+// Conflict resolution
+// =============================================================================
+async function resolveConflictMoveAfter(jobId) {
+  const job = jobsCache[jobId];
+  if (!job) return;
+  const printer = printers.find(p => p.id === job.printerId);
+  const warmUp = printer?.warm_up_mins ?? 5;
+  const coolDown = printer?.cool_down_mins ?? 15;
+  const durationMs = new Date(job.end).getTime() - new Date(job.start).getTime();
+
+  // Find the conflicting job(s) on the same printer that overlap
+  const allJobs = Object.values(jobsCache).filter(j =>
+    j.id !== jobId && j.printerId === job.printerId && !j.queued
+  );
+  // Find the latest-ending conflicting job
+  let latestEnd = 0;
+  const jobStart = new Date(job.start).getTime() - warmUp * 60000;
+  const jobEnd = new Date(job.end).getTime() + coolDown * 60000;
+  for (const j of allJobs) {
+    const jStart = new Date(j.start).getTime() - warmUp * 60000;
+    const jEnd = new Date(j.end).getTime() + coolDown * 60000;
+    if (jStart < jobEnd && jEnd > jobStart) {
+      const realEnd = new Date(j.end).getTime();
+      if (realEnd > latestEnd) latestEnd = realEnd;
+    }
+  }
+  if (!latestEnd) return;
+
+  // New start = latest conflicting end + cool-down + warm-up
+  const newStart = new Date(latestEnd + (coolDown + warmUp) * 60000);
+  const newEnd = new Date(newStart.getTime() + durationMs);
+  await api('PATCH', `/api/jobs/${jobId}`, { start: newStart.toISOString(), end: newEnd.toISOString() });
+  await renderCalendar();
+}
+
+async function resolveConflictNextDay(jobId) {
+  const job = jobsCache[jobId];
+  if (!job) return;
+  const start = new Date(job.start);
+  const end = new Date(job.end);
+  const durationMs = end.getTime() - start.getTime();
+  // Move to same time next day
+  start.setDate(start.getDate() + 1);
+  const newEnd = new Date(start.getTime() + durationMs);
+  await api('PATCH', `/api/jobs/${jobId}`, { start: start.toISOString(), end: newEnd.toISOString() });
+  await renderCalendar();
+}
+
+async function resolveConflictMovePrinter(jobId) {
+  const job = jobsCache[jobId];
+  if (!job) return;
+  // Show quick picker with available printers (excluding current)
+  const otherPrinters = printers.filter(p => p.id !== job.printerId);
+  if (!otherPrinters.length) { alert('No other printers available'); return; }
+
+  const names = otherPrinters.map((p, i) => `${i + 1}. ${p.name}`).join('\n');
+  const choice = prompt(`Move to which printer?\n\n${names}`, '1');
+  if (!choice) return;
+  const idx = parseInt(choice) - 1;
+  if (idx < 0 || idx >= otherPrinters.length) return;
+
+  await api('PATCH', `/api/jobs/${jobId}`, { printerId: otherPrinters[idx].id });
+  await renderCalendar();
+}
+
 function minutesOnDay(job, day) {
   const ds = new Date(day); ds.setHours(0, 0, 0, 0);
   const de = new Date(day); de.setHours(23, 59, 59, 999);
@@ -906,7 +973,8 @@ async function renderDay() {
 
   // Detect conflicts across scheduled jobs only (buffer times included)
   const printerMap  = Object.fromEntries(printers.map(p => [p.id, p]));
-  const conflictIds = detectConflicts(scheduledJobs, printerMap);
+  lastConflictIds = detectConflicts(scheduledJobs, printerMap);
+  const conflictIds = lastConflictIds;
 
   const dayClosure = closureForDay(navDate);
 
@@ -1764,6 +1832,13 @@ function showBottomSheet(jobId) {
     linkSep.classList.add('hidden');
   }
 
+  // Conflict resolution in bottom sheet
+  const bsConflict = document.getElementById('bs-conflict-section');
+  if (bsConflict) {
+    if (lastConflictIds.has(jobId)) bsConflict.classList.remove('hidden');
+    else bsConflict.classList.add('hidden');
+  }
+
   const overlay = document.getElementById('bottom-sheet-overlay');
   const sheet   = document.getElementById('bottom-sheet');
   overlay.classList.add('open');
@@ -1808,6 +1883,11 @@ function setupBottomSheet() {
       hideBottomSheet();
     });
   });
+  // Bottom sheet conflict resolution
+  document.getElementById('bs-move-after')?.addEventListener('click', async () => { hideBottomSheet(); if (bsJobId) await resolveConflictMoveAfter(bsJobId); });
+  document.getElementById('bs-move-next-day')?.addEventListener('click', async () => { hideBottomSheet(); if (bsJobId) await resolveConflictNextDay(bsJobId); });
+  document.getElementById('bs-move-printer')?.addEventListener('click', async () => { hideBottomSheet(); if (bsJobId) await resolveConflictMovePrinter(bsJobId); });
+
   document.getElementById('bs-duplicate').addEventListener('click', () => {
     if (bsJobId !== null) duplicateJob(bsJobId);
     hideBottomSheet();
@@ -1952,6 +2032,14 @@ function showCtxMenu(e, jobId) {
   } else {
     linkItem.classList.add('hidden');
     linkSep.style.display = 'none';
+  }
+
+  // Show/hide conflict resolution options
+  const conflictSection = document.getElementById('ctx-conflict-section');
+  if (lastConflictIds.has(jobId)) {
+    conflictSection.classList.remove('hidden');
+  } else {
+    conflictSection.classList.add('hidden');
   }
 
   const menu = document.getElementById('ctx-menu');
@@ -2956,6 +3044,23 @@ function setupListeners() {
     if (ctxJobId !== null) duplicateJob(ctxJobId);
     hideCtxMenu();
   });
+
+  // Conflict resolution
+  document.getElementById('ctx-move-after').addEventListener('click', async () => {
+    if (ctxJobId === null) return;
+    hideCtxMenu();
+    await resolveConflictMoveAfter(ctxJobId);
+  });
+  document.getElementById('ctx-move-next-day').addEventListener('click', async () => {
+    if (ctxJobId === null) return;
+    hideCtxMenu();
+    await resolveConflictNextDay(ctxJobId);
+  });
+  document.getElementById('ctx-move-printer').addEventListener('click', async () => {
+    if (ctxJobId === null) return;
+    hideCtxMenu();
+    await resolveConflictMovePrinter(ctxJobId);
+  });
   document.getElementById('ctx-delete').addEventListener('click', async () => {
     if (ctxJobId !== null && confirm('Delete this print job?')) {
       await api('DELETE', `/api/jobs/${ctxJobId}`);
@@ -3125,6 +3230,7 @@ let import3mfParsed = null;
 let import3mfBuffer = null;
 let import3mfBusy = false;
 let import3mfDefaultDate = null;
+let import3mfFilename = null;
 
 function initImport3mf() {
   document.getElementById('btn-import-3mf')?.addEventListener('click', () => {
@@ -3169,6 +3275,7 @@ function initImport3mf() {
 async function start3mfImport(file) {
   if (!file || import3mfBusy) return;
   import3mfBusy = true;
+  import3mfFilename = file.name;
 
   // Show progress
   document.getElementById('import3mf-title').textContent = 'Importing 3MF...';
@@ -3222,7 +3329,8 @@ async function start3mfImport(file) {
 
 function show3mfSchedulePreview(parsed, filename) {
   const printerLabel = parsed.printerName ? ` (${parsed.printerName})` : '';
-  document.getElementById('import3mf-title').textContent = `Schedule from 3MF — ${parsed.plates.length} plate${parsed.plates.length > 1 ? 's' : ''}${printerLabel}`;
+  const fnLabel = import3mfFilename ? ` — ${import3mfFilename}` : '';
+  document.getElementById('import3mf-title').textContent = `Schedule from 3MF${fnLabel}${printerLabel} — ${parsed.plates.length} plate${parsed.plates.length > 1 ? 's' : ''}`;
 
   // Fuzzy match printer name
   const norm = s => s.toLowerCase().replace(/[\s\-_]+/g, '').replace('lab', '');
@@ -3306,6 +3414,8 @@ async function confirm3mfSchedule() {
     const startDate = document.getElementById('sched-start-date').value;
     const startTime = document.getElementById('sched-start-time').value;
     if (!startDate) { alert('Start date required'); return; }
+    // Build a proper ISO string from local date/time
+    const startISO = new Date(`${startDate}T${startTime || '08:00'}:00`).toISOString();
 
     const plates = import3mfParsed.plates.map((pl, i) => {
       const check = document.querySelector(`[data-sched-check="${i}"]`);
@@ -3338,7 +3448,7 @@ async function confirm3mfSchedule() {
       method: 'POST',
       headers: {
         'Content-Type': 'application/octet-stream',
-        'X-Schedule': JSON.stringify({ plates: selectedPlates, startDate, startTime }),
+        'X-Schedule': JSON.stringify({ plates: selectedPlates, startISO }),
       },
       body: import3mfBuffer.buffer,
     });

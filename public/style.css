@@ -1776,3 +1776,10 @@ body.is-resizing,    body.is-resizing    * { cursor: ns-resize  !important; user
 }
 .color-name-input { flex: 1; min-width: 80px; }
 .color-brand-input { width: 100px !important; flex-shrink: 0; }
+
+/* Context menu label for conflict section */
+.ctx-label {
+  padding: 4px 12px; font-size: 10px; font-weight: 700;
+  text-transform: uppercase; letter-spacing: 0.5px;
+  color: var(--danger); opacity: .8;
+}
