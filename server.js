@@ -15,6 +15,22 @@ if (!fs.existsSync(UPLOADS_DIR)) fs.mkdirSync(UPLOADS_DIR, { recursive: true });
 const app = express();
 app.use(express.json());
 
+// --- CORS for cross-app requests (optional, only when sibling URLs configured) ---
+const ALLOWED_ORIGINS = [process.env.CALCULATOR_URL, process.env.FILAMENT_URL].filter(Boolean);
+if (ALLOWED_ORIGINS.length) {
+  app.use((req, res, next) => {
+    const origin = req.headers.origin;
+    if (origin && ALLOWED_ORIGINS.includes(origin)) {
+      res.setHeader('Access-Control-Allow-Origin', origin);
+      res.setHeader('Access-Control-Allow-Credentials', 'true');
+      res.setHeader('Access-Control-Allow-Methods', 'GET,POST,PUT,PATCH,DELETE,OPTIONS');
+      res.setHeader('Access-Control-Allow-Headers', 'Content-Type,X-Schedule,X-Plate-Index');
+      if (req.method === 'OPTIONS') return res.sendStatus(204);
+    }
+    next();
+  });
+}
+
 // --- Session store ---
 const SESSION_TTL = 7 * 24 * 60 * 60 * 1000; // 7 days in ms
 
@@ -451,6 +467,125 @@ app.post('/api/import', (req, res) => {
 /* ------------------------------------------------------------------ */
 /*  3MF import for scheduling                                          */
 /* ------------------------------------------------------------------ */
+/* ------------------------------------------------------------------ */
+/*  Smart scheduling: findNextValidStart                               */
+/* ------------------------------------------------------------------ */
+function getSchedulingRestrictions() {
+  const row = db.prepare("SELECT value FROM settings WHERE key='schedulingRestrictions'").get();
+  if (!row) return { enabled: false, silentStart: '21:00', silentEnd: '06:30', closedDays: [] };
+  try { return JSON.parse(row.value); } catch { return { enabled: false }; }
+}
+
+function timeToMinutes(timeStr) {
+  const [h, m] = (timeStr || '00:00').split(':').map(Number);
+  return h * 60 + (m || 0);
+}
+
+function isInSilentHours(date, silentStart, silentEnd) {
+  const mins = date.getHours() * 60 + date.getMinutes();
+  const start = timeToMinutes(silentStart);
+  const end = timeToMinutes(silentEnd);
+  if (start < end) return mins >= start && mins < end; // e.g. 09:00–17:00
+  return mins >= start || mins < end; // e.g. 21:00–06:30 (overnight)
+}
+
+function advanceToSilentEnd(date, silentEnd) {
+  const [h, m] = (silentEnd || '06:30').split(':').map(Number);
+  const result = new Date(date);
+  result.setHours(h, m || 0, 0, 0);
+  if (result <= date) result.setDate(result.getDate() + 1);
+  return result;
+}
+
+function findNextValidStart(candidate, durationMins, printerId) {
+  const restr = getSchedulingRestrictions();
+  const printer = printerId ? db.prepare('SELECT warm_up_mins, cool_down_mins FROM printers WHERE id=?').get(printerId) : null;
+  const warmUp = (printer?.warm_up_mins ?? 5) * 60000;
+  const coolDown = (printer?.cool_down_mins ?? 15) * 60000;
+  const durationMs = durationMins * 60000;
+
+  // Load closures
+  const closures = db.prepare('SELECT startDate, endDate FROM closures').all();
+
+  // Load existing jobs for this printer
+  const jobs = printerId
+    ? db.prepare("SELECT start, end FROM jobs WHERE printerId=? AND queued=0 AND start!='' ORDER BY start").all(printerId)
+    : [];
+
+  let current = new Date(candidate);
+  let iterations = 0;
+  const MAX_ITER = 500; // safety limit
+
+  while (iterations++ < MAX_ITER) {
+    // 1. Advance past closed days
+    if (restr.enabled && restr.closedDays?.length) {
+      let dayChecks = 0;
+      while (restr.closedDays.includes(current.getDay()) && dayChecks++ < 8) {
+        current.setDate(current.getDate() + 1);
+        const [h, m] = (restr.silentEnd || '06:30').split(':').map(Number);
+        current.setHours(h, m || 0, 0, 0);
+      }
+    }
+
+    // 2. Advance past silent hours
+    if (restr.enabled && restr.silentStart && restr.silentEnd) {
+      if (isInSilentHours(current, restr.silentStart, restr.silentEnd)) {
+        current = advanceToSilentEnd(current, restr.silentEnd);
+        continue; // re-check closed days
+      }
+    }
+
+    // 3. Check closures
+    let hitClosure = false;
+    for (const cl of closures) {
+      const clStart = new Date(cl.startDate + 'T00:00:00');
+      const clEnd = new Date(cl.endDate + 'T23:59:59');
+      if (current >= clStart && current <= clEnd) {
+        current = new Date(clEnd.getTime() + 1000);
+        const [h, m] = (restr.silentEnd || '06:30').split(':').map(Number);
+        current.setHours(h, m || 0, 0, 0);
+        if (current <= clEnd) current.setDate(current.getDate() + 1);
+        hitClosure = true;
+        break;
+      }
+    }
+    if (hitClosure) continue;
+
+    // 4. Check job overlaps (including buffers)
+    const myStart = current.getTime() - warmUp;
+    const myEnd = current.getTime() + durationMs + coolDown;
+    let hitJob = false;
+    for (const j of jobs) {
+      if (!j.start) continue;
+      const jStart = new Date(j.start).getTime() - warmUp;
+      const jEnd = new Date(j.end).getTime() + coolDown;
+      if (myStart < jEnd && myEnd > jStart) {
+        // Overlap — advance past this job
+        current = new Date(new Date(j.end).getTime() + coolDown + warmUp);
+        hitJob = true;
+        break;
+      }
+    }
+    if (hitJob) continue;
+
+    // 5. Check if the job would END during silent hours on a closed day
+    // (prints can run through silent hours, but the START must be valid — already checked)
+    // All checks passed
+    return current;
+  }
+
+  // Fallback: return candidate + 1 day if algorithm didn't converge
+  return new Date(candidate.getTime() + 86400000);
+}
+
+app.post('/api/find-slot', (req, res) => {
+  const { printerId, durationMins } = req.body || {};
+  if (!printerId || !durationMins) return res.status(400).json({ error: 'printerId and durationMins required' });
+  const start = findNextValidStart(new Date(), durationMins, printerId);
+  const end = new Date(start.getTime() + durationMins * 60000);
+  res.json({ start: start.toISOString(), end: end.toISOString(), printerId });
+});
+
 app.post('/api/parse-3mf', express.raw({ type: '*/*', limit: '500mb' }), (req, res) => {
   try {
     if (!req.body?.length) return res.status(400).json({ error: 'Empty body' });
@@ -468,8 +603,9 @@ app.post('/api/import-3mf-schedule', express.raw({ type: '*/*', limit: '500mb' }
   try {
     // Parse the schedule data from headers (body is the 3MF file)
     const schedule = JSON.parse(req.headers['x-schedule'] || '{}');
-    const { plates, startISO, startDate, startTime } = schedule;
-    if (!plates?.length || (!startISO && !startDate)) return res.status(400).json({ error: 'plates and start time required' });
+    const { plates, startISO, startDate, startTime, mode } = schedule;
+    const isFirstAvailable = mode === 'first-available';
+    if (!plates?.length || (!isFirstAvailable && !startISO && !startDate)) return res.status(400).json({ error: 'plates and start time required' });
 
     // Save the 3MF file
     const fileId = crypto.randomBytes(8).toString('hex');
@@ -485,18 +621,23 @@ app.post('/api/import-3mf-schedule', express.raw({ type: '*/*', limit: '500mb' }
       thumbMap[t.plateIndex] = imgId;
     }
 
-    // Schedule jobs sequentially from the start date/time
-    let currentStart = startISO ? new Date(startISO) : new Date(`${startDate}T${startTime || '08:00'}:00`);
+    // Schedule jobs sequentially, respecting silent hours/closed days/overlaps
+    let currentStart = isFirstAvailable
+      ? new Date()
+      : (startISO ? new Date(startISO) : new Date(`${startDate}T${startTime || '08:00'}:00`));
     const createdJobs = [];
 
     for (const pl of plates) {
-      // Get printer's warm-up and cool-down times
+      const durationMins = pl.durationMins || 0;
+
+      // Run through smart scheduling to find valid start
+      const validStart = findNextValidStart(currentStart, durationMins, pl.printerId);
+      const endDate = new Date(validStart.getTime() + durationMins * 60000);
+
+      // Get printer buffers for next-plate gap calculation
       const printer = pl.printerId ? db.prepare('SELECT warm_up_mins, cool_down_mins FROM printers WHERE id=?').get(pl.printerId) : null;
       const warmUp = printer?.warm_up_mins ?? 5;
       const coolDown = printer?.cool_down_mins ?? 15;
-
-      const durationMins = pl.durationMins || 0;
-      const endDate = new Date(currentStart.getTime() + durationMins * 60 * 1000);
 
       const thumbFile = thumbMap[pl.plateIndex] || null;
       const colorsStr = pl.colors ? JSON.stringify(pl.colors) : null;
@@ -508,7 +649,7 @@ app.post('/api/import-3mf-schedule', express.raw({ type: '*/*', limit: '500mb' }
         pl.name || `Plate ${pl.plateIndex}`,
         pl.customerName || null,
         pl.orderNr || null,
-        currentStart.toISOString(),
+        validStart.toISOString(),
         endDate.toISOString(),
         'Planned',
         colorsStr,
@@ -524,16 +665,14 @@ app.post('/api/import-3mf-schedule', express.raw({ type: '*/*', limit: '500mb' }
         id: result.lastInsertRowid,
         name: pl.name,
         printerId: pl.printerId,
-        start: currentStart.toISOString(),
+        start: validStart.toISOString(),
         end: endDate.toISOString(),
         durationMins,
         thumbFile,
       });
 
-      // Next job starts after cool-down of this job + warm-up of next job
-      // (warm-up of next will be looked up in next iteration, so just add cool-down here
-      //  and let the next iteration's start account for its own warm-up)
-      currentStart = new Date(endDate.getTime() + (coolDown + warmUp) * 60 * 1000);
+      // Next plate candidate: after this job's end + cool-down + warm-up
+      currentStart = new Date(endDate.getTime() + (coolDown + warmUp) * 60000);
     }
 
     res.status(201).json({ jobs: createdJobs, file: storedName });

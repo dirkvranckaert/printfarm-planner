@@ -2744,6 +2744,16 @@ async function openSettingsModal() {
   if (cbStarted)  cbStarted.checked  = pns?.value !== false;
   if (cbUpcoming) cbUpcoming.checked = pnu?.value !== false;
 
+  // Load scheduling restrictions
+  const schedRestr = await api('GET', '/api/settings/schedulingRestrictions');
+  const sr = schedRestr?.value || {};
+  document.getElementById('setting-sched-enabled').checked = !!sr.enabled;
+  document.getElementById('setting-silent-start').value = sr.silentStart || '21:00';
+  document.getElementById('setting-silent-end').value = sr.silentEnd || '06:30';
+  document.querySelectorAll('.sched-closed-day').forEach(cb => {
+    cb.checked = (sr.closedDays || []).includes(parseInt(cb.value));
+  });
+
   document.getElementById('settings-modal').classList.remove('hidden');
 
   // Load connected apps
@@ -2869,6 +2879,16 @@ async function saveSettings() {
   if (cbDone)     await api('PUT', '/api/settings/push.notify.done',     { value: cbDone.checked });
   if (cbStarted)  await api('PUT', '/api/settings/push.notify.started',  { value: cbStarted.checked });
   if (cbUpcoming) await api('PUT', '/api/settings/push.notify.upcoming', { value: cbUpcoming.checked });
+
+  // Save scheduling restrictions
+  const closedDays = [];
+  document.querySelectorAll('.sched-closed-day:checked').forEach(cb => closedDays.push(parseInt(cb.value)));
+  await api('PUT', '/api/settings/schedulingRestrictions', { value: {
+    enabled: document.getElementById('setting-sched-enabled').checked,
+    silentStart: document.getElementById('setting-silent-start').value || '21:00',
+    silentEnd: document.getElementById('setting-silent-end').value || '06:30',
+    closedDays,
+  }});
 
   closeModal('settings-modal');
   renderCalendar();
@@ -3412,16 +3432,34 @@ function show3mfSchedulePreview(parsed, filename) {
 
   document.getElementById('import3mf-body').innerHTML = `
     <div style="display:flex;flex-direction:column;gap:12px">
-      <div style="display:flex;gap:12px;align-items:end;padding:8px 0;border-bottom:1px solid var(--border)">
-        <div><label style="font-size:12px;font-weight:600;color:var(--text-muted)">Start Date</label><input type="date" id="sched-start-date" value="${today}" style="padding:6px 10px;font-size:14px"></div>
-        <div><label style="font-size:12px;font-weight:600;color:var(--text-muted)">Start Time</label><input type="time" id="sched-start-time" value="08:00" style="padding:6px 10px;font-size:14px"></div>
-        <div style="font-size:13px;color:var(--text-muted)" id="sched-total-label">Total: ${Math.floor(totalMins / 60)}h ${Math.round(totalMins % 60)}m across ${parsed.plates.length} plate${parsed.plates.length > 1 ? 's' : ''}</div>
+      <div style="padding:8px 0;border-bottom:1px solid var(--border)">
+        <div style="display:flex;gap:16px;align-items:center;margin-bottom:8px">
+          <label style="font-size:13px;cursor:pointer;margin:0"><input type="radio" name="sched-mode" value="manual" checked style="margin-right:4px"> Pick date/time</label>
+          <label style="font-size:13px;cursor:pointer;margin:0"><input type="radio" name="sched-mode" value="first-available" style="margin-right:4px"> First available slot</label>
+          <div style="flex:1;text-align:right;font-size:13px;color:var(--text-muted)" id="sched-total-label">Total: ${Math.floor(totalMins / 60)}h ${Math.round(totalMins % 60)}m across ${parsed.plates.length} plate${parsed.plates.length > 1 ? 's' : ''}</div>
+        </div>
+        <div id="sched-manual-fields" style="display:flex;gap:12px;align-items:end">
+          <div><label style="font-size:12px;font-weight:600;color:var(--text-muted)">Start Date</label><input type="date" id="sched-start-date" value="${today}" style="padding:6px 10px;font-size:14px"></div>
+          <div><label style="font-size:12px;font-weight:600;color:var(--text-muted)">Start Time</label><input type="time" id="sched-start-time" value="08:00" style="padding:6px 10px;font-size:14px"></div>
+        </div>
+        <div id="sched-auto-fields" style="display:none;font-size:13px;color:var(--text-muted);padding:6px 0">
+          Jobs will be scheduled at the first available moment per printer, respecting silent hours and closed days.
+        </div>
       </div>
       ${rows.join('')}
     </div>`;
 
-  // Update totals when checkboxes change
+  // Radio toggle for scheduling mode
   setTimeout(() => {
+    document.querySelectorAll('input[name="sched-mode"]').forEach(r => {
+      r.addEventListener('change', () => {
+        const isAuto = r.value === 'first-available' && r.checked;
+        document.getElementById('sched-manual-fields').style.display = isAuto ? 'none' : 'flex';
+        document.getElementById('sched-auto-fields').style.display = isAuto ? '' : 'none';
+      });
+    });
+
+    // Update totals when checkboxes change
     document.querySelectorAll('[data-sched-check]').forEach(cb => {
       cb.addEventListener('change', () => {
         let mins = 0, count = 0;
@@ -3443,11 +3481,15 @@ async function confirm3mfSchedule() {
   btn.textContent = 'Scheduling...';
 
   try {
-    const startDate = document.getElementById('sched-start-date').value;
-    const startTime = document.getElementById('sched-start-time').value;
-    if (!startDate) { alert('Start date required'); return; }
-    // Build a proper ISO string from local date/time
-    const startISO = new Date(`${startDate}T${startTime || '08:00'}:00`).toISOString();
+    const schedMode = document.querySelector('input[name="sched-mode"]:checked')?.value || 'manual';
+    const isFirstAvailable = schedMode === 'first-available';
+    let startISO = null;
+    if (!isFirstAvailable) {
+      const startDate = document.getElementById('sched-start-date').value;
+      const startTime = document.getElementById('sched-start-time').value;
+      if (!startDate) { alert('Start date required'); return; }
+      startISO = new Date(`${startDate}T${startTime || '08:00'}:00`).toISOString();
+    }
 
     const plates = import3mfParsed.plates.map((pl, i) => {
       const check = document.querySelector(`[data-sched-check="${i}"]`);
@@ -3480,7 +3522,7 @@ async function confirm3mfSchedule() {
       method: 'POST',
       headers: {
         'Content-Type': 'application/octet-stream',
-        'X-Schedule': JSON.stringify({ plates: selectedPlates, startISO }),
+        'X-Schedule': JSON.stringify({ plates: selectedPlates, startISO, mode: isFirstAvailable ? 'first-available' : 'manual' }),
       },
       body: import3mfBuffer.buffer,
     });

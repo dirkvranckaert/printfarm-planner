@@ -401,6 +401,34 @@
         </div>
         <hr class="divider">
         <div class="form-group" style="margin-bottom:0">
+          <label>Scheduling Restrictions</label>
+          <label class="checkbox-label" style="font-size:13px;margin-top:6px">
+            <input type="checkbox" id="setting-sched-enabled">
+            <span>Enable silent hours &amp; closed days</span>
+          </label>
+          <div id="sched-restrictions-detail" style="margin-top:8px;padding-left:4px">
+            <div style="display:flex;gap:8px;align-items:center;margin-bottom:8px">
+              <label style="font-size:13px;color:var(--text-muted);margin:0;min-width:90px">Silent hours</label>
+              <input type="time" id="setting-silent-start" value="21:00" style="padding:4px 8px;font-size:13px">
+              <span style="font-size:13px;color:var(--text-muted)">to</span>
+              <input type="time" id="setting-silent-end" value="06:30" style="padding:4px 8px;font-size:13px">
+            </div>
+            <div>
+              <label style="font-size:13px;color:var(--text-muted);margin:0 0 4px">Closed days (no scheduling)</label>
+              <div style="display:flex;gap:6px;flex-wrap:wrap;margin-top:4px">
+                <label class="checkbox-label" style="font-size:12px"><input type="checkbox" value="1" class="sched-closed-day"> Mon</label>
+                <label class="checkbox-label" style="font-size:12px"><input type="checkbox" value="2" class="sched-closed-day"> Tue</label>
+                <label class="checkbox-label" style="font-size:12px"><input type="checkbox" value="3" class="sched-closed-day"> Wed</label>
+                <label class="checkbox-label" style="font-size:12px"><input type="checkbox" value="4" class="sched-closed-day"> Thu</label>
+                <label class="checkbox-label" style="font-size:12px"><input type="checkbox" value="5" class="sched-closed-day"> Fri</label>
+                <label class="checkbox-label" style="font-size:12px"><input type="checkbox" value="6" class="sched-closed-day"> Sat</label>
+                <label class="checkbox-label" style="font-size:12px"><input type="checkbox" value="0" class="sched-closed-day"> Sun</label>
+              </div>
+            </div>
+          </div>
+        </div>
+        <hr class="divider">
+        <div class="form-group" style="margin-bottom:0">
           <label>Topbar printer display</label>
           <div class="radio-group" style="margin-top:6px">
             <label class="radio-label"><input type="radio" name="topbar-mode" value="pinned"> ⭐ Pinned printers</label>
