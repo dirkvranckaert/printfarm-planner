@@ -3521,7 +3521,7 @@ async function confirm3mfSchedule() {
       method: 'POST',
       headers: {
         'Content-Type': 'application/octet-stream',
-        'X-Schedule': JSON.stringify({ plates: selectedPlates, startISO, mode: isFirstAvailable ? 'first-available' : 'manual' }),
+        'X-Schedule': encodeURIComponent(JSON.stringify({ plates: selectedPlates, startISO, mode: isFirstAvailable ? 'first-available' : 'manual' })),
       },
       body: import3mfBuffer.buffer,
     });

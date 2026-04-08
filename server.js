@@ -602,7 +602,8 @@ app.post('/api/parse-3mf', express.raw({ type: '*/*', limit: '500mb' }), (req, r
 app.post('/api/import-3mf-schedule', express.raw({ type: '*/*', limit: '500mb' }), (req, res) => {
   try {
     // Parse the schedule data from headers (body is the 3MF file)
-    const schedule = JSON.parse(req.headers['x-schedule'] || '{}');
+    const rawSchedule = req.headers['x-schedule'] || '{}';
+    const schedule = JSON.parse(decodeURIComponent(rawSchedule));
     const { plates, startISO, startDate, startTime, mode } = schedule;
     const isFirstAvailable = mode === 'first-available';
     if (!plates?.length || (!isFirstAvailable && !startISO && !startDate)) return res.status(400).json({ error: 'plates and start time required' });
