@@ -593,17 +593,21 @@ function parseColorsField(val) {
 }
 
 function renderColorEditor(colors) {
-  const rows = colors.map((c, i) => renderColorEditorRow(c, i)).join('');
+  const sorted = [...colors].sort((a, b) => (a.extruder === 'L' ? 0 : a.extruder === 'R' ? 1 : 2) - (b.extruder === 'L' ? 0 : b.extruder === 'R' ? 1 : 2));
+  const rows = sorted.map((c, i) => renderColorEditorRow(c, i)).join('');
   return `<div id="job-color-rows">${rows}</div>
     <button type="button" class="btn btn-sm" style="margin-top:4px" onclick="addJobColorRow()">+ Add Color</button>`;
 }
 
 function renderColorEditorRow(c, i) {
   const name = c.name || (typeof ntc !== 'undefined' && c.color ? (ntc.name(c.color)?.[1] || '') : '');
+  const extBadge = c.extruder ? `<span class="color-ext-badge" style="flex-shrink:0">${escHtml(c.extruder)}</span>` : '';
   return `<div class="color-edit-row" data-cidx="${i}">
+    ${extBadge}
     <input type="color" value="${c.color || '#888888'}" class="color-picker" data-cf="color" onchange="updateJobColorName(this)">
     <input type="text" value="${escHtml(name)}" placeholder="Name" class="color-name-input" data-cf="name">
     <input type="text" value="${escHtml(c.brand || '')}" placeholder="Brand" class="color-brand-input" data-cf="brand">
+    <input type="hidden" value="${escHtml(c.extruder || '')}" data-cf="extruder">
     <button type="button" class="btn-icon" onclick="this.closest('.color-edit-row').remove()" title="Remove">&times;</button>
   </div>`;
 }
@@ -632,11 +636,15 @@ function updateJobColorName(colorInput) {
 function collectJobColors() {
   const rows = document.querySelectorAll('#job-color-rows .color-edit-row');
   if (!rows.length) return '';
-  const arr = Array.from(rows).map(row => ({
-    color: row.querySelector('[data-cf="color"]').value,
-    name: row.querySelector('[data-cf="name"]').value.trim() || (typeof ntc !== 'undefined' ? ntc.name(row.querySelector('[data-cf="color"]').value)?.[1] || '' : ''),
-    brand: row.querySelector('[data-cf="brand"]').value.trim(),
-  }));
+  const arr = Array.from(rows).map(row => {
+    const ext = row.querySelector('[data-cf="extruder"]')?.value || null;
+    return {
+      color: row.querySelector('[data-cf="color"]').value,
+      name: row.querySelector('[data-cf="name"]').value.trim() || (typeof ntc !== 'undefined' ? ntc.name(row.querySelector('[data-cf="color"]').value)?.[1] || '' : ''),
+      brand: row.querySelector('[data-cf="brand"]').value.trim(),
+      ...(ext ? { extruder: ext } : {}),
+    };
+  });
   return JSON.stringify(arr);
 }
 
