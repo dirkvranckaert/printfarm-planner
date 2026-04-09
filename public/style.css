@@ -1805,3 +1805,15 @@ body.is-resizing,    body.is-resizing    * { cursor: ns-resize  !important; user
 .settings-tabs .tab:hover { color: var(--text); }
 .settings-tabs .tab.active { color: var(--primary); border-bottom-color: var(--primary); }
 .settings-panel.hidden { display: none; }
+
+/* Extruder labels on color dots */
+.color-dot-wrap { display: inline-flex; flex-direction: column; align-items: center; gap: 0; }
+.color-ext {
+  font-size: 7px; font-weight: 700; line-height: 1;
+  color: var(--text-muted); letter-spacing: 0;
+}
+.color-ext-badge {
+  display: inline-block; font-size: 9px; font-weight: 700;
+  padding: 0 4px; border-radius: 3px;
+  background: var(--border); color: var(--text-muted);
+}

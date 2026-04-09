@@ -574,9 +574,11 @@ function renderColorSwatches(colorsStr) {
   try {
     const arr = JSON.parse(colorsStr);
     if (!Array.isArray(arr) || !arr.length) return '';
-    return `<span class="color-swatches">${arr.map(c =>
-      `<span class="color-dot" style="background:${escHtml(c.color)}" title="${escHtml(c.name || '')}${c.brand ? ' (' + escHtml(c.brand) + ')' : ''}"></span>`
-    ).join('')}</span>`;
+    return `<span class="color-swatches">${arr.map(c => {
+      const extLabel = c.extruder ? `<span class="color-ext">${c.extruder}</span>` : '';
+      const title = `${c.name || ''}${c.brand ? ' (' + c.brand + ')' : ''}${c.extruder ? ' [Extruder ' + c.extruder + ']' : ''}`;
+      return `<span class="color-dot-wrap">${extLabel}<span class="color-dot" style="background:${escHtml(c.color)}" title="${escHtml(title)}"></span></span>`;
+    }).join('')}</span>`;
   } catch { return escHtml(colorsStr); }
 }
 
@@ -642,7 +644,7 @@ function renderColorDetail(colorsStr) {
     const arr = JSON.parse(colorsStr);
     if (!Array.isArray(arr) || !arr.length) return '';
     return `<div class="color-detail">${arr.map(c =>
-      `<span class="color-chip"><span class="color-dot" style="background:${escHtml(c.color)}"></span>${escHtml(c.name || '')}${c.brand ? ` <span style="opacity:.6">(${escHtml(c.brand)})</span>` : ''}</span>`
+      `<span class="color-chip"><span class="color-dot" style="background:${escHtml(c.color)}"></span>${escHtml(c.name || '')}${c.extruder ? ` <span class="color-ext-badge">${c.extruder}</span>` : ''}${c.brand ? ` <span style="opacity:.6">(${escHtml(c.brand)})</span>` : ''}</span>`
     ).join('')}</div>`;
   } catch { return escHtml(colorsStr); }
 }
@@ -3510,12 +3512,14 @@ async function confirm3mfSchedule() {
     const plates = import3mfParsed.plates.map((pl, i) => {
       const check = document.querySelector(`[data-sched-check="${i}"]`);
       if (check && !check.checked) return null;
+      const isDual = pl.isDualExtruder || (pl.nozzleCount || 1) >= 2;
       const colors = (pl.filaments || []).map(f => {
         const profile = import3mfParsed.filamentProfiles?.[f.id - 1];
         return {
           color: f.color || '#888888',
           name: (typeof ntc !== 'undefined' ? ntc.name(f.color || '#888888')?.[1] : '') || f.color,
           brand: profile?.vendor && profile.vendor !== 'Generic' ? profile.vendor : '',
+          extruder: isDual && f.extruder ? (f.extruder === 1 ? 'L' : 'R') : null,
         };
       });
 

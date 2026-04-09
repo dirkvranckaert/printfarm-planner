@@ -189,6 +189,9 @@ function parse3mf(input) {
 
       // Object count (items on plate, excluding wipe tower)
       plate.objectCount = plate.objects.length;
+
+      // Dual extruder detection
+      plate.isDualExtruder = (plate.nozzleCount || 1) >= 2;
     }
 
     return result;
@@ -234,6 +237,12 @@ function parseSliceInfo(xml) {
         case 'printer_model_id':
           plate.printerModel = value;
           break;
+        case 'filament_maps':
+          plate.filamentMaps = value.split(/\s+/).map(Number);
+          break;
+        case 'nozzle_diameters':
+          plate.nozzleCount = value.split(',').length;
+          break;
       }
     }
 
@@ -249,12 +258,16 @@ function parseSliceInfo(xml) {
         const m = attrs.match(new RegExp(`${key}="([^"]*)"`));
         return m ? m[1] : null;
       };
+      const filId = parseInt(get('id')) || 0;
+      // Map filament to extruder: filament_maps[filId-1] gives the extruder number (1-indexed)
+      const extruderNum = plate.filamentMaps?.[filId - 1] || null;
       plate.filaments.push({
-        id: parseInt(get('id')) || 0,
+        id: filId,
         type: get('type'),
         color: get('color'),
         usedGrams: parseFloat(get('used_g')) || 0,
         usedMeters: parseFloat(get('used_m')) || 0,
+        extruder: extruderNum,
       });
     }
 

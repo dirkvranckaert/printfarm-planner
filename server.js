@@ -322,9 +322,14 @@ app.post('/api/jobs/:id/attach-3mf', express.raw({ type: '*/*', limit: '500mb' }
       fs.writeFileSync(path.join(UPLOADS_DIR, thumbFile), thumb.buffer);
     }
 
+    const isDual = plate && (plate.nozzleCount || 1) >= 2;
     const colors = plate ? plate.filaments.map(f => {
       const profile = parsed.filamentProfiles?.[f.id - 1];
-      return { color: f.color || '#888888', name: '', brand: profile?.vendor && profile.vendor !== 'Generic' ? profile.vendor : '' };
+      return {
+        color: f.color || '#888888', name: '',
+        brand: profile?.vendor && profile.vendor !== 'Generic' ? profile.vendor : '',
+        extruder: isDual && f.extruder ? (f.extruder === 1 ? 'L' : 'R') : null,
+      };
     }) : [];
 
     const durationMins = plate ? Math.round(plate.printTimeMinutes) : job.durationMins;
