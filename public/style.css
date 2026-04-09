@@ -760,7 +760,7 @@ h3 { font-size: 14px; font-weight: 600; margin-bottom: 12px; }
 
 /* ======================== Settings modal ======================== */
 .modal-sm       { width: 320px; }
-.modal-settings { width: 480px; }
+/* modal-settings class no longer used — width set inline */
 
 /* Status color rows in settings */
 .status-color-rows { display: flex; flex-direction: column; gap: 8px; margin-top: 6px; }
