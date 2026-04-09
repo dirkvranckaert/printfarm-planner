@@ -16,7 +16,10 @@ const app = express();
 app.use(express.json());
 
 // --- CORS for cross-app requests (optional, only when sibling URLs configured) ---
-const ALLOWED_ORIGINS = [process.env.CALCULATOR_URL, process.env.FILAMENT_URL].filter(Boolean);
+const ALLOWED_ORIGINS = [
+  process.env.CALCULATOR_URL, process.env.FILAMENT_URL,
+  process.env.CALCULATOR_PUBLIC_URL, process.env.FILAMENT_PUBLIC_URL,
+].filter(Boolean);
 if (ALLOWED_ORIGINS.length) {
   app.use((req, res, next) => {
     const origin = req.headers.origin;
