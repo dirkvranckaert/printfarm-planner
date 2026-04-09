@@ -574,6 +574,8 @@ function renderColorSwatches(colorsStr) {
   try {
     const arr = JSON.parse(colorsStr);
     if (!Array.isArray(arr) || !arr.length) return '';
+    // Sort: L (left) first, R (right) second, no extruder last
+    arr.sort((a, b) => (a.extruder === 'L' ? 0 : a.extruder === 'R' ? 1 : 2) - (b.extruder === 'L' ? 0 : b.extruder === 'R' ? 1 : 2));
     return `<span class="color-swatches">${arr.map(c => {
       const extLabel = c.extruder ? `<span class="color-ext">${c.extruder}</span>` : '';
       const title = `${c.name || ''}${c.brand ? ' (' + c.brand + ')' : ''}${c.extruder ? ' [Extruder ' + c.extruder + ']' : ''}`;
@@ -643,6 +645,7 @@ function renderColorDetail(colorsStr) {
   try {
     const arr = JSON.parse(colorsStr);
     if (!Array.isArray(arr) || !arr.length) return '';
+    arr.sort((a, b) => (a.extruder === 'L' ? 0 : a.extruder === 'R' ? 1 : 2) - (b.extruder === 'L' ? 0 : b.extruder === 'R' ? 1 : 2));
     return `<div class="color-detail">${arr.map(c =>
       `<span class="color-chip"><span class="color-dot" style="background:${escHtml(c.color)}"></span>${escHtml(c.name || '')}${c.extruder ? ` <span class="color-ext-badge">${c.extruder}</span>` : ''}${c.brand ? ` <span style="opacity:.6">(${escHtml(c.brand)})</span>` : ''}</span>`
     ).join('')}</div>`;
