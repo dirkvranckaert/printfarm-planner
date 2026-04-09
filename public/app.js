@@ -1068,15 +1068,15 @@ async function renderDay() {
                      background:${hexRgba(p.color, bgAlpha)};
                      border-left-color:${isConflict ? '#e53e3e' : p.color};
                      color:var(--text)">
-              <div style="display:flex;align-items:center;gap:4px;flex-wrap:wrap">
+              <div style="display:flex;align-items:center;gap:4px;overflow:hidden">
                 ${conflictIcon}
-                <span class="job-block-name" style="flex:1">${job.orderNr ? `#${escHtml(job.orderNr)} — ` : ''}${escHtml(job.name)}</span>
+                <span class="job-block-name" style="flex-shrink:1;min-width:0;overflow:hidden;text-overflow:ellipsis;white-space:nowrap">${job.orderNr ? `#${escHtml(job.orderNr)} — ` : ''}${escHtml(job.name)}</span>
+                ${job.colors ? renderColorSwatches(job.colors) : ''}
                 ${job.linked_printer_id ? '<span title="Linked to printer">🔗</span>' : ''}
-                <span class="job-status-badge" style="${statusBadgeStyle(status)}">${escHtml(status)}</span>
+                <span class="job-status-badge" style="flex-shrink:0;${statusBadgeStyle(status)}">${escHtml(status)}</span>
               </div>`;
-      if (job.customerName) h += `<span class="job-block-customer">${escHtml(job.customerName)}</span>`;
-      if (job.colors) h += renderColorSwatches(job.colors);
-      if (job.bedType) h += `<span class="job-block-bedtype">${formatBedType(job.bedType)}</span>`;
+      if (htPx >= 40 && job.customerName) h += `<span class="job-block-customer">${escHtml(job.customerName)}</span>`;
+      if (htPx >= 55 && job.bedType) h += `<span class="job-block-bedtype">${formatBedType(job.bedType)}</span>`;
       if (htPx >= 80 && job.thumbFile) h += `<img src="/api/uploads/${escHtml(job.thumbFile)}" class="job-block-thumb" alt="">`;
       if (endMins <= DAY_MINS) h += '<div class="job-resize-handle"></div>';
       h += '</div>';
