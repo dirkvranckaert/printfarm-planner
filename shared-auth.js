@@ -84,7 +84,7 @@ async function discoverApp(url) {
     clearTimeout(timeout);
     if (!res.ok) return { available: false };
     const data = await res.json();
-    return { available: true, version: data.version || null, url, publicUrl: data.publicUrl || null };
+    return { available: true, appName: data.appName || null, version: data.version || null, url, publicUrl: data.publicUrl || null };
   } catch {
     return { available: false, url };
   }

@@ -2768,20 +2768,30 @@ async function loadConnectedApps() {
     let html = '';
 
     if (!config.sharedAuth) {
-      html = '<span style="color:var(--text-muted)">Shared auth not configured. Set <code>SHARED_AUTH_SECRET</code> in .env.</span>';
+      html = `<div style="padding:12px;background:var(--warning-tint);border:1px solid var(--warning);border-radius:6px;margin-bottom:12px">
+        <strong>Shared auth not configured</strong>
+        <p style="font-size:13px;color:var(--text-muted);margin-top:4px">Set <code>SHARED_AUTH_SECRET</code> in your .env file to enable SSO and app discovery.</p>
+      </div>`;
     } else {
-      const appNames = { calculator: '3D Project Calculator', filament: 'Filament Manager' };
-      const keys = Object.keys(data.apps || {});
-      if (!keys.length) {
-        html = '<span style="color:var(--text-muted)">No sibling app URLs configured.</span>';
-      } else {
-        html = keys.map(k => {
-          const a = data.apps[k];
-          const dot = a.available ? '\ud83d\udfe2' : '\ud83d\udd34';
-          const name = appNames[k] || k;
-          const info = a.available ? `v${a.version || '?'}` : 'Unreachable';
-          return `<div style="padding:4px 0">${dot} <strong>${escHtml(name)}</strong> — ${escHtml(info)}</div>`;
-        }).join('');
+      html = `<div style="padding:8px 12px;background:var(--success-tint);border:1px solid var(--success);border-radius:6px;margin-bottom:12px;font-size:13px">Shared authentication is <strong>enabled</strong></div>`;
+    }
+    const appIcons = { calculator: '\ud83e\uddee', filament: '\ud83e\uddf5', planner: '\ud83d\udcc5' };
+    const fallbackNames = { calculator: '3D Project Calculator', filament: 'Filament Manager', planner: 'PrintFarm Planner' };
+    const keys = Object.keys(data.apps || {});
+    if (!keys.length) {
+      html += '<p style="color:var(--text-muted)">No sibling app URLs configured. Set <code>CALCULATOR_URL</code>, <code>FILAMENT_URL</code> in .env.</p>';
+    } else {
+      for (const k of keys) {
+        const a = data.apps[k];
+        const dot = a.available ? '\ud83d\udfe2' : '\ud83d\udd34';
+        const icon = appIcons[k] || '\ud83d\udce6';
+        const name = a.appName || fallbackNames[k] || k;
+        const info = a.available ? `v${a.version || '?'}` : 'Unreachable';
+        const displayUrl = a.publicUrl || a.url || '';
+        html += `<div style="padding:8px 0;border-bottom:1px solid var(--border)">
+          <div style="font-weight:600">${dot} ${icon} ${escHtml(name)}</div>
+          <div style="font-size:12px;color:var(--text-muted)">${escHtml(info)}${displayUrl ? ` \u2014 <a href="${escHtml(displayUrl)}" target="_blank" style="color:var(--primary)">${escHtml(displayUrl)}</a>` : ''}</div>
+        </div>`;
       }
     }
     el.innerHTML = html;
