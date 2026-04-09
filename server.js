@@ -249,6 +249,7 @@ app.get('/api/config', (req, res) => {
     version,
     appName: 'PrintFarm Planner',
     appId: 'printfarm-planner',
+    publicUrl: process.env.PUBLIC_URL || null,
     sharedAuth: sharedAuth.isEnabled(),
     topbarPrinterLimit: parseInt(process.env.TOPBAR_PRINTER_LIMIT, 10) || 3,
   });
