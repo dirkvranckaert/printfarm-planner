@@ -3217,6 +3217,17 @@ function setupListeners() {
   document.getElementById('btn-printer-status').addEventListener('click', toggleStatusPanel);
   document.getElementById('btn-settings').addEventListener('click', openSettingsModal);
   document.getElementById('btn-save-settings').addEventListener('click', saveSettings);
+
+  // Settings tab switching
+  document.getElementById('planner-settings-tabs')?.addEventListener('click', e => {
+    const tab = e.target.closest('.tab');
+    if (!tab) return;
+    const panel = tab.dataset.stab;
+    document.querySelectorAll('#planner-settings-tabs .tab').forEach(t => t.classList.toggle('active', t.dataset.stab === panel));
+    document.querySelectorAll('.settings-panel').forEach(p => p.classList.toggle('hidden', p.dataset.panel !== panel));
+    // Load connected apps lazily
+    if (panel === 'apps') loadConnectedApps();
+  });
   document.getElementById('btn-bambu-connect').addEventListener('click', bambuConnect);
   document.getElementById('btn-bambu-verify').addEventListener('click', bambuVerify);
   document.getElementById('btn-bambu-disconnect').addEventListener('click', bambuDisconnect);

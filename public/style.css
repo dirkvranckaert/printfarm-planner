@@ -1790,3 +1790,18 @@ body.is-resizing,    body.is-resizing    * { cursor: ns-resize  !important; user
 ::-webkit-scrollbar-thumb { background: var(--border); border-radius: 4px; }
 ::-webkit-scrollbar-thumb:hover { background: var(--text-muted); }
 * { scrollbar-width: thin; scrollbar-color: var(--border) var(--bg); }
+
+/* Settings tabs (matching calculator style) */
+.settings-tabs {
+  display: flex; gap: 0; margin-bottom: 16px;
+  border-bottom: 2px solid var(--border);
+}
+.settings-tabs .tab {
+  padding: 8px 10px; border: none; background: none;
+  color: var(--text-muted); font-size: 12px; font-weight: 600;
+  cursor: pointer; border-bottom: 2px solid transparent;
+  margin-bottom: -2px; white-space: nowrap; transition: .15s;
+}
+.settings-tabs .tab:hover { color: var(--text); }
+.settings-tabs .tab.active { color: var(--primary); border-bottom-color: var(--primary); }
+.settings-panel.hidden { display: none; }

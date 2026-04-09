@@ -342,133 +342,126 @@
 
   <!-- ==================== Settings Modal ==================== -->
   <div id="settings-modal" class="modal-overlay hidden">
-    <div class="modal modal-settings">
+    <div class="modal" style="max-width:640px">
       <div class="modal-header">
         <h2>Settings</h2>
         <button class="modal-close" data-close="settings-modal">✕</button>
       </div>
       <div class="modal-body">
-        <div class="form-group">
-          <label for="setting-theme">Theme</label>
-          <select id="setting-theme">
-            <option value="system">System (auto)</option>
-            <option value="light">Light</option>
-            <option value="dark">Dark</option>
-          </select>
+        <div class="settings-tabs" id="planner-settings-tabs">
+          <button class="tab active" data-stab="general">General</button>
+          <button class="tab" data-stab="display">Display</button>
+          <button class="tab" data-stab="silent">Silent Schedule</button>
+          <button class="tab" data-stab="notifications">Notifications</button>
+          <button class="tab" data-stab="data">Data</button>
+          <button class="tab" data-stab="apps">Connected Apps</button>
         </div>
-        <hr class="divider">
-        <div class="form-group">
-          <label>Default view on startup</label>
-          <div class="radio-group">
-            <label class="radio-label"><input type="radio" name="default-view" value="day"> Day</label>
-            <label class="radio-label"><input type="radio" name="default-view" value="week"> Week</label>
-            <label class="radio-label"><input type="radio" name="default-view" value="month"> Month</label>
-            <label class="radio-label"><input type="radio" name="default-view" value="upcoming"> Upcoming</label>
+
+        <!-- General -->
+        <div class="settings-panel" data-panel="general">
+          <div class="form-group">
+            <label for="setting-theme">Theme</label>
+            <select id="setting-theme">
+              <option value="system">System (auto)</option>
+              <option value="light">Light</option>
+              <option value="dark">Dark</option>
+            </select>
           </div>
-        </div>
-        <hr class="divider">
-        <div class="form-group" style="margin-bottom:0">
-          <label>Status colors</label>
-          <div class="status-color-rows">
-            <div class="status-color-row">
-              <span class="status-color-label">Planned</span>
-              <input type="color" id="sc-Planned">
-            </div>
-            <div class="status-color-row">
-              <span class="status-color-label">Awaiting confirmation</span>
-              <input type="color" id="sc-Awaiting">
-            </div>
-            <div class="status-color-row">
-              <span class="status-color-label">Printing</span>
-              <input type="color" id="sc-Printing">
-            </div>
-            <div class="status-color-row">
-              <span class="status-color-label">Post Printing</span>
-              <input type="color" id="sc-Post-Printing">
-            </div>
-            <div class="status-color-row">
-              <span class="status-color-label">Done</span>
-              <input type="color" id="sc-Done">
+          <div class="form-group">
+            <label>Default view on startup</label>
+            <div class="radio-group">
+              <label class="radio-label"><input type="radio" name="default-view" value="day"> Day</label>
+              <label class="radio-label"><input type="radio" name="default-view" value="week"> Week</label>
+              <label class="radio-label"><input type="radio" name="default-view" value="month"> Month</label>
+              <label class="radio-label"><input type="radio" name="default-view" value="upcoming"> Upcoming</label>
             </div>
           </div>
+          <div class="form-group">
+            <label class="radio-label" style="font-size:14px">
+              <input type="checkbox" id="setting-queue-auto-expand">
+              <span>Expand queue panel on startup if not empty</span>
+            </label>
+          </div>
         </div>
-        <hr class="divider">
-        <div class="form-group" style="margin-bottom:0">
-          <label class="radio-label" style="font-size:14px">
-            <input type="checkbox" id="setting-queue-auto-expand">
-            <span>Expand queue panel on startup if not empty</span>
-          </label>
+
+        <!-- Display -->
+        <div class="settings-panel hidden" data-panel="display">
+          <div class="form-group">
+            <label>Status colors</label>
+            <div class="status-color-rows">
+              <div class="status-color-row"><span class="status-color-label">Planned</span><input type="color" id="sc-Planned"></div>
+              <div class="status-color-row"><span class="status-color-label">Awaiting confirmation</span><input type="color" id="sc-Awaiting"></div>
+              <div class="status-color-row"><span class="status-color-label">Printing</span><input type="color" id="sc-Printing"></div>
+              <div class="status-color-row"><span class="status-color-label">Post Printing</span><input type="color" id="sc-Post-Printing"></div>
+              <div class="status-color-row"><span class="status-color-label">Done</span><input type="color" id="sc-Done"></div>
+            </div>
+          </div>
+          <div class="form-group">
+            <label>Topbar printer display</label>
+            <div class="radio-group" style="margin-top:6px">
+              <label class="radio-label"><input type="radio" name="topbar-mode" value="pinned"> ⭐ Pinned printers</label>
+              <label class="radio-label"><input type="radio" name="topbar-mode" value="active"> 🖨 Active (printing) only</label>
+            </div>
+            <p id="topbar-mode-pin-hint" style="font-size:12px;color:var(--text-muted);margin:4px 0 0">Pin printers via ⭐ in ⚙ Printers to select which appear in the topbar.</p>
+          </div>
         </div>
-        <hr class="divider">
-        <div class="form-group" style="margin-bottom:0">
-          <label>Silent Schedule</label>
-          <p style="font-size:12px;color:var(--text-muted);margin:4px 0 8px">Applies to automatic scheduling from 3MF import. Prints will not be <strong>started</strong> during silent hours or on silent days. Manually created jobs are not affected.</p>
-          <div style="padding-left:4px">
-            <div style="display:flex;gap:8px;align-items:center;margin-bottom:8px">
-              <label style="font-size:13px;color:var(--text-muted);margin:0;min-width:90px">Silent hours</label>
+
+        <!-- Silent Schedule -->
+        <div class="settings-panel hidden" data-panel="silent">
+          <p style="font-size:12px;color:var(--text-muted);margin:0 0 12px">Applies to automatic scheduling from 3MF import. Prints will not be <strong>started</strong> during silent hours or on silent days. Manually created jobs are not affected.</p>
+          <div class="form-group">
+            <label>Silent hours</label>
+            <div style="display:flex;gap:8px;align-items:center;margin-top:4px">
               <input type="time" id="setting-silent-start" value="21:00" style="padding:4px 8px;font-size:13px">
-              <span style="font-size:13px;color:var(--text-muted)">to</span>
+              <span style="color:var(--text-muted)">to</span>
               <input type="time" id="setting-silent-end" value="06:30" style="padding:4px 8px;font-size:13px">
             </div>
-            <div>
-              <label style="font-size:13px;color:var(--text-muted);margin:0 0 4px">Silent days</label>
-              <div style="display:flex;gap:6px;flex-wrap:wrap;margin-top:4px">
-                <label class="checkbox-label" style="font-size:12px"><input type="checkbox" value="1" class="sched-closed-day"> Mon</label>
-                <label class="checkbox-label" style="font-size:12px"><input type="checkbox" value="2" class="sched-closed-day"> Tue</label>
-                <label class="checkbox-label" style="font-size:12px"><input type="checkbox" value="3" class="sched-closed-day"> Wed</label>
-                <label class="checkbox-label" style="font-size:12px"><input type="checkbox" value="4" class="sched-closed-day"> Thu</label>
-                <label class="checkbox-label" style="font-size:12px"><input type="checkbox" value="5" class="sched-closed-day"> Fri</label>
-                <label class="checkbox-label" style="font-size:12px"><input type="checkbox" value="6" class="sched-closed-day"> Sat</label>
-                <label class="checkbox-label" style="font-size:12px"><input type="checkbox" value="0" class="sched-closed-day"> Sun</label>
-              </div>
+          </div>
+          <div class="form-group">
+            <label>Silent days</label>
+            <div style="display:flex;gap:6px;flex-wrap:wrap;margin-top:4px">
+              <label class="checkbox-label" style="font-size:12px"><input type="checkbox" value="1" class="sched-closed-day"> Mon</label>
+              <label class="checkbox-label" style="font-size:12px"><input type="checkbox" value="2" class="sched-closed-day"> Tue</label>
+              <label class="checkbox-label" style="font-size:12px"><input type="checkbox" value="3" class="sched-closed-day"> Wed</label>
+              <label class="checkbox-label" style="font-size:12px"><input type="checkbox" value="4" class="sched-closed-day"> Thu</label>
+              <label class="checkbox-label" style="font-size:12px"><input type="checkbox" value="5" class="sched-closed-day"> Fri</label>
+              <label class="checkbox-label" style="font-size:12px"><input type="checkbox" value="6" class="sched-closed-day"> Sat</label>
+              <label class="checkbox-label" style="font-size:12px"><input type="checkbox" value="0" class="sched-closed-day"> Sun</label>
             </div>
           </div>
         </div>
-        <hr class="divider">
-        <div class="form-group" style="margin-bottom:0">
-          <label>Topbar printer display</label>
-          <div class="radio-group" style="margin-top:6px">
-            <label class="radio-label"><input type="radio" name="topbar-mode" value="pinned"> ⭐ Pinned printers</label>
-            <label class="radio-label"><input type="radio" name="topbar-mode" value="active"> 🖨 Active (printing) only</label>
-          </div>
-          <p id="topbar-mode-pin-hint" style="font-size:12px;color:var(--text-muted);margin:4px 0 0">Pin printers via ⭐ in ⚙ Printers to select which appear in the topbar.</p>
-        </div>
-        <hr class="divider">
-        <div class="form-group" style="margin-bottom:0">
-          <label>Push Notifications</label>
-          <div id="push-subscribe-section" style="margin-top:6px">
-            <!-- JS renders button + status here -->
-          </div>
-          <div id="push-prefs-section" class="hidden" style="margin-top:10px">
-            <label class="checkbox-label" style="font-size:13px">
-              <input type="checkbox" id="push-notify-done">
-              <span>Printer finished printing</span>
-            </label>
-            <label class="checkbox-label" style="font-size:13px;margin-top:4px">
-              <input type="checkbox" id="push-notify-started">
-              <span>Printer started printing</span>
-            </label>
-            <label class="checkbox-label" style="font-size:13px;margin-top:4px">
-              <input type="checkbox" id="push-notify-upcoming">
-              <span>Scheduled job about to start</span>
-            </label>
+
+        <!-- Notifications -->
+        <div class="settings-panel hidden" data-panel="notifications">
+          <div class="form-group">
+            <label>Push Notifications</label>
+            <div id="push-subscribe-section" style="margin-top:6px"></div>
+            <div id="push-prefs-section" class="hidden" style="margin-top:10px">
+              <label class="checkbox-label" style="font-size:13px"><input type="checkbox" id="push-notify-done"><span>Printer finished printing</span></label>
+              <label class="checkbox-label" style="font-size:13px;margin-top:4px"><input type="checkbox" id="push-notify-started"><span>Printer started printing</span></label>
+              <label class="checkbox-label" style="font-size:13px;margin-top:4px"><input type="checkbox" id="push-notify-upcoming"><span>Scheduled job about to start</span></label>
+            </div>
           </div>
         </div>
-        <hr class="divider">
-        <div class="form-group" style="margin-bottom:0">
-          <label>Data</label>
-          <div style="display:flex;gap:8px;margin-top:4px">
-            <button type="button" id="btn-export" class="btn btn-secondary">↓ Export JSON</button>
-            <button type="button" id="btn-import-trigger" class="btn btn-secondary">↑ Import JSON</button>
-            <input type="file" id="import-file" accept=".json" style="display:none">
+
+        <!-- Data -->
+        <div class="settings-panel hidden" data-panel="data">
+          <div class="form-group">
+            <label>Backup &amp; Restore</label>
+            <div style="display:flex;gap:8px;margin-top:4px">
+              <button type="button" id="btn-export" class="btn btn-secondary">↓ Export JSON</button>
+              <button type="button" id="btn-import-trigger" class="btn btn-secondary">↑ Import JSON</button>
+              <input type="file" id="import-file" accept=".json" style="display:none">
           </div>
           <p style="font-size:12px;color:var(--text-muted);margin-top:6px">Import replaces all existing data.</p>
         </div>
-        <hr class="divider">
-        <div class="form-group">
-          <label>Connected Apps</label>
+        </div>
+
+        <!-- Connected Apps -->
+        <div class="settings-panel hidden" data-panel="apps">
           <div id="connected-apps-panel" style="font-size:13px;color:var(--text-muted)">Loading...</div>
         </div>
+
       </div>
       <div class="modal-footer">
         <span id="app-version" class="app-version"></span>
