@@ -2846,52 +2846,48 @@ async function bambuDisconnect() {
   await refreshPrinterList();
 }
 
-async function saveSettings() {
-  const themeVal = document.getElementById('setting-theme')?.value ?? 'system';
-  await api('PUT', '/api/settings/theme', { value: themeVal });
-  applyTheme(themeVal);
+// Auto-save individual settings on change (no Save button needed)
+async function autoSave(key, value) {
+  await api('PUT', `/api/settings/${key}`, { value });
+}
 
-  const val = document.querySelector('input[name="default-view"]:checked')?.value ?? 'day';
-  await api('PUT', '/api/settings/defaultView', { value: val });
+function setupSettingsAutoSave() {
+  const q = s => document.getElementById(s);
+  const qa = s => document.querySelectorAll(s);
 
-  // Save status colors
-  const colors = {};
+  q('setting-theme')?.addEventListener('change', async function() { await autoSave('theme', this.value); applyTheme(this.value); });
+  qa('input[name="default-view"]').forEach(r => r.addEventListener('change', () => autoSave('defaultView', r.value)));
+  q('setting-queue-auto-expand')?.addEventListener('change', function() { autoSave('queueAutoExpand', this.checked); });
+
+  // Status colors — any change saves all colors
   ['Planned', 'Printing', 'Post Printing', 'Done', 'Awaiting'].forEach(status => {
-    const inp = document.getElementById('sc-' + status.replace(/\s+/g, '-'));
-    if (inp) colors[status] = inp.value;
+    q('sc-' + status.replace(/\s+/g, '-'))?.addEventListener('change', async () => {
+      const c = {};
+      ['Planned', 'Printing', 'Post Printing', 'Done', 'Awaiting'].forEach(s => { const el = q('sc-' + s.replace(/\s+/g, '-')); if (el) c[s] = el.value; });
+      await autoSave('statusColors', c);
+      await loadStatusColors();
+      renderCalendar();
+    });
   });
-  await api('PUT', '/api/settings/statusColors', { value: colors });
-  await loadStatusColors();
 
-  const cb = document.getElementById('setting-queue-auto-expand');
-  await api('PUT', '/api/settings/queueAutoExpand', { value: cb?.checked === true });
+  // Topbar mode
+  qa('input[name="topbar-mode"]').forEach(r => r.addEventListener('change', async () => {
+    await autoSave('topbarMode', r.value); topbarModeCache = r.value; _lastTopbarIds = null; renderTopbarStatus();
+  }));
 
-  const topbarMode = document.querySelector('input[name="topbar-mode"]:checked')?.value ?? 'pinned';
-  await api('PUT', '/api/settings/topbarMode', { value: topbarMode });
-  topbarModeCache = topbarMode;
-  _lastTopbarIds  = null; // force chip rebuild after mode change
+  // Push notifications
+  ['push-notify-done', 'push-notify-started', 'push-notify-upcoming'].forEach(id => {
+    q(id)?.addEventListener('change', function() { autoSave('push.notify.' + id.replace('push-notify-', ''), this.checked); });
+  });
 
-  // Save push notification preferences
-  const cbDone     = document.getElementById('push-notify-done');
-  const cbStarted  = document.getElementById('push-notify-started');
-  const cbUpcoming = document.getElementById('push-notify-upcoming');
-  if (cbDone)     await api('PUT', '/api/settings/push.notify.done',     { value: cbDone.checked });
-  if (cbStarted)  await api('PUT', '/api/settings/push.notify.started',  { value: cbStarted.checked });
-  if (cbUpcoming) await api('PUT', '/api/settings/push.notify.upcoming', { value: cbUpcoming.checked });
-
-  // Save scheduling restrictions
-  const closedDays = [];
-  document.querySelectorAll('.sched-closed-day:checked').forEach(cb => closedDays.push(parseInt(cb.value)));
-  await api('PUT', '/api/settings/schedulingRestrictions', { value: {
-    enabled: true, // always enforced
-    silentStart: document.getElementById('setting-silent-start').value || '21:00',
-    silentEnd: document.getElementById('setting-silent-end').value || '06:30',
-    closedDays,
-  }});
-
-  closeModal('settings-modal');
-  renderCalendar();
-  renderTopbarStatus();
+  // Silent schedule — any change saves all restrictions
+  const saveSilent = () => {
+    const closedDays = []; qa('.sched-closed-day:checked').forEach(cb => closedDays.push(parseInt(cb.value)));
+    autoSave('schedulingRestrictions', { enabled: true, silentStart: q('setting-silent-start')?.value || '21:00', silentEnd: q('setting-silent-end')?.value || '06:30', closedDays });
+  };
+  q('setting-silent-start')?.addEventListener('change', saveSilent);
+  q('setting-silent-end')?.addEventListener('change', saveSilent);
+  qa('.sched-closed-day').forEach(cb => cb.addEventListener('change', saveSilent));
 }
 
 // =============================================================================
@@ -3216,7 +3212,7 @@ function setupListeners() {
   document.getElementById('btn-cancel-closure').addEventListener('click', resetClosureForm);
   document.getElementById('btn-printer-status').addEventListener('click', toggleStatusPanel);
   document.getElementById('btn-settings').addEventListener('click', openSettingsModal);
-  document.getElementById('btn-save-settings').addEventListener('click', saveSettings);
+  setupSettingsAutoSave();
 
   // Settings tab switching
   document.getElementById('planner-settings-tabs')?.addEventListener('click', e => {
