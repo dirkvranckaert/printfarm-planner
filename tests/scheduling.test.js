@@ -167,6 +167,37 @@ describe('findNextValidStart', () => {
     expect(result.toISOString()).toBe('2026-04-13T10:20:00.000Z');
   });
 
+  // Regression: production job rows contain two string formats side-by-side:
+  //   - proper ISO with Z suffix ('2026-04-13T04:30:00.000Z')
+  //   - naked datetime-local without TZ ('2026-04-13T06:30')
+  // On a UTC server, the naked form used to be parsed as UTC, which shifted
+  // Brussels-local jobs 2h later and made the overlap check miss them entirely.
+  // Naked strings must be interpreted in the configured timezone.
+  test('REGRESSION: naked datetime-local strings on jobs are parsed in the configured TZ', () => {
+    // 06:30 Brussels, stored naked. Scheduler must treat this as 04:30Z.
+    const jobs = [{ start: '2026-04-13T06:30', end: '2026-04-13T14:13' }];
+    // Candidate is also 06:30 Brussels (04:30Z) — should detect overlap and advance.
+    const cand = utc('2026-04-13T04:30:00Z');
+    const result = findNextValidStart(cand, 30, restr, [], jobs, warmUp, coolDown);
+    // Must land AFTER the existing job ends at 14:13 Brussels (12:13Z) + 15m cool + 5m warm = 12:33Z
+    expect(result.getTime()).toBeGreaterThanOrEqual(Date.parse('2026-04-13T12:33:00Z'));
+  });
+
+  // Regression: the exact production state from the pm2 logs.
+  test('REGRESSION: Henriegga/Sleutelhanger production scenario — Groen does not land on Henriegga Body', () => {
+    const jobs = [
+      { start: '2026-04-13T06:30', end: '2026-04-13T14:13' },  // Henriegga Body, naked format
+      { start: '2026-04-13T14:33', end: '2026-04-13T15:22' },  // Henriegga Legs, naked format
+    ];
+    // "First available" at 22:55 Brussels → advances to 06:30 Brussels (04:30Z).
+    const cand = utc('2026-04-12T20:55:00Z');
+    const result = findNextValidStart(cand, 30, restr, [], jobs, warmUp, coolDown);
+    // Must NOT land at 04:30Z (06:30 Brussels) — that would overlap Henriegga Body.
+    expect(result.toISOString()).not.toBe('2026-04-13T04:30:00.000Z');
+    // Must land after Henriegga Legs ends (15:22 Brussels = 13:22Z) + 20m buffer.
+    expect(result.getTime()).toBeGreaterThanOrEqual(Date.parse('2026-04-13T13:42:00Z'));
+  });
+
   test('closure blocks candidate and advances to day after closure end at silent-end', () => {
     const cand = utc('2026-04-13T08:00:00Z'); // Mon 10:00 Brussels
     const closures = [{ startDate: '2026-04-13', endDate: '2026-04-14' }];

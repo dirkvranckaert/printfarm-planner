@@ -45,6 +45,21 @@ function isInSilentHours(date, silentStart, silentEnd, tz) {
   return mins >= start || mins < end; // e.g. 21:00–06:30 (overnight)
 }
 
+// Parse a stored job timestamp. Handles two formats:
+//   - proper ISO with a Z / ±HH:MM suffix → new Date() as-is
+//   - naked 'YYYY-MM-DDTHH:mm[:ss]' without TZ → interpreted in the configured zone
+// The second form exists in production because some job-write paths stored
+// datetime-local values verbatim. On a UTC server, new Date('2026-04-13T06:30')
+// resolves to 06:30 UTC, which is 2h off from the 06:30 Brussels the user meant.
+function parseJobTime(s, tz) {
+  if (!s) return null;
+  // Already has explicit timezone info?
+  if (/[zZ]$|[+-]\d{2}:?\d{2}$/.test(s)) return new Date(s);
+  const m = /^(\d{4})-(\d{2})-(\d{2})T(\d{2}):(\d{2})(?::(\d{2}))?/.exec(s);
+  if (!m) return new Date(s); // best-effort fallback
+  return zonedTimeToDate(+m[1], +m[2], +m[3], +m[4], +m[5], tz);
+}
+
 function advanceToSilentEnd(date, silentEnd, tz) {
   const [h, m] = (silentEnd || '06:30').split(':').map(Number);
   const p = getZoneParts(date, tz);
@@ -112,10 +127,13 @@ function findNextValidStart(candidate, durationMins, restr, closures, jobs, warm
     let hitJob = false;
     for (const j of jobs || []) {
       if (!j.start) continue;
-      const jStart = new Date(j.start).getTime() - warmUpMs;
-      const jEnd = new Date(j.end).getTime() + coolDownMs;
+      const jStartDate = parseJobTime(j.start, tz);
+      const jEndDate = parseJobTime(j.end, tz);
+      if (!jStartDate || !jEndDate) continue;
+      const jStart = jStartDate.getTime() - warmUpMs;
+      const jEnd = jEndDate.getTime() + coolDownMs;
       if (myStart < jEnd && myEnd > jStart) {
-        current = new Date(new Date(j.end).getTime() + coolDownMs + warmUpMs);
+        current = new Date(jEndDate.getTime() + coolDownMs + warmUpMs);
         hitJob = true;
         break;
       }
@@ -134,6 +152,7 @@ module.exports = {
   getZoneParts,
   tzOffset,
   zonedTimeToDate,
+  parseJobTime,
   isInSilentHours,
   advanceToSilentEnd,
   findNextValidStart,

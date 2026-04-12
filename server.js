@@ -354,27 +354,33 @@ app.get('/api/jobs/:id', (req, res) => {
 app.post('/api/jobs', (req, res) => {
   const { printerId, name, customerName, orderNr, start, end, status, colors, printFile, remarks, queued, durationMins, bedType } = req.body;
   const isQueued = queued ? 1 : 0;
+  const normStart = isQueued ? '' : (normalizeJobTime(start) ?? '');
+  const normEnd = isQueued ? '' : (normalizeJobTime(end) ?? '');
   const result = db.prepare(
     'INSERT INTO jobs (printerId, name, customerName, orderNr, start, end, status, colors, printFile, remarks, queued, durationMins, bedType) VALUES (?,?,?,?,?,?,?,?,?,?,?,?,?)'
-  ).run(printerId, name, customerName, orderNr, isQueued ? '' : (start ?? ''), isQueued ? '' : (end ?? ''), status ?? 'Planned', colors, printFile, remarks, isQueued, durationMins ?? 0, bedType ?? null);
-  res.status(201).json({ id: result.lastInsertRowid, ...req.body, queued: isQueued });
+  ).run(printerId, name, customerName, orderNr, normStart, normEnd, status ?? 'Planned', colors, printFile, remarks, isQueued, durationMins ?? 0, bedType ?? null);
+  res.status(201).json({ id: result.lastInsertRowid, ...req.body, start: normStart, end: normEnd, queued: isQueued });
 });
 app.put('/api/jobs/:id', (req, res) => {
   const { printerId, name, customerName, orderNr, start, end, status, colors, printFile, remarks, queued, durationMins, bedType } = req.body;
   const isQueued = queued ? 1 : 0;
+  const normStart = isQueued ? '' : (normalizeJobTime(start) ?? '');
+  const normEnd = isQueued ? '' : (normalizeJobTime(end) ?? '');
   db.prepare(
     'UPDATE jobs SET printerId=?, name=?, customerName=?, orderNr=?, start=?, end=?, status=?, colors=?, printFile=?, remarks=?, queued=?, durationMins=?, bedType=? WHERE id=?'
-  ).run(printerId, name, customerName, orderNr, isQueued ? '' : (start ?? ''), isQueued ? '' : (end ?? ''), status, colors, printFile, remarks, isQueued, durationMins ?? 0, bedType ?? null, req.params.id);
-  res.json({ id: Number(req.params.id), ...req.body, queued: isQueued });
+  ).run(printerId, name, customerName, orderNr, normStart, normEnd, status, colors, printFile, remarks, isQueued, durationMins ?? 0, bedType ?? null, req.params.id);
+  res.json({ id: Number(req.params.id), ...req.body, start: normStart, end: normEnd, queued: isQueued });
 });
 app.patch('/api/jobs/:id', (req, res) => {
   const allowed = ['printerId', 'name', 'customerName', 'orderNr', 'start', 'end', 'status', 'colors', 'printFile', 'remarks', 'queued', 'durationMins', 'linked_printer_id', 'bedType'];
-  const fields = Object.entries(req.body).filter(([k]) => allowed.includes(k));
+  const fields = Object.entries(req.body)
+    .filter(([k]) => allowed.includes(k))
+    .map(([k, v]) => (k === 'start' || k === 'end') && v ? [k, normalizeJobTime(v)] : [k, v]);
   if (!fields.length) return res.status(400).json({ error: 'no valid fields' });
   const setClauses = fields.map(([k]) => `${k}=?`).join(', ');
   const values = [...fields.map(([, v]) => v), req.params.id];
   db.prepare(`UPDATE jobs SET ${setClauses} WHERE id=?`).run(...values);
-  res.json({ id: Number(req.params.id), ...req.body });
+  res.json({ id: Number(req.params.id), ...req.body, ...Object.fromEntries(fields) });
 });
 app.delete('/api/jobs/:id', (req, res) => {
   // Clean up uploaded files
@@ -480,7 +486,17 @@ app.post('/api/import', (req, res) => {
 /*  Smart scheduling: findNextValidStart                               */
 /* ------------------------------------------------------------------ */
 const scheduling = require('./scheduling');
-const { DEFAULT_TZ, zonedTimeToDate } = scheduling;
+const { DEFAULT_TZ, zonedTimeToDate, parseJobTime } = scheduling;
+
+// Normalize a job's start/end to a proper ISO string with Z suffix.
+// Client sends datetime-local ('YYYY-MM-DDTHH:mm') which would otherwise be
+// stored naked and misinterpreted on the server side.
+function normalizeJobTime(s) {
+  if (!s) return s;
+  const tz = getSchedulingRestrictions().timezone || DEFAULT_TZ;
+  const d = parseJobTime(s, tz);
+  return d ? d.toISOString() : s;
+}
 
 function getSchedulingRestrictions() {
   const row = db.prepare("SELECT value FROM settings WHERE key='schedulingRestrictions'").get();
@@ -503,6 +519,25 @@ function findNextValidStart(candidate, durationMins, printerId) {
     : [];
   return scheduling.findNextValidStart(candidate, durationMins, restr, closures, jobs, warmUpMs, coolDownMs);
 }
+
+// One-shot migration: normalize any naked 'YYYY-MM-DDTHH:mm' job timestamps
+// to proper ISO strings (interpreted in the configured timezone). Idempotent —
+// rows already in ISO form are left alone.
+(function migrateJobTimestamps() {
+  const tz = getSchedulingRestrictions().timezone || DEFAULT_TZ;
+  const rows = db.prepare("SELECT id, start, end FROM jobs WHERE start!='' AND (start NOT LIKE '%Z' AND start NOT GLOB '*[+-][0-9][0-9]:[0-9][0-9]')").all();
+  if (!rows.length) return;
+  const upd = db.prepare('UPDATE jobs SET start=?, end=? WHERE id=?');
+  const tx = db.transaction((items) => {
+    for (const r of items) {
+      const s = parseJobTime(r.start, tz);
+      const e = parseJobTime(r.end, tz);
+      if (s && e) upd.run(s.toISOString(), e.toISOString(), r.id);
+    }
+  });
+  tx(rows);
+  console.log(`[migration] normalized ${rows.length} job timestamp(s) to ISO format`);
+})();
 
 app.post('/api/find-slot', (req, res) => {
   const { printerId, durationMins } = req.body || {};
