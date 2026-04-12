@@ -509,16 +509,19 @@ function getZoneParts(date, tz) {
   return { year: +p.year, month: +p.month, day: +p.day, hour: +p.hour, minute: +p.minute, second: +p.second, weekday: wd };
 }
 
-// Convert wall-clock time in a given timezone to a UTC Date. DST-safe (two-pass).
+// Offset (ms) of `tz` at the given instant: positive east of UTC.
+function tzOffset(utcMs, tz) {
+  const p = getZoneParts(new Date(utcMs), tz);
+  return Date.UTC(p.year, p.month - 1, p.day, p.hour, p.minute, p.second) - utcMs;
+}
+
+// Convert wall-clock time in a given timezone to a UTC Date. DST-safe.
 function zonedTimeToDate(y, mo, d, h, mi, tz) {
-  let utc = Date.UTC(y, mo - 1, d, h, mi, 0);
-  for (let i = 0; i < 2; i++) {
-    const p = getZoneParts(new Date(utc), tz);
-    const asUTC = Date.UTC(p.year, p.month - 1, p.day, p.hour, p.minute, p.second);
-    const offset = asUTC - utc;
-    if (offset === 0) break;
-    utc -= offset;
-  }
+  const guess = Date.UTC(y, mo - 1, d, h, mi, 0);
+  const offset1 = tzOffset(guess, tz);
+  let utc = guess - offset1;
+  const offset2 = tzOffset(utc, tz);
+  if (offset2 !== offset1) utc = guess - offset2;
   return new Date(utc);
 }
 
