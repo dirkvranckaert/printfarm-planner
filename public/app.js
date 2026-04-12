@@ -2760,6 +2760,20 @@ async function openSettingsModal() {
   // Load scheduling restrictions
   const schedRestr = await api('GET', '/api/settings/schedulingRestrictions');
   const sr = schedRestr?.value || {};
+  const tzSel = document.getElementById('setting-timezone');
+  if (tzSel && !tzSel.options.length) {
+    let zones;
+    try { zones = Intl.supportedValuesOf('timeZone'); } catch { zones = null; }
+    if (!zones || !zones.length) {
+      zones = ['UTC','Europe/Brussels','Europe/Amsterdam','Europe/Paris','Europe/Berlin','Europe/London','Europe/Madrid','America/New_York','America/Los_Angeles','Asia/Tokyo'];
+    }
+    for (const z of zones) {
+      const opt = document.createElement('option');
+      opt.value = z; opt.textContent = z;
+      tzSel.appendChild(opt);
+    }
+  }
+  if (tzSel) tzSel.value = sr.timezone || 'Europe/Brussels';
   document.getElementById('setting-silent-start').value = sr.silentStart || '21:00';
   document.getElementById('setting-silent-end').value = sr.silentEnd || '06:30';
   document.querySelectorAll('.sched-closed-day').forEach(cb => {
@@ -2906,8 +2920,15 @@ function setupSettingsAutoSave() {
   // Silent schedule — any change saves all restrictions
   const saveSilent = () => {
     const closedDays = []; qa('.sched-closed-day:checked').forEach(cb => closedDays.push(parseInt(cb.value)));
-    autoSave('schedulingRestrictions', { enabled: true, silentStart: q('setting-silent-start')?.value || '21:00', silentEnd: q('setting-silent-end')?.value || '06:30', closedDays });
+    autoSave('schedulingRestrictions', {
+      enabled: true,
+      timezone: q('setting-timezone')?.value || 'Europe/Brussels',
+      silentStart: q('setting-silent-start')?.value || '21:00',
+      silentEnd: q('setting-silent-end')?.value || '06:30',
+      closedDays,
+    });
   };
+  q('setting-timezone')?.addEventListener('change', saveSilent);
   q('setting-silent-start')?.addEventListener('change', saveSilent);
   q('setting-silent-end')?.addEventListener('change', saveSilent);
   qa('.sched-closed-day').forEach(cb => cb.addEventListener('change', saveSilent));

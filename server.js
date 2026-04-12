@@ -479,10 +479,16 @@ app.post('/api/import', (req, res) => {
 /* ------------------------------------------------------------------ */
 /*  Smart scheduling: findNextValidStart                               */
 /* ------------------------------------------------------------------ */
+const DEFAULT_TZ = 'Europe/Brussels';
+
 function getSchedulingRestrictions() {
   const row = db.prepare("SELECT value FROM settings WHERE key='schedulingRestrictions'").get();
-  if (!row) return { enabled: false, silentStart: '21:00', silentEnd: '06:30', closedDays: [] };
-  try { return JSON.parse(row.value); } catch { return { enabled: false }; }
+  if (!row) return { enabled: false, silentStart: '21:00', silentEnd: '06:30', closedDays: [], timezone: DEFAULT_TZ };
+  try {
+    const v = JSON.parse(row.value);
+    if (!v.timezone) v.timezone = DEFAULT_TZ;
+    return v;
+  } catch { return { enabled: false, timezone: DEFAULT_TZ }; }
 }
 
 function timeToMinutes(timeStr) {
@@ -490,24 +496,52 @@ function timeToMinutes(timeStr) {
   return h * 60 + (m || 0);
 }
 
-function isInSilentHours(date, silentStart, silentEnd) {
-  const mins = date.getHours() * 60 + date.getMinutes();
+// Wall-clock parts of `date` in the given IANA timezone.
+function getZoneParts(date, tz) {
+  const dtf = new Intl.DateTimeFormat('en-GB', {
+    timeZone: tz, hourCycle: 'h23',
+    year: 'numeric', month: '2-digit', day: '2-digit',
+    hour: '2-digit', minute: '2-digit', second: '2-digit', weekday: 'short'
+  });
+  const p = {};
+  for (const { type, value } of dtf.formatToParts(date)) p[type] = value;
+  const wd = { Sun: 0, Mon: 1, Tue: 2, Wed: 3, Thu: 4, Fri: 5, Sat: 6 }[p.weekday];
+  return { year: +p.year, month: +p.month, day: +p.day, hour: +p.hour, minute: +p.minute, second: +p.second, weekday: wd };
+}
+
+// Convert wall-clock time in a given timezone to a UTC Date. DST-safe (two-pass).
+function zonedTimeToDate(y, mo, d, h, mi, tz) {
+  let utc = Date.UTC(y, mo - 1, d, h, mi, 0);
+  for (let i = 0; i < 2; i++) {
+    const p = getZoneParts(new Date(utc), tz);
+    const asUTC = Date.UTC(p.year, p.month - 1, p.day, p.hour, p.minute, p.second);
+    const offset = asUTC - utc;
+    if (offset === 0) break;
+    utc -= offset;
+  }
+  return new Date(utc);
+}
+
+function isInSilentHours(date, silentStart, silentEnd, tz) {
+  const p = getZoneParts(date, tz);
+  const mins = p.hour * 60 + p.minute;
   const start = timeToMinutes(silentStart);
   const end = timeToMinutes(silentEnd);
   if (start < end) return mins >= start && mins < end; // e.g. 09:00–17:00
   return mins >= start || mins < end; // e.g. 21:00–06:30 (overnight)
 }
 
-function advanceToSilentEnd(date, silentEnd) {
+function advanceToSilentEnd(date, silentEnd, tz) {
   const [h, m] = (silentEnd || '06:30').split(':').map(Number);
-  const result = new Date(date);
-  result.setHours(h, m || 0, 0, 0);
-  if (result <= date) result.setDate(result.getDate() + 1);
+  const p = getZoneParts(date, tz);
+  let result = zonedTimeToDate(p.year, p.month, p.day, h, m || 0, tz);
+  if (result <= date) result = zonedTimeToDate(p.year, p.month, p.day + 1, h, m || 0, tz);
   return result;
 }
 
 function findNextValidStart(candidate, durationMins, printerId) {
   const restr = getSchedulingRestrictions();
+  const tz = restr.timezone || DEFAULT_TZ;
   const printer = printerId ? db.prepare('SELECT warm_up_mins, cool_down_mins FROM printers WHERE id=?').get(printerId) : null;
   const warmUp = (printer?.warm_up_mins ?? 5) * 60000;
   const coolDown = (printer?.cool_down_mins ?? 15) * 60000;
@@ -526,34 +560,34 @@ function findNextValidStart(candidate, durationMins, printerId) {
   const MAX_ITER = 500; // safety limit
 
   while (iterations++ < MAX_ITER) {
-    // 1. Advance past closed days
+    // 1. Advance past closed days (in the configured timezone)
     if (restr.closedDays?.length) {
       let dayChecks = 0;
-      while (restr.closedDays.includes(current.getDay()) && dayChecks++ < 8) {
-        current.setDate(current.getDate() + 1);
+      while (restr.closedDays.includes(getZoneParts(current, tz).weekday) && dayChecks++ < 8) {
+        const p = getZoneParts(current, tz);
         const [h, m] = (restr.silentEnd || '06:30').split(':').map(Number);
-        current.setHours(h, m || 0, 0, 0);
+        current = zonedTimeToDate(p.year, p.month, p.day + 1, h, m || 0, tz);
       }
     }
 
     // 2. Advance past silent hours
     if (restr.silentStart && restr.silentEnd) {
-      if (isInSilentHours(current, restr.silentStart, restr.silentEnd)) {
-        current = advanceToSilentEnd(current, restr.silentEnd);
+      if (isInSilentHours(current, restr.silentStart, restr.silentEnd, tz)) {
+        current = advanceToSilentEnd(current, restr.silentEnd, tz);
         continue; // re-check closed days
       }
     }
 
-    // 3. Check closures
+    // 3. Check closures (dates stored as YYYY-MM-DD, interpreted in the configured timezone)
     let hitClosure = false;
     for (const cl of closures) {
-      const clStart = new Date(cl.startDate + 'T00:00:00');
-      const clEnd = new Date(cl.endDate + 'T23:59:59');
+      const [sy, sm, sd] = cl.startDate.split('-').map(Number);
+      const [ey, em, ed] = cl.endDate.split('-').map(Number);
+      const clStart = zonedTimeToDate(sy, sm, sd, 0, 0, tz);
+      const clEnd = zonedTimeToDate(ey, em, ed, 23, 59, tz);
       if (current >= clStart && current <= clEnd) {
-        current = new Date(clEnd.getTime() + 1000);
         const [h, m] = (restr.silentEnd || '06:30').split(':').map(Number);
-        current.setHours(h, m || 0, 0, 0);
-        if (current <= clEnd) current.setDate(current.getDate() + 1);
+        current = zonedTimeToDate(ey, em, ed + 1, h, m || 0, tz);
         hitClosure = true;
         break;
       }
@@ -632,9 +666,17 @@ app.post('/api/import-3mf-schedule', express.raw({ type: '*/*', limit: '500mb' }
     }
 
     // Schedule jobs sequentially, respecting silent hours/closed days/overlaps
-    let currentStart = isFirstAvailable
-      ? new Date()
-      : (startISO ? new Date(startISO) : new Date(`${startDate}T${startTime || '08:00'}:00`));
+    const importTz = getSchedulingRestrictions().timezone || DEFAULT_TZ;
+    let currentStart;
+    if (isFirstAvailable) {
+      currentStart = new Date();
+    } else if (startISO) {
+      currentStart = new Date(startISO);
+    } else {
+      const [dy, dmo, dda] = startDate.split('-').map(Number);
+      const [sh, smi] = (startTime || '08:00').split(':').map(Number);
+      currentStart = zonedTimeToDate(dy, dmo, dda, sh, smi || 0, importTz);
+    }
     const createdJobs = [];
 
     for (const pl of plates) {
