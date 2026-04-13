@@ -1023,6 +1023,11 @@ async function renderDay() {
   const container = document.getElementById('calendar-container');
   if (!printers.length) { renderEmpty(container); return; }
 
+  // Preserve scroll position across re-renders (SSE updates, job edits,
+  // realign ticks) so the user's scroll doesn't jump when the day view
+  // rebuilds. Overridden by pendingScrollToNow below.
+  const prevScrollTop = document.getElementById('day-scroll')?.scrollTop ?? 0;
+
   const dayS = new Date(navDate); dayS.setHours(0,0,0,0);
   const allJobs      = await api('GET', '/api/jobs');
   const scheduledJobs = allJobs.filter(j => !j.queued);
@@ -1164,6 +1169,15 @@ async function renderDay() {
   h += '</div>'; // .day-view
 
   container.innerHTML = h;
+
+  // Restore the previous scroll position so SSE re-renders don't reset
+  // the user's scroll. If an explicit centre-on-now is pending (Today
+  // button, first load, etc.) the rAF scrollToNow at the end of this
+  // function will override this.
+  if (!pendingScrollToNow && prevScrollTop) {
+    const newScroll = document.getElementById('day-scroll');
+    if (newScroll) newScroll.scrollTop = prevScrollTop;
+  }
 
   // Now-line
   if (sameDay(new Date(), navDate)) {
