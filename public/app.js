@@ -3010,6 +3010,7 @@ function setupSettingsAutoSave() {
   ['push-notify-done', 'push-notify-started', 'push-notify-upcoming', 'push-notify-paused'].forEach(id => {
     q(id)?.addEventListener('change', function() { autoSave('push.notify.' + id.replace('push-notify-', ''), this.checked); });
   });
+  q('btn-test-sound')?.addEventListener('click', playNotificationBell);
 
   // Silent schedule — any change saves all restrictions
   const saveSilent = () => {
