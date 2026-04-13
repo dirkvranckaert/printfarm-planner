@@ -1023,11 +1023,6 @@ async function renderDay() {
   const container = document.getElementById('calendar-container');
   if (!printers.length) { renderEmpty(container); return; }
 
-  // Preserve scroll position across re-renders (SSE updates, job edits,
-  // realign ticks) so the user's scroll doesn't jump when the day view
-  // rebuilds. Overridden by pendingScrollToNow below.
-  const prevScrollTop = document.getElementById('day-scroll')?.scrollTop ?? 0;
-
   const dayS = new Date(navDate); dayS.setHours(0,0,0,0);
   const allJobs      = await api('GET', '/api/jobs');
   const scheduledJobs = allJobs.filter(j => !j.queued);
@@ -1167,6 +1162,11 @@ async function renderDay() {
   h += '</div>'; // .day-view-body
   h += '</div>'; // .day-view-scroll
   h += '</div>'; // .day-view
+
+  // Capture scroll RIGHT before replacing innerHTML — any earlier render's
+  // scrollToNow may have applied a centred position during our /api/jobs
+  // await, and we want to preserve whatever the user's currently looking at.
+  const prevScrollTop = document.getElementById('day-scroll')?.scrollTop ?? 0;
 
   container.innerHTML = h;
 
