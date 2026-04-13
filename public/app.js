@@ -313,6 +313,7 @@ let pushSubscribed = false;
 
 let mobilePrinterIdx = 0;       // currently selected printer index in mobile day view
 let isTouchDevice = false;      // set on first touch event
+let pendingScrollToNow = false; // when true, the next renderDay centres on now
 
 let sseSource = null;            // EventSource for live printer status
 let sseRetryTimer = null;        // setTimeout handle for SSE reconnect
@@ -416,12 +417,12 @@ async function init() {
   // Connect to live Bambu printer status stream
   connectSSE();
 
+  if (view === 'day') pendingScrollToNow = true;
   renderCalendar();
   renderTopbarStatus();
   setupListeners();
   setInterval(() => { updateNowLine(); renderTopbarStatus(); }, 60_000);
   if (printers.length === 0) openPrintersModal();
-  else if (view === 'day') setTimeout(scrollToNow, 80);
 
   // If the user landed here via a notification click (#printer/5 or #job/42),
   // deep-link into the right view after the first render has settled.
@@ -1557,6 +1558,13 @@ function attachDayEvents() {
   // Apply mobile single-column mode
   applyMobilePrinterFilter();
   attachMobileDayViewSwipe();
+
+  // Auto-centre the now-line if requested (Today button, view switch,
+  // first load). Deferred to the next frame so layout is stable.
+  if (pendingScrollToNow) {
+    pendingScrollToNow = false;
+    requestAnimationFrame(() => requestAnimationFrame(scrollToNow));
+  }
 }
 
 // Auto-centre the current hour in the day view — but only when the user is
@@ -1801,8 +1809,8 @@ async function renderMonth() {
       if (e.target.closest('.month-job-chip')) return;
       navDate = new Date(cell.dataset.date + 'T00:00:00');
       view    = 'day';
+      pendingScrollToNow = true;
       renderCalendar();
-      setTimeout(scrollToNow, 80);
     });
   });
 }
@@ -1888,8 +1896,8 @@ async function renderUpcoming() {
     el.addEventListener('click', () => {
       navDate = new Date(el.dataset.date + 'T00:00:00');
       view = 'day';
+      pendingScrollToNow = true;
       renderCalendar();
-      setTimeout(scrollToNow, 80);
     });
   });
 }
@@ -3472,15 +3480,15 @@ function setupListeners() {
   document.getElementById('btn-next').addEventListener('click',  () => navigate(+1));
   document.getElementById('btn-today').addEventListener('click', () => {
     navDate = todayMidnight();
+    if (view === 'day') pendingScrollToNow = true;
     renderCalendar();
-    if (view === 'day') setTimeout(scrollToNow, 80);
   });
 
   ['day','week','month','upcoming'].forEach(v => {
     document.getElementById(`btn-${v}`).addEventListener('click', () => {
       view = v;
+      if (v === 'day') pendingScrollToNow = true;
       renderCalendar();
-      if (v === 'day') setTimeout(scrollToNow, 80);
     });
   });
 
