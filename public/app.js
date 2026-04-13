@@ -339,8 +339,16 @@ function connectSSE() {
     try {
       const updates = JSON.parse(e.data);
       if (updates.jobsUpdated) { renderCalendar(); return; }
+      // Detect stage transitions so the calendar can refresh its paused/running
+      // highlights on linked jobs even when no schedule change happened.
+      let stageChanged = false;
+      for (const [key, next] of Object.entries(updates)) {
+        const prev = printerStatus[key];
+        if (prev?.stage !== next?.stage) stageChanged = true;
+      }
       Object.assign(printerStatus, updates);
       renderTopbarStatus();
+      if (stageChanged) renderCalendar();
     } catch (_) {}
   };
 
@@ -375,6 +383,11 @@ async function init() {
   // Register service worker for push notifications
   if ('serviceWorker' in navigator) {
     navigator.serviceWorker.register('/sw.js').catch(() => {});
+    // When the SW receives a push, it pings open tabs so we can play a bell.
+    // (The SW itself can't play audio directly.)
+    navigator.serviceWorker.addEventListener('message', e => {
+      if (e.data?.type === 'play-sound') playNotificationBell();
+    });
   }
 
   // Apply saved theme before first render
@@ -582,6 +595,34 @@ function renderColorSwatches(colorsStr) {
       return `<span class="color-dot-wrap">${extLabel}<span class="color-dot" style="background:${escHtml(c.color)}" title="${escHtml(title)}"></span></span>`;
     }).join('')}</span>`;
   } catch { return escHtml(colorsStr); }
+}
+
+// Play a short two-tone chime via WebAudio. Called when the service worker
+// notifies us of an incoming push so notifications are audible even when
+// the OS mutes web-push sounds. Only works if the user has interacted with
+// the page since load (AudioContext autoplay restriction).
+function playNotificationBell() {
+  try {
+    const Ctx = window.AudioContext || window.webkitAudioContext;
+    if (!Ctx) return;
+    if (!window._audioCtx) window._audioCtx = new Ctx();
+    const ctx = window._audioCtx;
+    if (ctx.state === 'suspended') ctx.resume();
+    const now = ctx.currentTime;
+    [880, 1175].forEach((freq, i) => {
+      const osc  = ctx.createOscillator();
+      const gain = ctx.createGain();
+      osc.type = 'sine';
+      osc.frequency.value = freq;
+      osc.connect(gain).connect(ctx.destination);
+      const t0 = now + i * 0.12;
+      gain.gain.setValueAtTime(0, t0);
+      gain.gain.linearRampToValueAtTime(0.25, t0 + 0.02);
+      gain.gain.exponentialRampToValueAtTime(0.001, t0 + 0.6);
+      osc.start(t0);
+      osc.stop(t0 + 0.6);
+    });
+  } catch { /* ignore */ }
 }
 
 function parseColorsField(val) {
@@ -1061,6 +1102,10 @@ async function renderDay() {
       const isConflict = conflictIds.has(job.id);
       const conflictCls  = isConflict ? ' job-conflict' : '';
       const conflictIcon = isConflict ? '<span class="job-conflict-icon" title="Scheduling conflict">⚠</span>' : '';
+      // Highlight the linked job if its printer is currently paused.
+      const isPaused   = !!job.linked_printer_id && getPrinterLiveStatus(p)?.stage === 'PAUSE';
+      const pausedCls  = isPaused ? ' job-paused' : '';
+      const pausedIcon = isPaused ? '<span class="job-paused-icon" title="Printer paused">⏸</span>' : '';
 
       const bgAlpha  = isDarkMode() ? 0.5 : 0.15;
       const warmUp   = p.warm_up_mins   ?? 0;
@@ -1075,14 +1120,15 @@ async function renderDay() {
         }
       }
 
-      h += `<div class="job-block${conflictCls}" data-job-id="${job.id}"
+      h += `<div class="job-block${conflictCls}${pausedCls}" data-job-id="${job.id}"
               data-job-start="${job.start}" data-job-end="${job.end}"
               style="top:${topPx}px; height:${htPx}px;
                      background:${hexRgba(p.color, bgAlpha)};
-                     border-left-color:${isConflict ? '#e53e3e' : p.color};
+                     border-left-color:${isConflict ? '#e53e3e' : isPaused ? '#f59e0b' : p.color};
                      color:var(--text)">
               <div style="display:flex;align-items:center;gap:4px;overflow:hidden">
                 ${conflictIcon}
+                ${pausedIcon}
                 <span class="job-block-name" style="flex-shrink:1;min-width:0;overflow:hidden;text-overflow:ellipsis;white-space:nowrap">${job.orderNr ? `#${escHtml(job.orderNr)} — ` : ''}${escHtml(job.name)}</span>
                 ${job.colors ? renderColorSwatches(job.colors) : ''}
                 ${job.linked_printer_id ? '<span title="Linked to printer">🔗</span>' : ''}
@@ -2795,12 +2841,15 @@ async function openSettingsModal() {
   const pnd = await api('GET', '/api/settings/push.notify.done').catch(() => null);
   const pns = await api('GET', '/api/settings/push.notify.started').catch(() => null);
   const pnu = await api('GET', '/api/settings/push.notify.upcoming').catch(() => null);
+  const pnp = await api('GET', '/api/settings/push.notify.paused').catch(() => null);
   const cbDone     = document.getElementById('push-notify-done');
   const cbStarted  = document.getElementById('push-notify-started');
   const cbUpcoming = document.getElementById('push-notify-upcoming');
+  const cbPaused   = document.getElementById('push-notify-paused');
   if (cbDone)     cbDone.checked     = pnd?.value !== false;
   if (cbStarted)  cbStarted.checked  = pns?.value !== false;
   if (cbUpcoming) cbUpcoming.checked = pnu?.value !== false;
+  if (cbPaused)   cbPaused.checked   = pnp?.value !== false;
 
   // Load scheduling restrictions
   const schedRestr = await api('GET', '/api/settings/schedulingRestrictions');
@@ -2958,7 +3007,7 @@ function setupSettingsAutoSave() {
   }));
 
   // Push notifications
-  ['push-notify-done', 'push-notify-started', 'push-notify-upcoming'].forEach(id => {
+  ['push-notify-done', 'push-notify-started', 'push-notify-upcoming', 'push-notify-paused'].forEach(id => {
     q(id)?.addEventListener('change', function() { autoSave('push.notify.' + id.replace('push-notify-', ''), this.checked); });
   });
 

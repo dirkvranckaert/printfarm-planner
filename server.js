@@ -178,7 +178,7 @@ brands.onUpdate((brandKey, status) => {
         if (push.isEnabled('paused')) {
           let body = `Printer ${printer.name} PAUSED`;
           if (job.orderNr || job.name) body += ` — '${job.name || ''}${job.orderNr ? ` #${job.orderNr}` : ''}'`;
-          push.sendToAll({ title: 'PrintFarm', body, tag: `paused-${printer.id}` });
+          push.sendToAll({ title: 'PrintFarm', body, tag: `paused-${printer.id}`, requireInteraction: true });
         }
       }
     });
@@ -203,7 +203,7 @@ brands.onUpdate((brandKey, status) => {
           const body = status.job_name
             ? `Printer ${printer.name} PAUSED — ${status.job_name}`
             : `Printer ${printer.name} PAUSED`;
-          push.sendToAll({ title: 'PrintFarm', body, tag: `paused-${printer.id}` });
+          push.sendToAll({ title: 'PrintFarm', body, tag: `paused-${printer.id}`, requireInteraction: true });
         }
       }
     }
@@ -248,7 +248,14 @@ setInterval(() => {
     } else {
       body = `It's about time to start printing '${job.name}' on ${job.printerName}`;
     }
-    push.sendToAll({ title: 'PrintFarm', body, tag: `upcoming-${job.id}` });
+    const image = job.thumbFile ? `/api/uploads/${job.thumbFile}` : undefined;
+    push.sendToAll({
+      title: 'PrintFarm',
+      body,
+      tag: `upcoming-${job.id}`,
+      image,
+      requireInteraction: true, // upcoming jobs are actionable — keep on screen
+    });
     db.prepare('UPDATE jobs SET start_push_sent=1 WHERE id=?').run(job.id);
   }
 }, 60_000);

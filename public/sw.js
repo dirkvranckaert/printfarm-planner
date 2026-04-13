@@ -1,4 +1,4 @@
-const CACHE_NAME = 'printfarm-v1';
+const CACHE_NAME = 'printfarm-v2';
 const SHELL_URLS = ['/', '/index.html', '/style.css', '/app.js', '/favicon.svg', '/manifest.json'];
 
 // Cache app shell on install
@@ -49,16 +49,29 @@ self.addEventListener('fetch', event => {
 // Push notifications
 self.addEventListener('push', event => {
   const data = event.data?.json() ?? {};
-  event.waitUntil(
-    self.registration.showNotification(data.title || 'PrintFarm Planner', {
-      body: data.body || '',
-      icon: '/favicon.svg',
-      badge: '/favicon.svg',
-      tag: data.tag || 'printfarm',
-      renotify: true,
-      data: { url: data.url || '/' }
-    })
-  );
+  const options = {
+    body: data.body || '',
+    icon: data.icon || '/favicon.svg',
+    badge: data.badge || '/favicon.svg',
+    tag: data.tag || 'printfarm',
+    renotify: data.renotify !== false,
+    requireInteraction: !!data.requireInteraction,
+    silent: !!data.silent,
+    data: { url: data.url || '/' },
+  };
+  if (data.image) options.image = data.image;
+  if (Array.isArray(data.actions)) options.actions = data.actions;
+
+  event.waitUntil((async () => {
+    await self.registration.showNotification(data.title || 'PrintFarm Planner', options);
+    // Browsers won't let the SW play audio directly, but any open tab can.
+    // Tell every client to play a bell so the notification is audible even
+    // when the OS sound for web push is muted.
+    if (data.playSound !== false) {
+      const clients = await self.clients.matchAll({ type: 'window', includeUncontrolled: true });
+      for (const c of clients) c.postMessage({ type: 'play-sound', kind: data.soundKind || 'bell' });
+    }
+  })());
 });
 
 self.addEventListener('notificationclick', event => {
