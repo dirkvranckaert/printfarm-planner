@@ -530,7 +530,6 @@
       <button class="ctx-item" id="ctx-move-next-day">📅 Move to next day</button>
       <button class="ctx-item" id="ctx-move-printer">🖨 Move to another printer</button>
     </div>
-    <div class="ctx-separator"></div>
     <button class="ctx-item" id="ctx-push-now">⏩ Push back to now</button>
     <button class="ctx-item" id="ctx-push-to">⏩ Push back to…</button>
     <div class="ctx-separator"></div>
@@ -540,8 +539,8 @@
 
   <!-- Push-back modal -->
   <div id="pushback-modal" class="modal-overlay hidden">
-    <div class="modal-content" style="max-width:360px">
-      <h3 style="margin:0 0 12px">Push back to…</h3>
+    <div class="modal" style="width:380px;padding:20px">
+      <h3 style="margin:0 0 12px;font-size:16px;font-weight:700">Push back to…</h3>
       <p style="font-size:12px;color:var(--text-muted);margin:0 0 12px">
         Pushes this job and every subsequent Planned job on the same printer.
         Silent hours and pre/post-processing times are respected.
