@@ -102,6 +102,32 @@ push.init(db);
 
 // Track previous stage per brandKey for auto-transition logic
 const prevStage = new Map();
+// Throttle live realign so we don't thrash on every MQTT tick (Bambu sends updates every ~2s).
+const lastRealignAt = new Map(); // printerId → epoch ms
+const REALIGN_MIN_INTERVAL_MS = 60 * 1000;
+
+function broadcastJobsUpdated() {
+  sseClients.forEach(res => res.write(`data: ${JSON.stringify({ jobsUpdated: true })}\n\n`));
+}
+
+function tryRealign(printer, job, remainingMins, { snapStart = false } = {}) {
+  try {
+    const result = realignLinkedJob({
+      db, printer, job, remainingMins,
+      now: new Date(),
+      restr: getSchedulingRestrictions(),
+      snapStart,
+    });
+    if (result.changed) {
+      lastRealignAt.set(printer.id, Date.now());
+      broadcastJobsUpdated();
+    }
+    return result;
+  } catch (err) {
+    console.error('[realign] error:', err.message);
+    return { changed: false, updated: [] };
+  }
+}
 
 // Broadcast every live-status update to SSE clients.
 // brandKey is namespaced: "bambulab:01P00A123456789"
@@ -109,59 +135,93 @@ brands.onUpdate((brandKey, status) => {
   const data = `data: ${JSON.stringify({ [brandKey]: status })}\n\n`;
   sseClients.forEach(res => res.write(data));
 
+  const serial = brandKey.includes(':') ? brandKey.split(':')[1] : null;
+  if (!serial) { prevStage.set(brandKey, status.stage); return; }
+  const printer = db.prepare('SELECT * FROM printers WHERE bambu_serial=?').get(serial);
+  if (!printer) { prevStage.set(brandKey, status.stage); return; }
+
   const prev = prevStage.get(brandKey);
   const curr = status.stage;
+
+  // --- Stage-transition handling (runs only when stage changes) ---
   if (curr && curr !== prev) {
-    const serial = brandKey.includes(':') ? brandKey.split(':')[1] : null;
-    if (serial) {
-      const printer = db.prepare('SELECT id, name FROM printers WHERE bambu_serial=?').get(serial);
-      if (printer) {
-        const linked = db.prepare(
-          "SELECT * FROM jobs WHERE linked_printer_id=? AND status != 'Done'"
-        ).all(printer.id);
+    const linked = db.prepare(
+      "SELECT * FROM jobs WHERE linked_printer_id=? AND status != 'Done'"
+    ).all(printer.id);
 
-        linked.forEach(job => {
-          if (curr === 'RUNNING' && job.status !== 'Printing') {
-            db.prepare("UPDATE jobs SET status='Printing' WHERE id=?").run(job.id);
-            sseClients.forEach(res => res.write(`data: ${JSON.stringify({ jobsUpdated: true })}\n\n`));
-            // Push: started printing
-            if (push.isEnabled('started')) {
-              push.sendToAll({ title: 'PrintFarm', body: `Printer ${printer.name} has started printing`, tag: `started-${printer.id}` });
-            }
-          }
-          if ((curr === 'FINISH' || curr === 'IDLE') && prev === 'RUNNING' && job.status === 'Printing') {
-            db.prepare("UPDATE jobs SET status='Post Printing', linked_printer_id=NULL WHERE id=?").run(job.id);
-            sseClients.forEach(res => res.write(`data: ${JSON.stringify({ jobsUpdated: true })}\n\n`));
-            // Push: done printing (with job info)
-            if (push.isEnabled('done')) {
-              let body = `Printer ${printer.name} has done printing `;
-              if (job.orderNr) body += `order #${job.orderNr}: `;
-              body += `'${job.name}'`;
-              if (job.customerName) body += ` (${job.customerName})`;
-              push.sendToAll({ title: 'PrintFarm', body, tag: `done-${printer.id}` });
-            }
-          }
-        });
+    linked.forEach(job => {
+      if (curr === 'RUNNING' && job.status !== 'Printing') {
+        // First RUNNING tick after linking: mark as Printing and snap start/end
+        // to reflect the actual print start (may differ from scheduled start).
+        db.prepare("UPDATE jobs SET status='Printing' WHERE id=?").run(job.id);
+        const refreshed = db.prepare('SELECT * FROM jobs WHERE id=?').get(job.id);
+        tryRealign(printer, refreshed, status.remaining, { snapStart: true });
+        broadcastJobsUpdated();
+        if (push.isEnabled('started')) {
+          push.sendToAll({ title: 'PrintFarm', body: `Printer ${printer.name} has started printing`, tag: `started-${printer.id}` });
+        }
+      }
+      if ((curr === 'FINISH' || curr === 'IDLE') && prev === 'RUNNING' && job.status === 'Printing') {
+        db.prepare("UPDATE jobs SET status='Post Printing', linked_printer_id=NULL WHERE id=?").run(job.id);
+        broadcastJobsUpdated();
+        if (push.isEnabled('done')) {
+          let body = `Printer ${printer.name} has done printing `;
+          if (job.orderNr) body += `order #${job.orderNr}: `;
+          body += `'${job.name}'`;
+          if (job.customerName) body += ` (${job.customerName})`;
+          push.sendToAll({ title: 'PrintFarm', body, tag: `done-${printer.id}` });
+        }
+      }
+      if (curr === 'PAUSE' && prev === 'RUNNING') {
+        // Paused mid-print — alert the user. Don't touch the schedule while paused;
+        // the first RUNNING tick on resume will recompute normally.
+        if (push.isEnabled('paused')) {
+          let body = `Printer ${printer.name} PAUSED`;
+          if (job.orderNr || job.name) body += ` — '${job.name || ''}${job.orderNr ? ` #${job.orderNr}` : ''}'`;
+          push.sendToAll({ title: 'PrintFarm', body, tag: `paused-${printer.id}` });
+        }
+      }
+    });
 
-        // No linked job: push for stage transitions
-        if (linked.length === 0) {
-          if (curr === 'RUNNING' && prev !== 'RUNNING') {
-            if (push.isEnabled('started')) {
-              push.sendToAll({ title: 'PrintFarm', body: `Printer ${printer.name} has started printing`, tag: `started-${printer.id}` });
-            }
-          }
-          if ((curr === 'FINISH' || curr === 'IDLE') && prev === 'RUNNING') {
-            if (push.isEnabled('done')) {
-              const body = status.job_name
-                ? `Printer ${printer.name} is done printing ${status.job_name}`
-                : `Printer ${printer.name} has done printing`;
-              push.sendToAll({ title: 'PrintFarm', body, tag: `done-${printer.id}` });
-            }
-          }
+    // No linked job: push for stage transitions
+    if (linked.length === 0) {
+      if (curr === 'RUNNING' && prev !== 'RUNNING') {
+        if (push.isEnabled('started')) {
+          push.sendToAll({ title: 'PrintFarm', body: `Printer ${printer.name} has started printing`, tag: `started-${printer.id}` });
+        }
+      }
+      if ((curr === 'FINISH' || curr === 'IDLE') && prev === 'RUNNING') {
+        if (push.isEnabled('done')) {
+          const body = status.job_name
+            ? `Printer ${printer.name} is done printing ${status.job_name}`
+            : `Printer ${printer.name} has done printing`;
+          push.sendToAll({ title: 'PrintFarm', body, tag: `done-${printer.id}` });
+        }
+      }
+      if (curr === 'PAUSE' && prev === 'RUNNING') {
+        if (push.isEnabled('paused')) {
+          const body = status.job_name
+            ? `Printer ${printer.name} PAUSED — ${status.job_name}`
+            : `Printer ${printer.name} PAUSED`;
+          push.sendToAll({ title: 'PrintFarm', body, tag: `paused-${printer.id}` });
         }
       }
     }
   }
+
+  // --- Live realign (runs on every RUNNING tick, throttled) ---
+  // Don't recompute during PAUSE: Bambu freezes remaining, but `now` keeps
+  // moving, which would make predicted_end drift later every tick.
+  if (curr === 'RUNNING' && status.remaining != null && status.remaining >= 0) {
+    const last = lastRealignAt.get(printer.id) || 0;
+    if (Date.now() - last >= REALIGN_MIN_INTERVAL_MS) {
+      const job = db.prepare(
+        "SELECT * FROM jobs WHERE linked_printer_id=? AND status='Printing' ORDER BY id DESC LIMIT 1"
+      ).get(printer.id);
+      if (job) tryRealign(printer, job, status.remaining);
+    }
+  }
+
   prevStage.set(brandKey, curr);
 });
 
@@ -537,6 +597,7 @@ app.post('/api/import', (req, res) => {
 /* ------------------------------------------------------------------ */
 const scheduling = require('./scheduling');
 const { DEFAULT_TZ, zonedTimeToDate, parseJobTime } = scheduling;
+const { realignLinkedJob } = require('./realign');
 
 // Normalize a job's start/end to a proper ISO string with Z suffix.
 // Client sends datetime-local ('YYYY-MM-DDTHH:mm') which would otherwise be
