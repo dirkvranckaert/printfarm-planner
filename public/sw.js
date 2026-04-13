@@ -1,4 +1,4 @@
-const CACHE_NAME = 'printfarm-v2';
+const CACHE_NAME = 'printfarm-v3';
 const SHELL_URLS = ['/', '/index.html', '/style.css', '/app.js', '/favicon.svg', '/manifest.json'];
 
 // Cache app shell on install
@@ -76,12 +76,18 @@ self.addEventListener('push', event => {
 
 self.addEventListener('notificationclick', event => {
   event.notification.close();
-  event.waitUntil(
-    clients.matchAll({ type: 'window', includeUncontrolled: true }).then(list => {
-      for (const c of list) {
-        if ('focus' in c) return c.focus();
+  const targetUrl = event.notification.data?.url || '/';
+  event.waitUntil((async () => {
+    const list = await clients.matchAll({ type: 'window', includeUncontrolled: true });
+    for (const c of list) {
+      if ('focus' in c) {
+        try { await c.focus(); } catch {}
+        // Tell the already-open tab to deep-link into the target view.
+        // The client listens for { type: 'navigate' } and calls handleDeepLink.
+        try { c.postMessage({ type: 'navigate', url: targetUrl }); } catch {}
+        return;
       }
-      if (clients.openWindow) return clients.openWindow(event.notification.data?.url || '/');
-    })
-  );
+    }
+    if (clients.openWindow) return clients.openWindow(targetUrl);
+  })());
 });

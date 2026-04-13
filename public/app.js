@@ -383,10 +383,11 @@ async function init() {
   // Register service worker for push notifications
   if ('serviceWorker' in navigator) {
     navigator.serviceWorker.register('/sw.js').catch(() => {});
-    // When the SW receives a push, it pings open tabs so we can play a bell.
-    // (The SW itself can't play audio directly.)
+    // The SW pings open tabs on every push so we can play a bell, and on
+    // notification click so we can deep-link to the relevant job/printer.
     navigator.serviceWorker.addEventListener('message', e => {
       if (e.data?.type === 'play-sound') playNotificationBell();
+      if (e.data?.type === 'navigate')   handleDeepLink(e.data.url);
     });
   }
 
@@ -421,6 +422,10 @@ async function init() {
   setInterval(() => { updateNowLine(); renderTopbarStatus(); }, 60_000);
   if (printers.length === 0) openPrintersModal();
   else if (view === 'day') setTimeout(scrollToNow, 80);
+
+  // If the user landed here via a notification click (#printer/5 or #job/42),
+  // deep-link into the right view after the first render has settled.
+  if (location.hash) setTimeout(() => handleDeepLink(location.hash), 120);
 }
 
 // =============================================================================
@@ -3137,6 +3142,10 @@ async function goToJob(jobId) {
   navDate = new Date(job.start);
   navDate.setHours(0, 0, 0, 0);
 
+  // On mobile (single-printer-column view) switch the active tab to this job's
+  // printer so the job is actually visible after renderCalendar.
+  if (job.printerId != null) setMobilePrinterByPrinterId(job.printerId);
+
   await renderCalendar();
 
   setTimeout(() => {
@@ -3147,6 +3156,37 @@ async function goToJob(jobId) {
     el.classList.add('job-block-highlight');
     setTimeout(() => el.classList.remove('job-block-highlight'), 2000);
   }, 80);
+}
+
+// Go to a printer (switch to day view on its day-view column / mobile tab).
+// Used by printer-level notifications (started, done, paused).
+async function goToPrinter(printerId) {
+  view = 'day';
+  setMobilePrinterByPrinterId(printerId);
+  await renderCalendar();
+}
+
+// Set the mobile printer switcher to the index that matches this printerId.
+// No-op on desktop — mobilePrinterIdx is only consulted in single-column layout.
+function setMobilePrinterByPrinterId(printerId) {
+  const visible = printers.filter(p => p.favourite);
+  const idx = visible.findIndex(p => p.id === printerId);
+  if (idx >= 0) mobilePrinterIdx = idx;
+}
+
+// Deep-link handler for push-notification clicks. Hash shapes:
+//   #printer/<id>  → open the given printer's tab on today's day view
+//   #job/<id>      → open the given job's day + printer + scroll + highlight
+function handleDeepLink(urlOrHash) {
+  try {
+    const raw = typeof urlOrHash === 'string' ? urlOrHash : '';
+    const hash = raw.includes('#') ? raw.slice(raw.indexOf('#')) : raw;
+    const m = /^#(printer|job)\/(\d+)/.exec(hash);
+    if (!m) return false;
+    if (m[1] === 'job')     goToJob(parseInt(m[2], 10));
+    else                    goToPrinter(parseInt(m[2], 10));
+    return true;
+  } catch { return false; }
 }
 
 // =============================================================================

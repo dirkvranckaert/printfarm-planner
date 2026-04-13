@@ -158,7 +158,7 @@ brands.onUpdate((brandKey, status) => {
         tryRealign(printer, refreshed, status.remaining, { snapStart: true });
         broadcastJobsUpdated();
         if (push.isEnabled('started')) {
-          push.sendToAll({ title: 'PrintFarm', body: `Printer ${printer.name} has started printing`, tag: `started-${printer.id}` });
+          push.sendToAll({ title: 'PrintFarm', body: `Printer ${printer.name} has started printing`, tag: `started-${printer.id}`, url: `/#job/${job.id}` });
         }
       }
       if ((curr === 'FINISH' || curr === 'IDLE') && prev === 'RUNNING' && job.status === 'Printing') {
@@ -169,7 +169,7 @@ brands.onUpdate((brandKey, status) => {
           if (job.orderNr) body += `order #${job.orderNr}: `;
           body += `'${job.name}'`;
           if (job.customerName) body += ` (${job.customerName})`;
-          push.sendToAll({ title: 'PrintFarm', body, tag: `done-${printer.id}` });
+          push.sendToAll({ title: 'PrintFarm', body, tag: `done-${printer.id}`, url: `/#job/${job.id}` });
         }
       }
       if (curr === 'PAUSE' && prev === 'RUNNING') {
@@ -178,7 +178,7 @@ brands.onUpdate((brandKey, status) => {
         if (push.isEnabled('paused')) {
           let body = `Printer ${printer.name} PAUSED`;
           if (job.orderNr || job.name) body += ` — '${job.name || ''}${job.orderNr ? ` #${job.orderNr}` : ''}'`;
-          push.sendToAll({ title: 'PrintFarm', body, tag: `paused-${printer.id}`, requireInteraction: true });
+          push.sendToAll({ title: 'PrintFarm', body, tag: `paused-${printer.id}`, requireInteraction: true, url: `/#job/${job.id}` });
         }
       }
     });
@@ -187,7 +187,7 @@ brands.onUpdate((brandKey, status) => {
     if (linked.length === 0) {
       if (curr === 'RUNNING' && prev !== 'RUNNING') {
         if (push.isEnabled('started')) {
-          push.sendToAll({ title: 'PrintFarm', body: `Printer ${printer.name} has started printing`, tag: `started-${printer.id}` });
+          push.sendToAll({ title: 'PrintFarm', body: `Printer ${printer.name} has started printing`, tag: `started-${printer.id}`, url: `/#printer/${printer.id}` });
         }
       }
       if ((curr === 'FINISH' || curr === 'IDLE') && prev === 'RUNNING') {
@@ -195,7 +195,7 @@ brands.onUpdate((brandKey, status) => {
           const body = status.job_name
             ? `Printer ${printer.name} is done printing ${status.job_name}`
             : `Printer ${printer.name} has done printing`;
-          push.sendToAll({ title: 'PrintFarm', body, tag: `done-${printer.id}` });
+          push.sendToAll({ title: 'PrintFarm', body, tag: `done-${printer.id}`, url: `/#printer/${printer.id}` });
         }
       }
       if (curr === 'PAUSE' && prev === 'RUNNING') {
@@ -203,7 +203,7 @@ brands.onUpdate((brandKey, status) => {
           const body = status.job_name
             ? `Printer ${printer.name} PAUSED — ${status.job_name}`
             : `Printer ${printer.name} PAUSED`;
-          push.sendToAll({ title: 'PrintFarm', body, tag: `paused-${printer.id}`, requireInteraction: true });
+          push.sendToAll({ title: 'PrintFarm', body, tag: `paused-${printer.id}`, requireInteraction: true, url: `/#printer/${printer.id}` });
         }
       }
     }
@@ -255,6 +255,7 @@ setInterval(() => {
       tag: `upcoming-${job.id}`,
       image,
       requireInteraction: true, // upcoming jobs are actionable — keep on screen
+      url: `/#job/${job.id}`,
     });
     db.prepare('UPDATE jobs SET start_push_sent=1 WHERE id=?').run(job.id);
   }
