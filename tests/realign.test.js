@@ -89,10 +89,10 @@ describe('realignLinkedJob — threshold and no-op cases', () => {
 });
 
 describe('realignLinkedJob — pull back current job only (running ahead)', () => {
-  test('current job pulled back; subsequent jobs stay put (free gap)', () => {
+  test('current job shifted earlier (same duration); subsequent jobs stay put (free gap)', () => {
     const db = makeDb();
     const printer = addPrinter(db);
-    // Current job 08:00–09:00, next job 09:30–10:30 already back-to-back friendly (30 min gap).
+    // Current job 08:00–09:00 (60 min), next job 09:30–10:30 (30 min gap).
     const current = addJob(db, printer.id, {
       name: 'Current', status: 'Printing',
       start: '2026-04-13T08:00:00.000Z', end: '2026-04-13T09:00:00.000Z',
@@ -111,8 +111,11 @@ describe('realignLinkedJob — pull back current job only (running ahead)', () =
 
     expect(res.changed).toBe(true);
     expect(res.deltaMs).toBe(-15 * 60000);
-    expect(getJob(db, current.id).end).toBe('2026-04-13T08:45:00.000Z');
-    // Next job untouched — free gap grows from 30 min to 45 min.
+    // Block shifted 15 min earlier, same 60 min duration.
+    const updated = getJob(db, current.id);
+    expect(updated.start).toBe('2026-04-13T07:45:00.000Z');
+    expect(updated.end).toBe('2026-04-13T08:45:00.000Z');
+    // Next job untouched.
     expect(getJob(db, next.id).start).toBe('2026-04-13T09:30:00.000Z');
     expect(getJob(db, next.id).end).toBe('2026-04-13T10:30:00.000Z');
     expect(res.updated.map(u => u.id)).toEqual([current.id]);
@@ -120,7 +123,7 @@ describe('realignLinkedJob — pull back current job only (running ahead)', () =
 });
 
 describe('realignLinkedJob — push back cascade (running late)', () => {
-  test('current job + next job pushed when next would overlap', () => {
+  test('current job shifted later (same duration); next job pushed to avoid overlap', () => {
     const db = makeDb();
     const printer = addPrinter(db);
     const current = addJob(db, printer.id, {
@@ -141,7 +144,10 @@ describe('realignLinkedJob — push back cascade (running late)', () => {
 
     expect(res.changed).toBe(true);
     expect(res.deltaMs).toBe(30 * 60000);
-    expect(getJob(db, current.id).end).toBe('2026-04-13T09:30:00.000Z');
+    // Block shifted 30 min later, same 60 min duration.
+    const curr = getJob(db, current.id);
+    expect(curr.start).toBe('2026-04-13T08:30:00.000Z');
+    expect(curr.end).toBe('2026-04-13T09:30:00.000Z');
     // Next job cascaded to current_end + cool(15) + warm(5) = 09:50
     expect(getJob(db, next.id).start).toBe('2026-04-13T09:50:00.000Z');
     expect(getJob(db, next.id).end).toBe('2026-04-13T10:50:00.000Z');
@@ -167,7 +173,9 @@ describe('realignLinkedJob — push back cascade (running late)', () => {
     });
 
     expect(res.changed).toBe(true);
-    expect(getJob(db, current.id).end).toBe('2026-04-13T09:10:00.000Z');
+    const curr = getJob(db, current.id);
+    expect(curr.start).toBe('2026-04-13T08:10:00.000Z');
+    expect(curr.end).toBe('2026-04-13T09:10:00.000Z');
     // Next untouched
     expect(getJob(db, next.id).start).toBe('2026-04-13T14:00:00.000Z');
   });
@@ -196,7 +204,9 @@ describe('realignLinkedJob — push back cascade (running late)', () => {
     });
 
     expect(res.changed).toBe(true);
-    expect(getJob(db, current.id).end).toBe('2026-04-13T09:30:00.000Z');
+    const curr = getJob(db, current.id);
+    expect(curr.start).toBe('2026-04-13T08:30:00.000Z');
+    expect(curr.end).toBe('2026-04-13T09:30:00.000Z');
     // Non-cascadable statuses untouched.
     expect(getJob(db, siblingPrinting.id).start).toBe('2026-04-13T09:15:00.000Z');
     expect(getJob(db, done.id).start).toBe('2026-04-13T06:00:00.000Z');
@@ -226,14 +236,17 @@ describe('realignLinkedJob — push back cascade (running late)', () => {
     });
 
     expect(res.changed).toBe(true);
-    expect(getJob(db, current.id).end).toBe('2026-04-13T19:30:00.000Z');
+    const curr = getJob(db, current.id);
+    // Duration was 60 min (17:00Z–18:00Z). End now 19:30Z, start = 18:30Z.
+    expect(curr.start).toBe('2026-04-13T18:30:00.000Z');
+    expect(curr.end).toBe('2026-04-13T19:30:00.000Z');
     // Next job lands at 06:30 Brussels (CEST = 04:30 UTC) on 2026-04-14
     expect(getJob(db, next.id).start).toBe('2026-04-14T04:30:00.000Z');
   });
 });
 
 describe('realignLinkedJob — snapStart on first RUNNING tick', () => {
-  test('snaps start to now and recomputes end regardless of threshold', () => {
+  test('bypasses threshold and shifts the block by the delay (same duration)', () => {
     const db = makeDb();
     const printer = addPrinter(db);
     const job = addJob(db, printer.id, {
@@ -248,6 +261,7 @@ describe('realignLinkedJob — snapStart on first RUNNING tick', () => {
       snapStart: true,
     });
     expect(res.changed).toBe(true);
+    // Block shifted 15 min later; duration still 60 min.
     const updated = getJob(db, job.id);
     expect(updated.start).toBe('2026-04-13T08:15:00.000Z');
     expect(updated.end).toBe('2026-04-13T09:15:00.000Z');
@@ -255,21 +269,24 @@ describe('realignLinkedJob — snapStart on first RUNNING tick', () => {
 });
 
 describe('realignLinkedJob — naked datetime strings in job.end (legacy rows)', () => {
-  test('interprets naked end as Brussels local time', () => {
+  test('interprets naked start/end as Brussels local time and shifts block same-size', () => {
     const db = makeDb();
     const printer = addPrinter(db);
     const job = addJob(db, printer.id, {
       name: 'Current', status: 'Printing',
-      start: '2026-04-13T08:00', end: '2026-04-13T11:00', // naked; 11:00 Brussels = 09:00 UTC
+      // Naked: 08:00–11:00 Brussels = 06:00Z–09:00Z (3h duration).
+      start: '2026-04-13T08:00', end: '2026-04-13T11:00',
       linked_printer_id: printer.id,
     });
-    // At 09:15 Brussels (07:15 UTC), printer says 30 min remaining → predicted end 09:45 Brussels.
-    // Stored end is 11:00 Brussels → delta = -75 min → pull back, no cascade.
+    // At 09:15 Brussels (07:15 UTC), printer says 30 min remaining → predicted end 09:45 Brussels (07:45Z).
     const res = realignLinkedJob({
       db, printer, job, remainingMins: 30,
       now: new Date('2026-04-13T07:15:00.000Z'), restr: RESTR,
     });
     expect(res.changed).toBe(true);
-    expect(getJob(db, job.id).end).toBe('2026-04-13T07:45:00.000Z');
+    const updated = getJob(db, job.id);
+    // 3h duration preserved: end=07:45Z, start=04:45Z.
+    expect(updated.start).toBe('2026-04-13T04:45:00.000Z');
+    expect(updated.end).toBe('2026-04-13T07:45:00.000Z');
   });
 });

@@ -4,8 +4,10 @@
 //
 // When a job is linked to a printer and the printer reports its remaining
 // print time via MQTT, this module:
-//   - Updates the currently-printing job's `start` (on first RUNNING tick
-//     after linking) and `end` (on every tick) to reflect reality.
+//   - Shifts the currently-printing job's block so its END matches the
+//     printer's predicted finish time, while KEEPING the block's duration
+//     (size) constant. Both start and end move together; the block visibly
+//     slides forward or backward without ever growing or shrinking.
 //   - If the new predicted end is LATER than the stored end by more than a
 //     threshold, cascades a push-back to every subsequent Planned/Awaiting
 //     job on the same printer (re-using scheduling.pushBackChain).
@@ -29,7 +31,8 @@ const CASCADABLE_STATUSES = new Set(['Planned', 'Awaiting']);
  * @param {number}  opts.remainingMins     Printer's reported remaining time, in minutes
  * @param {Date}    opts.now               Current time (injected for tests)
  * @param {object}  opts.restr             Scheduling restrictions (silent hours / TZ / closed days)
- * @param {boolean} [opts.snapStart=false] On first RUNNING tick, also snap job.start to `now`
+ * @param {boolean} [opts.snapStart=false] Bypass the threshold (used on the
+ *                                          first RUNNING tick after linking).
  * @param {number}  [opts.thresholdMs]     Ignore deltas smaller than this (default 2 min)
  * @returns {{ changed: boolean, deltaMs: number, updated: Array<{id, start, end}> }}
  */
@@ -42,32 +45,32 @@ function realignLinkedJob({ db, printer, job, remainingMins, now, restr, snapSta
   const warmUpMs = (printer.warm_up_mins ?? 5) * 60000;
   const coolDownMs = (printer.cool_down_mins ?? 15) * 60000;
 
+  const currentStartDate = scheduling.parseJobTime(job.start, tz);
   const currentEndDate = scheduling.parseJobTime(job.end, tz);
-  if (!currentEndDate || isNaN(currentEndDate.getTime())) {
+  if (!currentStartDate || isNaN(currentStartDate.getTime()) ||
+      !currentEndDate   || isNaN(currentEndDate.getTime())) {
     return { changed: false, deltaMs: 0, updated: [] };
   }
-  const currentEndMs = currentEndDate.getTime();
+  const currentStartMs = currentStartDate.getTime();
+  const currentEndMs   = currentEndDate.getTime();
+  // Keep the block's DURATION constant — we only shift it, never resize it.
+  const durationMs     = currentEndMs - currentStartMs;
   const predictedEndMs = now.getTime() + remainingMins * 60000;
-  const deltaMs = predictedEndMs - currentEndMs;
+  const deltaMs        = predictedEndMs - currentEndMs;
 
   // Nothing material changed — skip to avoid thrashing on printer jitter.
   if (!snapStart && Math.abs(deltaMs) < thresholdMs) {
     return { changed: false, deltaMs, updated: [] };
   }
 
-  const updated = [];
-  const newEndISO = new Date(predictedEndMs).toISOString();
+  const newEndMs   = predictedEndMs;
+  const newStartMs = newEndMs - durationMs;
+  const newStartISO = new Date(newStartMs).toISOString();
+  const newEndISO   = new Date(newEndMs).toISOString();
 
-  if (snapStart) {
-    // First RUNNING tick after linking: job.start reflects when the print
-    // actually began. end moves to predictedEnd regardless of threshold.
-    const newStartISO = now.toISOString();
-    db.prepare('UPDATE jobs SET start=?, end=? WHERE id=?').run(newStartISO, newEndISO, job.id);
-    updated.push({ id: job.id, start: newStartISO, end: newEndISO });
-  } else {
-    db.prepare('UPDATE jobs SET end=? WHERE id=?').run(newEndISO, job.id);
-    updated.push({ id: job.id, start: job.start, end: newEndISO });
-  }
+  const updated = [];
+  db.prepare('UPDATE jobs SET start=?, end=? WHERE id=?').run(newStartISO, newEndISO, job.id);
+  updated.push({ id: job.id, start: newStartISO, end: newEndISO });
 
   // Only cascade downstream when we're running LATE. Running ahead creates
   // free gap — no automatic pull-forward on subsequent jobs.
