@@ -1574,10 +1574,18 @@ function attachDayEvents() {
   attachMobileDayViewSwipe();
 
   // Auto-centre the now-line if requested (Today button, view switch,
-  // first load). Deferred to the next frame so layout is stable.
+  // first load). Deferred to the next frame so layout is stable. The
+  // flag is NOT cleared until the rAF has actually applied the scroll —
+  // this matters when a second render (e.g. the first SSE status burst)
+  // runs before the first render's rAF fires. The concurrent render
+  // sees pending=true, skips its "restore previous scrollTop" step, and
+  // both rAFs end up scrolling the most recent day-scroll element to
+  // the same centred position.
   if (pendingScrollToNow) {
-    pendingScrollToNow = false;
-    requestAnimationFrame(() => requestAnimationFrame(scrollToNow));
+    requestAnimationFrame(() => requestAnimationFrame(() => {
+      scrollToNow();
+      pendingScrollToNow = false;
+    }));
   }
 }
 
