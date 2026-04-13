@@ -1559,11 +1559,27 @@ function attachDayEvents() {
   attachMobileDayViewSwipe();
 }
 
+// Auto-centre the current hour in the day view — but only when the user is
+// actually viewing today. If they navigated to a past/future day, leave the
+// scroll at its natural top so they can see the start of that day.
 function scrollToNow() {
   const scroll = document.getElementById('day-scroll');
   if (!scroll) return;
+  const nav = navDate;
+  const today = todayMidnight();
+  if (nav.getFullYear() !== today.getFullYear() ||
+      nav.getMonth()    !== today.getMonth()    ||
+      nav.getDate()     !== today.getDate()) {
+    return;
+  }
   const now = new Date();
-  scroll.scrollTop = Math.max(0, now.getHours() * HOUR_HEIGHT - 120);
+  // 1 px = 1 minute at HOUR_HEIGHT=60, so this is the exact position of the
+  // now-line inside the scrollable content.
+  const nowPx = now.getHours() * HOUR_HEIGHT + now.getMinutes();
+  const viewport = scroll.clientHeight;
+  // Centre the now-line. Browser clamps the bottom edge automatically; we
+  // clamp the top so early mornings don't try to scroll above 0.
+  scroll.scrollTop = Math.max(0, nowPx - viewport / 2);
 }
 
 // Mobile: swipe left/right on the day view to switch between printer tabs.
