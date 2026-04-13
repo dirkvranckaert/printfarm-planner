@@ -417,16 +417,23 @@ async function init() {
   // Connect to live Bambu printer status stream
   connectSSE();
 
-  if (view === 'day') pendingScrollToNow = true;
-  renderCalendar();
+  // Restore view + navDate from the URL hash on load. Covers:
+  //   - refresh while on a non-today day
+  //   - sharing a link
+  //   - browser back/forward (the popstate listener below handles subsequent)
+  //   - notification deep links (#job/N, #printer/N)
+  const restored = location.hash ? handleDeepLink(location.hash) : false;
+
+  if (!restored) {
+    if (view === 'day') pendingScrollToNow = true;
+    renderCalendar();
+    // Write a canonical hash on first load so a refresh preserves state.
+    syncUrlToState({ replace: true });
+  }
   renderTopbarStatus();
   setupListeners();
   setInterval(() => { updateNowLine(); renderTopbarStatus(); }, 60_000);
   if (printers.length === 0) openPrintersModal();
-
-  // If the user landed here via a notification click (#printer/5 or #job/42),
-  // deep-link into the right view after the first render has settled.
-  if (location.hash) setTimeout(() => handleDeepLink(location.hash), 120);
 }
 
 // =============================================================================
@@ -1832,6 +1839,7 @@ async function renderMonth() {
       navDate = new Date(cell.dataset.date + 'T00:00:00');
       view    = 'day';
       pendingScrollToNow = true;
+      syncUrlToState();
       renderCalendar();
     });
   });
@@ -1919,6 +1927,7 @@ async function renderUpcoming() {
       navDate = new Date(el.dataset.date + 'T00:00:00');
       view = 'day';
       pendingScrollToNow = true;
+      syncUrlToState();
       renderCalendar();
     });
   });
@@ -3261,6 +3270,7 @@ function navigate(dir) {
   else if (view === 'week')     navDate = addDays(navDate, dir * 7);
   else if (view === 'upcoming') navDate = addDays(navDate, dir * 7);
   else navDate = new Date(navDate.getFullYear(), navDate.getMonth() + dir, 1);
+  syncUrlToState();
   renderCalendar();
 }
 
@@ -3284,6 +3294,7 @@ async function goToJob(jobId) {
   // printer so the job is actually visible after renderCalendar.
   if (job.printerId != null) setMobilePrinterByPrinterId(job.printerId);
 
+  syncUrlToState();
   await renderCalendar();
 
   setTimeout(() => {
@@ -3301,6 +3312,7 @@ async function goToJob(jobId) {
 async function goToPrinter(printerId) {
   view = 'day';
   setMobilePrinterByPrinterId(printerId);
+  syncUrlToState();
   await renderCalendar();
 }
 
@@ -3312,19 +3324,62 @@ function setMobilePrinterByPrinterId(printerId) {
   if (idx >= 0) mobilePrinterIdx = idx;
 }
 
-// Deep-link handler for push-notification clicks. Hash shapes:
-//   #printer/<id>  → open the given printer's tab on today's day view
-//   #job/<id>      → open the given job's day + printer + scroll + highlight
+// Deep-link handler for hash navigation. Hash shapes:
+//   #day/YYYY-MM-DD       → day view on the given date
+//   #week/YYYY-MM-DD      → week view containing the given date
+//   #month/YYYY-MM-DD     → month view containing the given date
+//   #upcoming/YYYY-MM-DD  → upcoming view anchored at the given date
+//   #printer/<id>         → day view today with the given printer tab active
+//   #job/<id>             → day view on the given job's day, printer + highlight
+// Any other hash (or no hash) is ignored.
 function handleDeepLink(urlOrHash) {
   try {
     const raw = typeof urlOrHash === 'string' ? urlOrHash : '';
     const hash = raw.includes('#') ? raw.slice(raw.indexOf('#')) : raw;
-    const m = /^#(printer|job)\/(\d+)/.exec(hash);
-    if (!m) return false;
-    if (m[1] === 'job')     goToJob(parseInt(m[2], 10));
-    else                    goToPrinter(parseInt(m[2], 10));
-    return true;
+    // Job / printer one-shot deep links (from push notifications).
+    const idm = /^#(printer|job)\/(\d+)/.exec(hash);
+    if (idm) {
+      if (idm[1] === 'job') goToJob(parseInt(idm[2], 10));
+      else                  goToPrinter(parseInt(idm[2], 10));
+      return true;
+    }
+    // Stateful view + date restoration (back/forward/refresh).
+    const vm = /^#(day|week|month|upcoming)\/(\d{4})-(\d{2})-(\d{2})$/.exec(hash);
+    if (vm) {
+      const newView = vm[1];
+      const y = parseInt(vm[2], 10);
+      const mo = parseInt(vm[3], 10);
+      const d = parseInt(vm[4], 10);
+      const parsed = new Date(y, mo - 1, d);
+      if (isNaN(parsed.getTime())) return false;
+      view = newView;
+      navDate = parsed;
+      const today = todayMidnight();
+      const isToday = parsed.getFullYear() === today.getFullYear() &&
+                      parsed.getMonth()    === today.getMonth()    &&
+                      parsed.getDate()     === today.getDate();
+      if (view === 'day' && isToday) pendingScrollToNow = true;
+      renderCalendar();
+      return true;
+    }
+    return false;
   } catch { return false; }
+}
+
+// Compose the hash that represents the current view + nav date, and push it
+// onto the history stack (or replace, depending on caller). Kept idempotent —
+// if the target hash is already current, nothing happens so we don't fill
+// history with duplicates.
+function syncUrlToState({ replace = false } = {}) {
+  const p = n => String(n).padStart(2, '0');
+  const d = navDate;
+  const hash = `#${view}/${d.getFullYear()}-${p(d.getMonth() + 1)}-${p(d.getDate())}`;
+  if (location.hash === hash) return;
+  const url = location.pathname + location.search + hash;
+  try {
+    if (replace) history.replaceState(null, '', url);
+    else         history.pushState(null, '', url);
+  } catch { /* ignore */ }
 }
 
 // =============================================================================
@@ -3427,6 +3482,7 @@ function setupListeners() {
   document.getElementById('date-jump').addEventListener('change', e => {
     if (!e.target.value) return;
     navDate = new Date(e.target.value + 'T00:00:00');
+    syncUrlToState();
     renderCalendar();
   });
 
@@ -3571,6 +3627,7 @@ function setupListeners() {
   document.getElementById('btn-today').addEventListener('click', () => {
     navDate = todayMidnight();
     if (view === 'day') pendingScrollToNow = true;
+    syncUrlToState();
     renderCalendar();
   });
 
@@ -3578,8 +3635,14 @@ function setupListeners() {
     document.getElementById(`btn-${v}`).addEventListener('click', () => {
       view = v;
       if (v === 'day') pendingScrollToNow = true;
+      syncUrlToState();
       renderCalendar();
     });
+  });
+
+  // Browser back/forward: restore view + navDate from the hash.
+  window.addEventListener('popstate', () => {
+    handleDeepLink(location.hash);
   });
 
   // Today panel toggle
