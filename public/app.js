@@ -1556,6 +1556,7 @@ function attachDayEvents() {
 
   // Apply mobile single-column mode
   applyMobilePrinterFilter();
+  attachMobileDayViewSwipe();
 }
 
 function scrollToNow() {
@@ -1563,6 +1564,50 @@ function scrollToNow() {
   if (!scroll) return;
   const now = new Date();
   scroll.scrollTop = Math.max(0, now.getHours() * HOUR_HEIGHT - 120);
+}
+
+// Mobile: swipe left/right on the day view to switch between printer tabs.
+// Only attached when we're in the single-column mobile layout. Ignores gestures
+// that start on a job block (those belong to the drag-to-move handler).
+function attachMobileDayViewSwipe() {
+  if (!isMobileView()) return;
+  const scroll = document.getElementById('day-scroll');
+  if (!scroll || scroll.dataset.swipeBound === '1') return;
+  scroll.dataset.swipeBound = '1';
+
+  const SWIPE_MIN_PX = 60;     // horizontal distance required
+  const SWIPE_MAX_OFF_AXIS = 40; // max vertical drift — more than this = vertical scroll
+  const SWIPE_MAX_DURATION = 600;
+
+  let sx = 0, sy = 0, t0 = 0, active = false;
+
+  scroll.addEventListener('touchstart', e => {
+    if (e.touches.length !== 1) { active = false; return; }
+    // Don't swipe if the user is grabbing a job block / buffer / resize handle.
+    if (e.target.closest('.job-block, .buffer-block, .job-resize-handle')) { active = false; return; }
+    sx = e.touches[0].clientX;
+    sy = e.touches[0].clientY;
+    t0 = Date.now();
+    active = true;
+  }, { passive: true });
+
+  scroll.addEventListener('touchend', e => {
+    if (!active) return;
+    active = false;
+    const t  = e.changedTouches[0];
+    const dx = t.clientX - sx;
+    const dy = t.clientY - sy;
+    const dt = Date.now() - t0;
+    if (dt > SWIPE_MAX_DURATION) return;
+    if (Math.abs(dx) < SWIPE_MIN_PX) return;
+    if (Math.abs(dy) > SWIPE_MAX_OFF_AXIS) return;
+    // Horizontal swipe — switch printer tab
+    const visible = printers.filter(p => p.favourite);
+    if (visible.length < 2) return;
+    const dir = dx < 0 ? 1 : -1; // swipe left → next, swipe right → prev
+    mobilePrinterIdx = (mobilePrinterIdx + dir + visible.length) % visible.length;
+    renderCalendar();
+  }, { passive: true });
 }
 
 function updateNowLine() {
