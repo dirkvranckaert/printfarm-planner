@@ -941,9 +941,16 @@ input[type="color"] {
   font-size: 13px;
   color: var(--text-muted);
   transition: background .12s, color .12s;
+  display: inline-flex;
+  align-items: center;
+  justify-content: center;
+  text-decoration: none;
 }
 .btn-icon:hover { background: var(--border); color: var(--text); }
 .btn-icon.danger:hover { background: rgba(229,62,62,.12); color: var(--danger); }
+/* Topbar icon buttons: match height of sibling .btn buttons */
+.topbar-right .btn-icon { padding: 6px; height: 32px; width: 32px; }
+.topbar-right .btn-icon svg { display: block; }
 .pin-btn { opacity: 0.25; }
 .pin-btn:hover { opacity: 0.6; }
 .pin-btn.pinned { opacity: 1; color: #f59e0b; }
@@ -1864,7 +1871,7 @@ body.is-resizing,    body.is-resizing    * { cursor: ns-resize  !important; user
   margin-bottom: -2px; white-space: nowrap; transition: .15s;
 }
 .settings-tabs .tab:hover { color: var(--text); }
-.settings-tabs .tab.active { color: var(--primary); border-bottom-color: var(--primary); }
+.settings-tabs .tab.active { color: var(--primary); border-bottom: 2px solid var(--primary); }
 .settings-panel.hidden { display: none; }
 
 /* Extruder labels on color dots */
