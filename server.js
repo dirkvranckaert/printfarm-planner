@@ -311,6 +311,19 @@ app.delete('/api/push/unsubscribe', (req, res) => {
   res.json({ ok: true });
 });
 
+// Send a test push to all current subscriptions so the user can verify
+// the full pipeline (server → VAPID → browser push → service worker →
+// in-page bell via postMessage). Used by the Settings "Test push" button.
+app.post('/api/push/test', (req, res) => {
+  push.sendToAll({
+    title: 'PrintFarm — Test',
+    body: 'If you see this, push notifications are working 🎉',
+    tag: 'test-push',
+    requireInteraction: false,
+  });
+  res.json({ ok: true });
+});
+
 // --- App config (read-only, driven by env vars) ---
 const { version } = require('./package.json');
 

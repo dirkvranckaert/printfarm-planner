@@ -3040,7 +3040,21 @@ function setupSettingsAutoSave() {
   ['push-notify-done', 'push-notify-started', 'push-notify-upcoming', 'push-notify-paused'].forEach(id => {
     q(id)?.addEventListener('change', function() { autoSave('push.notify.' + id.replace('push-notify-', ''), this.checked); });
   });
-  q('btn-test-sound')?.addEventListener('click', playNotificationBell);
+  q('btn-test-push')?.addEventListener('click', async () => {
+    const btn = document.getElementById('btn-test-push');
+    const orig = btn.textContent;
+    btn.disabled = true;
+    btn.textContent = 'Sending…';
+    try {
+      await api('POST', '/api/push/test');
+      btn.textContent = '✓ Sent';
+      setTimeout(() => { btn.textContent = orig; btn.disabled = false; }, 2000);
+    } catch (e) {
+      btn.textContent = '✗ Failed';
+      setTimeout(() => { btn.textContent = orig; btn.disabled = false; }, 2000);
+      alert('Failed to send test push: ' + (e.message || e));
+    }
+  });
 
   // Silent schedule — any change saves all restrictions
   const saveSilent = () => {
