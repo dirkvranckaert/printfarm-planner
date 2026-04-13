@@ -2742,12 +2742,42 @@ function urlBase64ToUint8Array(base64String) {
   return output;
 }
 
+// True for iPhone/iPad (incl. iPadOS, which lies about its UA).
+function isIOS() {
+  const ua = navigator.userAgent || '';
+  return /iPad|iPhone|iPod/.test(ua) ||
+         (navigator.platform === 'MacIntel' && navigator.maxTouchPoints > 1);
+}
+// True when the page is running as an installed PWA from the Home Screen.
+function isStandalonePWA() {
+  return navigator.standalone === true ||
+         window.matchMedia('(display-mode: standalone)').matches;
+}
+
 function renderPushSubscribeSection() {
   const section = document.getElementById('push-subscribe-section');
   const prefs   = document.getElementById('push-prefs-section');
   if (!section) return;
   if (!('serviceWorker' in navigator) || !('PushManager' in window)) {
+    // iOS Safari pre-16.4 OR iOS Safari NOT installed as a PWA — both lack
+    // PushManager. Show install instructions instead of a blanket "not supported".
+    if (isIOS() && !isStandalonePWA()) {
+      section.innerHTML = `
+        <div style="font-size:13px;color:var(--text-muted);line-height:1.5;border:1px solid var(--border);border-radius:8px;padding:12px;background:var(--bg)">
+          <strong style="color:var(--text);display:block;margin-bottom:6px">📱 Install on iPhone first</strong>
+          On iOS, push notifications are only available when the app is installed to your Home Screen.
+          <ol style="margin:8px 0 0 18px;padding:0">
+            <li>Tap the Share button <span style="font-family:'apple-system',sans-serif">⎙</span> in Safari's toolbar</li>
+            <li>Choose <strong>Add to Home Screen</strong></li>
+            <li>Open <strong>PrintFarm</strong> from your Home Screen</li>
+            <li>Come back to this Settings panel and tap <em>Enable</em></li>
+          </ol>
+        </div>`;
+      if (prefs) prefs.classList.add('hidden');
+      return;
+    }
     section.innerHTML = '<p style="font-size:13px;color:var(--text-muted)">Push notifications are not supported by this browser.</p>';
+    if (prefs) prefs.classList.add('hidden');
     return;
   }
   if (Notification.permission === 'denied') {
