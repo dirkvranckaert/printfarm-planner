@@ -513,6 +513,71 @@ app.post('/api/jobs/:id/push-back', (req, res) => {
   res.json({ updatedCount: updates.length, updates });
 });
 
+// Pull a job (and downstream jobs within a time window) FORWARD — tight-pack
+// them starting at `to`. Opposite of push-back: used after manual re-arranging
+// to close gaps, or to insert an extra job at a chosen moment and slide
+// everything after it into place. Silent hours, closed days, timezone,
+// closures and printer buffers all respected.
+// Body: { to?: ISO/local, windowEnd?: ISO/local }
+//   - to defaults to "now"
+//   - windowEnd defaults to to + 24h
+app.post('/api/jobs/:id/pull-forward', (req, res) => {
+  const id = Number(req.params.id);
+  const anchor = db.prepare('SELECT * FROM jobs WHERE id=?').get(id);
+  if (!anchor || anchor.queued || !anchor.start) {
+    return res.status(400).json({ error: 'Job is not scheduled' });
+  }
+  const restr = getSchedulingRestrictions();
+  const tz = restr.timezone || DEFAULT_TZ;
+  const toRaw = req.body?.to;
+  const toDate = toRaw ? parseJobTime(toRaw, tz) : new Date();
+  if (!toDate || isNaN(toDate.getTime())) {
+    return res.status(400).json({ error: 'Invalid "to" timestamp' });
+  }
+  const windowEndRaw = req.body?.windowEnd;
+  const windowEnd = windowEndRaw
+    ? parseJobTime(windowEndRaw, tz)
+    : new Date(toDate.getTime() + 24 * 60 * 60 * 1000);
+  if (!windowEnd || isNaN(windowEnd.getTime())) {
+    return res.status(400).json({ error: 'Invalid "windowEnd" timestamp' });
+  }
+
+  const printer = db.prepare('SELECT warm_up_mins, cool_down_mins FROM printers WHERE id=?').get(anchor.printerId);
+  const warmUpMs = (printer?.warm_up_mins ?? 5) * 60000;
+  const coolDownMs = (printer?.cool_down_mins ?? 15) * 60000;
+  const closures = db.prepare('SELECT startDate, endDate FROM closures').all();
+
+  const allSamePrinter = db.prepare(
+    "SELECT id, name, status, start, end FROM jobs WHERE printerId=? AND queued=0 AND start!=''"
+  ).all(anchor.printerId);
+
+  const anchorStartMs = parseJobTime(anchor.start, tz).getTime();
+  const windowEndMs = windowEnd.getTime();
+  const CASCADABLE_STATUSES = new Set(['Planned', 'Awaiting']);
+
+  // Chain = the anchor plus every downstream cascadable job on this printer
+  // whose current start is inside the window (anchorStart, windowEnd].
+  const chain = allSamePrinter
+    .filter(j => {
+      if (j.id === anchor.id) return true;
+      if (!CASCADABLE_STATUSES.has(j.status)) return false;
+      const s = parseJobTime(j.start, tz).getTime();
+      return s > anchorStartMs && s <= windowEndMs;
+    })
+    .sort((a, b) => parseJobTime(a.start, tz).getTime() - parseJobTime(b.start, tz).getTime());
+
+  const chainIds = new Set(chain.map(j => j.id));
+  const otherJobs = allSamePrinter.filter(j => !chainIds.has(j.id));
+
+  const updates = scheduling.pullForwardChain(chain, toDate, restr, closures, otherJobs, warmUpMs, coolDownMs);
+
+  const upd = db.prepare('UPDATE jobs SET start=?, end=? WHERE id=?');
+  const tx = db.transaction((list) => { for (const u of list) upd.run(u.start, u.end, u.id); });
+  tx(updates);
+
+  res.json({ updatedCount: updates.length, updates });
+});
+
 app.delete('/api/jobs/:id', (req, res) => {
   // Clean up uploaded files
   const job = db.prepare('SELECT printFile, thumbFile FROM jobs WHERE id=?').get(req.params.id);

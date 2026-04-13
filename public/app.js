@@ -2057,6 +2057,16 @@ function setupBottomSheet() {
     hideBottomSheet();
     if (id !== null) openPushBackModal(id);
   });
+  document.getElementById('bs-pull-now')?.addEventListener('click', async () => {
+    const id = bsJobId;
+    hideBottomSheet();
+    if (id !== null) await pullForwardJob(id, null, null);
+  });
+  document.getElementById('bs-pull-to')?.addEventListener('click', () => {
+    const id = bsJobId;
+    hideBottomSheet();
+    if (id !== null) openPullForwardModal(id);
+  });
   document.getElementById('bs-delete').addEventListener('click', async () => {
     if (bsJobId !== null && confirm('Delete this print job?')) {
       await api('DELETE', `/api/jobs/${bsJobId}`);
@@ -2302,6 +2312,43 @@ function openPushBackModal(jobId) {
 function closePushBackModal() {
   document.getElementById('pushback-modal').classList.add('hidden');
   _pushBackJobId = null;
+}
+
+// Pull this job + any Planned jobs after it within the window forward
+// (tight-pack) starting at the given datetime. `to` and `windowEnd` may be
+// null; the server then uses defaults (to=now, windowEnd=to+24h).
+async function pullForwardJob(jobId, to, windowEnd) {
+  try {
+    const body = {};
+    if (to) body.to = to;
+    if (windowEnd) body.windowEnd = windowEnd;
+    const res = await api('POST', `/api/jobs/${jobId}/pull-forward`, body);
+    await renderCalendar();
+    if (res && res.updatedCount === 0) {
+      alert('Nothing to pull forward: the selected time isn\u2019t earlier than the job\u2019s current start, or nothing can move any earlier.');
+    }
+  } catch (e) {
+    alert('Pull forward failed: ' + (e.message || 'Unknown error'));
+  }
+}
+
+let _pullForwardJobId = null;
+function openPullForwardModal(jobId) {
+  _pullForwardJobId = jobId;
+  const startInput = document.getElementById('pullforward-datetime');
+  const endInput   = document.getElementById('pullforward-window-end');
+  // Default start = now. The user's most common intent is "tighten toward now".
+  const now = new Date();
+  startInput.value = toDatetimeLocal(now);
+  // Default window end = now + 24h (matches server-side default).
+  endInput.value = toDatetimeLocal(new Date(now.getTime() + 24 * 60 * 60 * 1000));
+  document.getElementById('pullforward-modal').classList.remove('hidden');
+  setTimeout(() => startInput.focus(), 50);
+}
+
+function closePullForwardModal() {
+  document.getElementById('pullforward-modal').classList.add('hidden');
+  _pullForwardJobId = null;
 }
 
 async function duplicateJob(jobId) {
@@ -3415,6 +3462,16 @@ function setupListeners() {
     hideCtxMenu();
     if (id !== null) openPushBackModal(id);
   });
+  document.getElementById('ctx-pull-now').addEventListener('click', async () => {
+    const id = ctxJobId;
+    hideCtxMenu();
+    if (id !== null) await pullForwardJob(id, null, null);
+  });
+  document.getElementById('ctx-pull-to').addEventListener('click', () => {
+    const id = ctxJobId;
+    hideCtxMenu();
+    if (id !== null) openPullForwardModal(id);
+  });
 
   // Push-back modal
   document.getElementById('pushback-cancel').addEventListener('click', closePushBackModal);
@@ -3424,6 +3481,17 @@ function setupListeners() {
     if (!val || id == null) return closePushBackModal();
     closePushBackModal();
     await pushBackJob(id, val);
+  });
+
+  // Pull-forward modal
+  document.getElementById('pullforward-cancel').addEventListener('click', closePullForwardModal);
+  document.getElementById('pullforward-confirm').addEventListener('click', async () => {
+    const startVal = document.getElementById('pullforward-datetime').value;
+    const endVal   = document.getElementById('pullforward-window-end').value;
+    const id = _pullForwardJobId;
+    if (!startVal || id == null) return closePullForwardModal();
+    closePullForwardModal();
+    await pullForwardJob(id, startVal, endVal || null);
   });
 
   // Conflict resolution
@@ -3610,6 +3678,7 @@ function setupListeners() {
     if (e.key !== 'Escape') return;
     hideCtxMenu();
     if (!document.getElementById('pushback-modal').classList.contains('hidden')) closePushBackModal();
+    if (!document.getElementById('pullforward-modal').classList.contains('hidden')) closePullForwardModal();
     ['job-modal', 'printers-modal', 'printer-dialog', 'closures-modal', 'settings-modal', 'status-overview-modal'].forEach(id => {
       if (!document.getElementById(id).classList.contains('hidden')) closeModal(id);
     });

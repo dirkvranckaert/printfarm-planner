@@ -192,6 +192,66 @@ function pushBackChain(chain, to, restr, closures, otherJobs, warmUpMs, coolDown
   return updates;
 }
 
+/**
+ * Pull a chain of jobs FORWARD (toward earlier times) so they're tight-packed
+ * starting at `to`. The user's use case is "I rearranged things manually and
+ * now there are gaps" or "I'm starting an extra job during silent hours
+ * because I'm working late and want everything after it to slide back into
+ * place". Opposite of pushBackChain.
+ *
+ * @param {Array}  chain       Jobs to pull, ordered by start ascending. chain[0] is
+ *                             the anchor (the right-clicked job). Each: {id, start, end}.
+ * @param {Date}   to          New start time for the anchor. Silent hours / closures
+ *                             may advance it later via findNextValidStart.
+ * @param {object} restr       Scheduling restrictions.
+ * @param {Array}  closures    Closure ranges.
+ * @param {Array}  otherJobs   Jobs on the same printer not in the chain. Used for
+ *                             overlap avoidance (e.g. jobs before `to`, or jobs
+ *                             beyond the window that stay put).
+ * @param {number} warmUpMs    Warm-up buffer in ms.
+ * @param {number} coolDownMs  Cool-down buffer in ms.
+ * @returns {Array<{id, start, end}>} updates to persist. The cascade stops
+ *                                    at the first job that can't actually be
+ *                                    pulled earlier — that happens when its
+ *                                    new tight-packed slot would land at or
+ *                                    after its current start (e.g. silent
+ *                                    hours pushed it forward). Any jobs
+ *                                    beyond that point are left alone.
+ */
+function pullForwardChain(chain, to, restr, closures, otherJobs, warmUpMs, coolDownMs) {
+  const tz = restr?.timezone || DEFAULT_TZ;
+  const updates = [];
+  let prevEndMs = null;
+
+  for (let i = 0; i < chain.length; i++) {
+    const job = chain[i];
+    const origStartMs = parseJobTime(job.start, tz).getTime();
+    const origEndMs = parseJobTime(job.end, tz).getTime();
+    const durationMs = origEndMs - origStartMs;
+    const durationMins = Math.round(durationMs / 60000);
+
+    const candidate = i === 0
+      ? new Date(to.getTime())
+      : new Date(prevEndMs + coolDownMs + warmUpMs);
+
+    const newStart = findNextValidStart(
+      candidate, durationMins, restr, closures, otherJobs, warmUpMs, coolDownMs
+    );
+
+    // Pull-forward only moves jobs EARLIER. If findNextValidStart ends up
+    // placing this job at or after its current position (silent hours,
+    // closures, other jobs in the way), stop the cascade — leave this job
+    // and everything after it alone.
+    if (newStart.getTime() >= origStartMs) break;
+
+    const newEnd = new Date(newStart.getTime() + durationMs);
+    updates.push({ id: job.id, start: newStart.toISOString(), end: newEnd.toISOString() });
+    prevEndMs = newEnd.getTime();
+  }
+
+  return updates;
+}
+
 module.exports = {
   DEFAULT_TZ,
   timeToMinutes,
@@ -203,4 +263,5 @@ module.exports = {
   advanceToSilentEnd,
   findNextValidStart,
   pushBackChain,
+  pullForwardChain,
 };

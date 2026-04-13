@@ -543,6 +543,8 @@
     </div>
     <button class="ctx-item" id="ctx-push-now">⏩ Push back to now</button>
     <button class="ctx-item" id="ctx-push-to">⏩ Push back to…</button>
+    <button class="ctx-item" id="ctx-pull-now">⏪ Pull forward to now</button>
+    <button class="ctx-item" id="ctx-pull-to">⏪ Pull forward to…</button>
     <div class="ctx-separator"></div>
     <button class="ctx-item" id="ctx-duplicate">📋 Duplicate</button>
     <button class="ctx-item ctx-item-danger" id="ctx-delete">🗑 Delete</button>
@@ -561,6 +563,26 @@
       <div style="display:flex;gap:8px;justify-content:flex-end;margin-top:16px">
         <button type="button" id="pushback-cancel" class="btn btn-secondary">Cancel</button>
         <button type="button" id="pushback-confirm" class="btn btn-primary">Push back</button>
+      </div>
+    </div>
+  </div>
+
+  <!-- Pull-forward modal -->
+  <div id="pullforward-modal" class="modal-overlay hidden">
+    <div class="modal pushback-modal-content">
+      <h3 style="margin:0 0 12px;font-size:16px;font-weight:700">Pull forward to…</h3>
+      <p style="font-size:12px;color:var(--text-muted);margin:0 0 12px">
+        Tight-packs this job and every subsequent Planned job on the same printer
+        within the window below. Silent hours, closed days and pre/post-processing
+        times are respected. Jobs outside the window stay put.
+      </p>
+      <label style="display:block;font-size:12px;color:var(--text-muted);margin-bottom:4px">New start time</label>
+      <input type="datetime-local" id="pullforward-datetime" style="width:100%;padding:6px 8px;font-size:14px">
+      <label style="display:block;font-size:12px;color:var(--text-muted);margin:10px 0 4px">Window end (affects jobs starting before this moment)</label>
+      <input type="datetime-local" id="pullforward-window-end" style="width:100%;padding:6px 8px;font-size:14px">
+      <div style="display:flex;gap:8px;justify-content:flex-end;margin-top:16px">
+        <button type="button" id="pullforward-cancel" class="btn btn-secondary">Cancel</button>
+        <button type="button" id="pullforward-confirm" class="btn btn-primary">Pull forward</button>
       </div>
     </div>
   </div>
@@ -590,6 +612,8 @@
     <div class="bottom-sheet-sep"></div>
     <button class="bottom-sheet-item" id="bs-push-now">⏩ Push back to now</button>
     <button class="bottom-sheet-item" id="bs-push-to">⏩ Push back to…</button>
+    <button class="bottom-sheet-item" id="bs-pull-now">⏪ Pull forward to now</button>
+    <button class="bottom-sheet-item" id="bs-pull-to">⏪ Pull forward to…</button>
     <div class="bottom-sheet-sep"></div>
     <button class="bottom-sheet-item" id="bs-duplicate">📋 Duplicate</button>
     <button class="bottom-sheet-item danger" id="bs-delete">🗑 Delete</button>
