@@ -82,7 +82,7 @@ app.get('/logout', (req, res) => {
 // --- Session auth middleware ---
 app.use((req, res, next) => {
   // Allow PWA assets through unauthenticated
-  if (['/favicon.svg', '/manifest.json', '/sw.js', '/api/config'].includes(req.path)) return next();
+  if (['/favicon.svg', '/manifest.json', '/sw.js', '/apple-touch-icon.png', '/api/config'].includes(req.path)) return next();
   const token = parseCookieToken(req);
   if (token && isValidSession(token)) return next();
   // Also accept shared JWT if enabled
