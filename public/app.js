@@ -1905,6 +1905,16 @@ function setupBottomSheet() {
     if (bsJobId !== null) duplicateJob(bsJobId);
     hideBottomSheet();
   });
+  document.getElementById('bs-push-now')?.addEventListener('click', async () => {
+    const id = bsJobId;
+    hideBottomSheet();
+    if (id !== null) await pushBackJob(id, null);
+  });
+  document.getElementById('bs-push-to')?.addEventListener('click', () => {
+    const id = bsJobId;
+    hideBottomSheet();
+    if (id !== null) openPushBackModal(id);
+  });
   document.getElementById('bs-delete').addEventListener('click', async () => {
     if (bsJobId !== null && confirm('Delete this print job?')) {
       await api('DELETE', `/api/jobs/${bsJobId}`);
@@ -2115,6 +2125,41 @@ function setJobStatus(status) {
 
 function getJobStatus() {
   return document.querySelector('.status-btn.active')?.dataset.status ?? 'Planned';
+}
+
+// Push back this job (and any Planned jobs after it on the same printer) to the given
+// datetime. If `to` is null, the server uses the current moment. Silent hours and
+// pre/post-processing buffers are honored server-side.
+async function pushBackJob(jobId, to) {
+  try {
+    const res = await api('POST', `/api/jobs/${jobId}/push-back`, to ? { to } : {});
+    await renderCalendar();
+    if (res && res.updatedCount === 0) {
+      // Nothing moved — likely because the requested time is earlier than the current start.
+      alert('Nothing to push: the selected time is earlier than the job\u2019s current start.');
+    }
+  } catch (e) {
+    alert('Push back failed: ' + (e.message || 'Unknown error'));
+  }
+}
+
+let _pushBackJobId = null;
+function openPushBackModal(jobId) {
+  _pushBackJobId = jobId;
+  const input = document.getElementById('pushback-datetime');
+  const job = jobsCache[jobId];
+  // Default: the later of "now" and the job's current start.
+  const now = new Date();
+  const current = job?.start ? new Date(job.start) : now;
+  const defaultDate = now > current ? now : current;
+  input.value = toDatetimeLocal(defaultDate);
+  document.getElementById('pushback-modal').classList.remove('hidden');
+  setTimeout(() => input.focus(), 50);
+}
+
+function closePushBackModal() {
+  document.getElementById('pushback-modal').classList.add('hidden');
+  _pushBackJobId = null;
 }
 
 async function duplicateJob(jobId) {
@@ -3135,6 +3180,26 @@ function setupListeners() {
     if (ctxJobId !== null) duplicateJob(ctxJobId);
     hideCtxMenu();
   });
+  document.getElementById('ctx-push-now').addEventListener('click', async () => {
+    const id = ctxJobId;
+    hideCtxMenu();
+    if (id !== null) await pushBackJob(id, null);
+  });
+  document.getElementById('ctx-push-to').addEventListener('click', () => {
+    const id = ctxJobId;
+    hideCtxMenu();
+    if (id !== null) openPushBackModal(id);
+  });
+
+  // Push-back modal
+  document.getElementById('pushback-cancel').addEventListener('click', closePushBackModal);
+  document.getElementById('pushback-confirm').addEventListener('click', async () => {
+    const val = document.getElementById('pushback-datetime').value;
+    const id = _pushBackJobId;
+    if (!val || id == null) return closePushBackModal();
+    closePushBackModal();
+    await pushBackJob(id, val);
+  });
 
   // Conflict resolution
   document.getElementById('ctx-move-after').addEventListener('click', async () => {
@@ -3319,6 +3384,7 @@ function setupListeners() {
   document.addEventListener('keydown', e => {
     if (e.key !== 'Escape') return;
     hideCtxMenu();
+    if (!document.getElementById('pushback-modal').classList.contains('hidden')) closePushBackModal();
     ['job-modal', 'printers-modal', 'printer-dialog', 'closures-modal', 'settings-modal', 'status-overview-modal'].forEach(id => {
       if (!document.getElementById(id).classList.contains('hidden')) closeModal(id);
     });

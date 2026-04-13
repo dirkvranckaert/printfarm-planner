@@ -5,6 +5,7 @@ const {
   isInSilentHours,
   advanceToSilentEnd,
   findNextValidStart,
+  pushBackChain,
 } = require('../scheduling');
 
 const TZ = 'Europe/Brussels';
@@ -224,5 +225,129 @@ describe('findNextValidStart', () => {
     const cand = utc('2026-04-13T20:40:00Z'); // in silent window
     const result = findNextValidStart(cand, 60, restr, [], [], warmUp, coolDown);
     expect(getZoneParts(result, TZ).hour).toBe(6);
+  });
+});
+
+describe('pushBackChain', () => {
+  const restr = {
+    enabled: true,
+    silentStart: '21:00',
+    silentEnd: '06:30',
+    closedDays: [6],
+    timezone: TZ,
+  };
+  const warmUp = 5 * 60000;
+  const coolDown = 15 * 60000;
+
+  // Helper: build a job stored as proper ISO with Z suffix.
+  const job = (id, startISO, endISO) => ({ id, start: startISO, end: endISO, status: 'Planned' });
+
+  test('single-job chain: pushes anchor to the requested time', () => {
+    const chain = [job(1, '2026-04-13T04:30:00.000Z', '2026-04-13T05:30:00.000Z')]; // 06:30–07:30 Brussels
+    const to = utc('2026-04-13T08:00:00.000Z'); // 10:00 Brussels
+    const updates = pushBackChain(chain, to, restr, [], [], warmUp, coolDown);
+    expect(updates).toHaveLength(1);
+    expect(updates[0]).toMatchObject({
+      id: 1,
+      start: '2026-04-13T08:00:00.000Z',
+      end: '2026-04-13T09:00:00.000Z',
+    });
+  });
+
+  test('push to "now" respects silent hours (22:40 → next 06:30 Brussels)', () => {
+    const chain = [job(1, '2026-04-13T04:30:00.000Z', '2026-04-13T05:30:00.000Z')];
+    const now = utc('2026-04-13T20:40:00.000Z'); // 22:40 Brussels (inside silent window)
+    const updates = pushBackChain(chain, now, restr, [], [], warmUp, coolDown);
+    expect(updates).toHaveLength(1);
+    const p = getZoneParts(new Date(updates[0].start), TZ);
+    expect(p).toMatchObject({ year: 2026, month: 4, day: 14, hour: 6, minute: 30 });
+  });
+
+  test('cascade: job2 is pushed when its start falls inside the new anchor window', () => {
+    // Anchor 08:00–09:00, job2 09:10–10:10 (gap of only 10m, less than warm+cool buffer)
+    const chain = [
+      job(1, '2026-04-13T08:00:00.000Z', '2026-04-13T09:00:00.000Z'),
+      job(2, '2026-04-13T09:10:00.000Z', '2026-04-13T10:10:00.000Z'),
+    ];
+    const to = utc('2026-04-13T10:00:00.000Z'); // push anchor 2h later
+    const updates = pushBackChain(chain, to, restr, [], [], warmUp, coolDown);
+    expect(updates).toHaveLength(2);
+    expect(updates[0]).toMatchObject({ id: 1, start: '2026-04-13T10:00:00.000Z', end: '2026-04-13T11:00:00.000Z' });
+    // job2 candidate = anchorEnd + cool+warm = 11:00 + 20m = 11:20
+    expect(updates[1]).toMatchObject({ id: 2, start: '2026-04-13T11:20:00.000Z', end: '2026-04-13T12:20:00.000Z' });
+  });
+
+  test('cascade stops: gap absorbs the push, later job stays put', () => {
+    // Anchor 08:00–09:00, job2 at 14:00–15:00. Pushing anchor by 1h still leaves plenty of gap.
+    const chain = [
+      job(1, '2026-04-13T08:00:00.000Z', '2026-04-13T09:00:00.000Z'),
+      job(2, '2026-04-13T14:00:00.000Z', '2026-04-13T15:00:00.000Z'),
+    ];
+    const to = utc('2026-04-13T09:00:00.000Z');
+    const updates = pushBackChain(chain, to, restr, [], [], warmUp, coolDown);
+    expect(updates).toHaveLength(1);
+    expect(updates[0].id).toBe(1);
+  });
+
+  test('cascade: three-job chain pushes in sequence and stops when the gap is big enough', () => {
+    const chain = [
+      job(1, '2026-04-13T08:00:00.000Z', '2026-04-13T09:00:00.000Z'),
+      job(2, '2026-04-13T09:20:00.000Z', '2026-04-13T10:20:00.000Z'), // back-to-back
+      job(3, '2026-04-13T14:00:00.000Z', '2026-04-13T14:30:00.000Z'), // big gap
+    ];
+    const to = utc('2026-04-13T10:00:00.000Z'); // push anchor by 2h
+    const updates = pushBackChain(chain, to, restr, [], [], warmUp, coolDown);
+    expect(updates.map(u => u.id)).toEqual([1, 2]); // job3 stays put
+    expect(updates[1].start).toBe('2026-04-13T11:20:00.000Z');
+  });
+
+  test('cascade respects pre/post-processing buffers (5m warm + 15m cool = 20m gap)', () => {
+    const chain = [
+      job(1, '2026-04-13T08:00:00.000Z', '2026-04-13T09:00:00.000Z'),
+      job(2, '2026-04-13T09:19:00.000Z', '2026-04-13T10:19:00.000Z'), // 19m gap — not enough
+    ];
+    const to = utc('2026-04-13T08:01:00.000Z'); // trivial 1-minute push on anchor
+    const updates = pushBackChain(chain, to, restr, [], [], warmUp, coolDown);
+    // Anchor pushed by 1m → job2 must be re-fitted with 20m buffer → starts at 09:21
+    expect(updates).toHaveLength(2);
+    expect(updates[1].start).toBe('2026-04-13T09:21:00.000Z');
+  });
+
+  test('cascade crosses midnight into silent hours → job pushed to next-day 06:30', () => {
+    // Anchor 19:00–20:00 Brussels (17:00–18:00 UTC, winter would differ). Use summer.
+    // 19:00 Brussels CEST = 17:00 UTC.
+    const chain = [
+      job(1, '2026-04-13T17:00:00.000Z', '2026-04-13T18:00:00.000Z'), // 19:00–20:00 Brussels
+      job(2, '2026-04-13T18:20:00.000Z', '2026-04-13T20:20:00.000Z'), // 20:20–22:20 Brussels
+    ];
+    // Push anchor to 20:30 Brussels = 18:30 UTC
+    const to = utc('2026-04-13T18:30:00.000Z');
+    const updates = pushBackChain(chain, to, restr, [], [], warmUp, coolDown);
+    expect(updates).toHaveLength(2);
+    // Anchor: 20:30–21:30 Brussels — but 21:30 is inside silent window for a job that STARTS
+    //         at 20:30? No, silent-hours check is on the START only. So anchor stays at 20:30.
+    //         Wait — 20:30 is outside the 21:00–06:30 window at the start. OK anchor = 20:30 Brussels.
+    expect(getZoneParts(new Date(updates[0].start), TZ).hour).toBe(20);
+    // job2 candidate = anchorEnd (21:30 Brussels) + 20m = 21:50 Brussels → inside silent window →
+    // advance to next-day 06:30 Brussels.
+    const j2p = getZoneParts(new Date(updates[1].start), TZ);
+    expect(j2p).toMatchObject({ day: 14, hour: 6, minute: 30 });
+  });
+
+  test('otherJobs are respected: pushed job skips a Printing job on the same printer', () => {
+    const chain = [job(1, '2026-04-13T08:00:00.000Z', '2026-04-13T09:00:00.000Z')];
+    // Another printing job occupying 10:00–11:00.
+    const otherJobs = [{ start: '2026-04-13T10:00:00.000Z', end: '2026-04-13T11:00:00.000Z' }];
+    const to = utc('2026-04-13T10:00:00.000Z'); // right on top of the Printing job
+    const updates = pushBackChain(chain, to, restr, [], otherJobs, warmUp, coolDown);
+    // Anchor must skip past the Printing job. Printing end + cool+warm = 11:00 + 20m = 11:20.
+    expect(updates[0].start).toBe('2026-04-13T11:20:00.000Z');
+  });
+
+  test('no-op when "to" is earlier than the current anchor start', () => {
+    const chain = [job(1, '2026-04-13T10:00:00.000Z', '2026-04-13T11:00:00.000Z')];
+    const to = utc('2026-04-13T08:00:00.000Z'); // earlier than 10:00
+    const updates = pushBackChain(chain, to, restr, [], [], warmUp, coolDown);
+    expect(updates).toHaveLength(0);
   });
 });

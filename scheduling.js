@@ -146,6 +146,52 @@ function findNextValidStart(candidate, durationMins, restr, closures, jobs, warm
   return new Date(candidate.getTime() + 86400000);
 }
 
+/**
+ * Push back a chain of jobs on a single printer.
+ *
+ * @param {Array} chain       Jobs to push, ordered by start ascending. chain[0] is the "anchor"
+ *                            (the job the user right-clicked). Each element: {id, start, end}.
+ * @param {Date}  to          New start time for the anchor. Silent hours may push it further.
+ * @param {object} restr      Scheduling restrictions (silent hours/days/timezone).
+ * @param {Array}  closures   Closure ranges (same shape as findNextValidStart).
+ * @param {Array}  otherJobs  Jobs on the same printer that are NOT in the chain. Used for
+ *                            overlap avoidance (e.g. a Printing job or a job on an earlier day).
+ * @param {number} warmUpMs   Pre-processing buffer in ms.
+ * @param {number} coolDownMs Post-processing buffer in ms.
+ * @returns {Array<{id, start, end}>} updates to persist. Chain stops at the first job that
+ *                                    doesn't need to move (gap is wide enough to absorb).
+ */
+function pushBackChain(chain, to, restr, closures, otherJobs, warmUpMs, coolDownMs) {
+  const tz = restr?.timezone || DEFAULT_TZ;
+  const updates = [];
+  let prevEndMs = null;
+
+  for (let i = 0; i < chain.length; i++) {
+    const job = chain[i];
+    const origStartMs = parseJobTime(job.start, tz).getTime();
+    const origEndMs = parseJobTime(job.end, tz).getTime();
+    const durationMs = origEndMs - origStartMs;
+    const durationMins = Math.round(durationMs / 60000);
+
+    const candidate = i === 0
+      ? new Date(to.getTime())
+      : new Date(prevEndMs + coolDownMs + warmUpMs);
+
+    const newStart = findNextValidStart(candidate, durationMins, restr, closures, otherJobs, warmUpMs, coolDownMs);
+
+    // If the chained job doesn't actually need to move, the gap absorbed the push — stop.
+    if (newStart.getTime() <= origStartMs) {
+      break;
+    }
+
+    const newEnd = new Date(newStart.getTime() + durationMs);
+    updates.push({ id: job.id, start: newStart.toISOString(), end: newEnd.toISOString() });
+    prevEndMs = newEnd.getTime();
+  }
+
+  return updates;
+}
+
 module.exports = {
   DEFAULT_TZ,
   timeToMinutes,
@@ -156,4 +202,5 @@ module.exports = {
   isInSilentHours,
   advanceToSilentEnd,
   findNextValidStart,
+  pushBackChain,
 };

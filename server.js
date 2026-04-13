@@ -382,6 +382,56 @@ app.patch('/api/jobs/:id', (req, res) => {
   db.prepare(`UPDATE jobs SET ${setClauses} WHERE id=?`).run(...values);
   res.json({ id: Number(req.params.id), ...req.body, ...Object.fromEntries(fields) });
 });
+// Push back a job (and any jobs after it on the same printer) to a later start time.
+// Body: { to?: ISO-or-datetime-local string }. If omitted, defaults to "now".
+// Cascade stops at the first downstream job whose current start is still free.
+app.post('/api/jobs/:id/push-back', (req, res) => {
+  const id = Number(req.params.id);
+  const anchor = db.prepare('SELECT * FROM jobs WHERE id=?').get(id);
+  if (!anchor || anchor.queued || !anchor.start) {
+    return res.status(400).json({ error: 'Job is not scheduled' });
+  }
+  const restr = getSchedulingRestrictions();
+  const tz = restr.timezone || DEFAULT_TZ;
+  const toRaw = req.body?.to;
+  const toDate = toRaw ? parseJobTime(toRaw, tz) : new Date();
+  if (!toDate || isNaN(toDate.getTime())) {
+    return res.status(400).json({ error: 'Invalid "to" timestamp' });
+  }
+
+  const printer = db.prepare('SELECT warm_up_mins, cool_down_mins FROM printers WHERE id=?').get(anchor.printerId);
+  const warmUpMs = (printer?.warm_up_mins ?? 5) * 60000;
+  const coolDownMs = (printer?.cool_down_mins ?? 15) * 60000;
+  const closures = db.prepare('SELECT startDate, endDate FROM closures').all();
+
+  const allSamePrinter = db.prepare(
+    "SELECT id, name, status, start, end FROM jobs WHERE printerId=? AND queued=0 AND start!=''"
+  ).all(anchor.printerId);
+
+  const anchorStartMs = parseJobTime(anchor.start, tz).getTime();
+  const CASCADABLE_STATUSES = new Set(['Planned', 'Awaiting']);
+
+  // Chain = the anchor plus every downstream cascadable job on this printer.
+  const chain = allSamePrinter
+    .filter(j => {
+      if (j.id === anchor.id) return true;
+      const s = parseJobTime(j.start, tz).getTime();
+      return s >= anchorStartMs && CASCADABLE_STATUSES.has(j.status);
+    })
+    .sort((a, b) => parseJobTime(a.start, tz).getTime() - parseJobTime(b.start, tz).getTime());
+
+  const chainIds = new Set(chain.map(j => j.id));
+  const otherJobs = allSamePrinter.filter(j => !chainIds.has(j.id));
+
+  const updates = scheduling.pushBackChain(chain, toDate, restr, closures, otherJobs, warmUpMs, coolDownMs);
+
+  const upd = db.prepare('UPDATE jobs SET start=?, end=? WHERE id=?');
+  const tx = db.transaction((list) => { for (const u of list) upd.run(u.start, u.end, u.id); });
+  tx(updates);
+
+  res.json({ updatedCount: updates.length, updates });
+});
+
 app.delete('/api/jobs/:id', (req, res) => {
   // Clean up uploaded files
   const job = db.prepare('SELECT printFile, thumbFile FROM jobs WHERE id=?').get(req.params.id);

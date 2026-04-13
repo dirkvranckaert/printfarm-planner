@@ -530,8 +530,29 @@
       <button class="ctx-item" id="ctx-move-next-day">📅 Move to next day</button>
       <button class="ctx-item" id="ctx-move-printer">🖨 Move to another printer</button>
     </div>
+    <div class="ctx-separator"></div>
+    <button class="ctx-item" id="ctx-push-now">⏩ Push back to now</button>
+    <button class="ctx-item" id="ctx-push-to">⏩ Push back to…</button>
+    <div class="ctx-separator"></div>
     <button class="ctx-item" id="ctx-duplicate">📋 Duplicate</button>
     <button class="ctx-item ctx-item-danger" id="ctx-delete">🗑 Delete</button>
+  </div>
+
+  <!-- Push-back modal -->
+  <div id="pushback-modal" class="modal-overlay hidden">
+    <div class="modal-content" style="max-width:360px">
+      <h3 style="margin:0 0 12px">Push back to…</h3>
+      <p style="font-size:12px;color:var(--text-muted);margin:0 0 12px">
+        Pushes this job and every subsequent Planned job on the same printer.
+        Silent hours and pre/post-processing times are respected.
+      </p>
+      <label style="display:block;font-size:12px;color:var(--text-muted);margin-bottom:4px">New start time</label>
+      <input type="datetime-local" id="pushback-datetime" style="width:100%;padding:6px 8px;font-size:14px">
+      <div style="display:flex;gap:8px;justify-content:flex-end;margin-top:16px">
+        <button type="button" id="pushback-cancel" class="btn btn-secondary">Cancel</button>
+        <button type="button" id="pushback-confirm" class="btn btn-primary">Push back</button>
+      </div>
+    </div>
   </div>
 
   <!-- Bottom sheet (mobile context menu) -->
@@ -556,6 +577,9 @@
       <button class="bottom-sheet-item" id="bs-move-next-day">📅 Move to next day</button>
       <button class="bottom-sheet-item" id="bs-move-printer">🖨 Move to another printer</button>
     </div>
+    <div class="bottom-sheet-sep"></div>
+    <button class="bottom-sheet-item" id="bs-push-now">⏩ Push back to now</button>
+    <button class="bottom-sheet-item" id="bs-push-to">⏩ Push back to…</button>
     <div class="bottom-sheet-sep"></div>
     <button class="bottom-sheet-item" id="bs-duplicate">📋 Duplicate</button>
     <button class="bottom-sheet-item danger" id="bs-delete">🗑 Delete</button>
