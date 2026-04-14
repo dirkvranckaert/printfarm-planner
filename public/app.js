@@ -638,6 +638,81 @@ function playNotificationBell() {
   } catch { /* ignore */ }
 }
 
+// =============================================================================
+// Filament-manager catalog lookup
+// =============================================================================
+// Mirrors filament-match.js (server-side). When the filament-manager sibling
+// app is reachable we fetch its catalog and translate each printed hex into
+// the matching brand-named filament — replacing the generic ntc name. See
+// memory: mobile_safari_rules.md for the cross-app discovery / shared-auth
+// pattern these helpers reuse.
+
+let _filamentCatalogCache = null;
+let _filamentCatalogTime  = 0;
+const FILAMENT_CATALOG_TTL_MS = 5 * 60 * 1000;
+
+async function fetchFilamentCatalog() {
+  const now = Date.now();
+  if (_filamentCatalogCache && (now - _filamentCatalogTime) < FILAMENT_CATALOG_TTL_MS) {
+    return _filamentCatalogCache;
+  }
+  try {
+    const discover = await api('GET', '/api/discover').catch(() => null);
+    const fmInfo = discover?.apps?.filament;
+    if (!fmInfo?.available) return [];
+    const base = fmInfo.publicUrl || fmInfo.url;
+    if (!base) return [];
+    const res = await fetch(`${base}/api/filaments`, { credentials: 'include' });
+    if (!res.ok) return [];
+    const list = await res.json();
+    _filamentCatalogCache = Array.isArray(list) ? list : [];
+    _filamentCatalogTime  = now;
+    return _filamentCatalogCache;
+  } catch { return []; }
+}
+
+function _normHex(s) {
+  if (!s) return null;
+  let h = String(s).trim().toLowerCase();
+  if (!h.startsWith('#')) h = '#' + h;
+  if (h.length === 4) h = '#' + h[1] + h[1] + h[2] + h[2] + h[3] + h[3];
+  return /^#[0-9a-f]{6}$/.test(h) ? h : null;
+}
+function _normKey(s) {
+  return String(s || '').toLowerCase().replace(/[\s_\-]+/g, '');
+}
+
+// Same logic as filament-match.js#matchFilament. Tie-break:
+//   1. (brand+type) discriminator count, higher wins
+//   2. inStock wins
+//   3. lowest id wins
+function matchFilamentInCatalog(query, catalog) {
+  const target = _normHex(query?.color);
+  if (!target || !Array.isArray(catalog)) return null;
+  const candidates = catalog.filter(f => _normHex(f.colorHex) === target);
+  if (!candidates.length) return null;
+  if (candidates.length === 1) return candidates[0];
+  const qBrand = _normKey(query.brand);
+  const qType  = _normKey(query.type);
+  function score(f) {
+    const fBrand = _normKey(f.brand);
+    const fType  = _normKey(f.type);
+    const bm = qBrand && fBrand && fBrand === qBrand;
+    const tm = qType  && fType  && fType  === qType;
+    return [(bm ? 1 : 0) + (tm ? 1 : 0), f.inStock ? 1 : 0, -f.id];
+  }
+  let best = candidates[0], bs = score(best);
+  for (let i = 1; i < candidates.length; i++) {
+    const s = score(candidates[i]);
+    if (s[0] > bs[0] ||
+        (s[0] === bs[0] && s[1] > bs[1]) ||
+        (s[0] === bs[0] && s[1] === bs[1] && s[2] > bs[2])) {
+      best = candidates[i]; bs = s;
+    }
+  }
+  return best;
+}
+
 function parseColorsField(val) {
   if (!val) return [];
   try { const arr = JSON.parse(val); if (Array.isArray(arr)) return arr; } catch {}
@@ -3964,16 +4039,25 @@ async function confirm3mfSchedule() {
       startISO = new Date(`${startDate}T${startTime || '08:00'}:00`).toISOString();
     }
 
+    // Best-effort: try to enrich color names from the filament-manager catalog.
+    // Falls back to ntc names if filament-manager is unreachable.
+    const filamentCatalog = await fetchFilamentCatalog().catch(() => []);
+
     const plates = import3mfParsed.plates.map((pl, i) => {
       const check = document.querySelector(`[data-sched-check="${i}"]`);
       if (check && !check.checked) return null;
       const isDual = pl.isDualExtruder || (pl.nozzleCount || 1) >= 2;
       const colors = (pl.filaments || []).map(f => {
         const profile = import3mfParsed.filamentProfiles?.[f.id - 1];
+        const hex   = f.color || '#888888';
+        const brand = profile?.vendor && profile.vendor !== 'Generic' ? profile.vendor : '';
+        const fmMatch = matchFilamentInCatalog({ color: hex, brand, type: f.type }, filamentCatalog);
         return {
-          color: f.color || '#888888',
-          name: (typeof ntc !== 'undefined' ? ntc.name(f.color || '#888888')?.[1] : '') || f.color,
-          brand: profile?.vendor && profile.vendor !== 'Generic' ? profile.vendor : '',
+          color: hex,
+          name: fmMatch?.colorName
+                || (typeof ntc !== 'undefined' ? ntc.name(hex)?.[1] : '')
+                || hex,
+          brand: fmMatch?.brand || brand,
           extruder: isDual && f.extruder ? (f.extruder === 1 ? 'L' : 'R') : null,
         };
       });

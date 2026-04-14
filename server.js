@@ -578,6 +578,79 @@ app.post('/api/jobs/:id/pull-forward', (req, res) => {
   res.json({ updatedCount: updates.length, updates });
 });
 
+// One-shot admin endpoint to remap historic colors[*].name + .brand against
+// the filament-manager catalog. Default is DRY RUN — pass ?commit=1 to write.
+// Reuses filament-match.js so the logic matches the live import path.
+app.post('/api/admin/remap-colors', async (req, res) => {
+  const commit = req.query.commit === '1' || req.body?.commit === true;
+  const filamentMatch = require('./filament-match');
+
+  // Fetch the filament catalog from the sibling app via shared-auth. The
+  // createSharedCookie helper returns a full Set-Cookie header string so we
+  // grab just the `name=value` portion for the outbound Cookie request header.
+  const filamentUrl = process.env.FILAMENT_URL || '';
+  if (!filamentUrl) return res.status(503).json({ error: 'FILAMENT_URL not configured' });
+  let catalog;
+  try {
+    const headers = {};
+    const setCookie = sharedAuth.createSharedCookie('admin-remap');
+    if (setCookie) headers.Cookie = setCookie.split(';')[0];
+    const r = await fetch(`${filamentUrl}/api/filaments`, { headers });
+    if (!r.ok) return res.status(502).json({ error: `filament-manager ${r.status}` });
+    catalog = await r.json();
+  } catch (e) {
+    return res.status(502).json({ error: 'filament-manager unreachable: ' + e.message });
+  }
+
+  const rows = db.prepare("SELECT id, name, customerName, start, colors FROM jobs WHERE colors IS NOT NULL AND colors != '' AND colors != '[]'").all();
+
+  const report = { commit, totalJobs: rows.length, jobsTouched: 0, colorsTotal: 0, colorsMatched: 0, colorsReplaced: 0, unmatchedHexes: {}, replacements: [] };
+
+  const upd = db.prepare('UPDATE jobs SET colors=? WHERE id=?');
+  const tx = db.transaction((items) => { for (const it of items) upd.run(it.colors, it.id); });
+  const writeBatch = [];
+
+  for (const job of rows) {
+    let colors;
+    try { colors = JSON.parse(job.colors); } catch { continue; }
+    if (!Array.isArray(colors)) continue;
+    let touched = false;
+    for (const c of colors) {
+      report.colorsTotal++;
+      const m = filamentMatch.matchFilament({ color: c.color, brand: c.brand }, catalog);
+      if (!m) {
+        const hex = filamentMatch.normalizeHex(c.color) || c.color || '?';
+        report.unmatchedHexes[hex] = (report.unmatchedHexes[hex] || 0) + 1;
+        continue;
+      }
+      report.colorsMatched++;
+      const sameName  = c.name && String(c.name).toLowerCase() === String(m.colorName).toLowerCase();
+      const sameBrand = filamentMatch.normalizeKey(c.brand) === filamentMatch.normalizeKey(m.brand);
+      if (!sameName || !sameBrand) {
+        report.colorsReplaced++;
+        if (report.replacements.length < 200) {
+          report.replacements.push({
+            jobId: job.id, jobName: job.name, hex: c.color,
+            old: { name: c.name || null, brand: c.brand || null },
+            new: { name: m.colorName, brand: m.brand },
+          });
+        }
+        c.name = m.colorName;
+        c.brand = m.brand;
+        touched = true;
+      }
+    }
+    if (touched) {
+      report.jobsTouched++;
+      writeBatch.push({ id: job.id, colors: JSON.stringify(colors) });
+    }
+  }
+
+  if (commit && writeBatch.length) tx(writeBatch);
+
+  res.json(report);
+});
+
 app.delete('/api/jobs/:id', (req, res) => {
   // Clean up uploaded files
   const job = db.prepare('SELECT printFile, thumbFile FROM jobs WHERE id=?').get(req.params.id);
