@@ -146,6 +146,10 @@ brands.onUpdate((brandKey, status) => {
 
   // --- Stage-transition handling (runs only when stage changes) ---
   if (curr && curr !== prev) {
+    // Piggy-back an explicit event so the client always re-renders the
+    // calendar on a real stage transition, even if partial frames after
+    // resume carry over the old stage (see bambu.js:128-160).
+    sseClients.forEach(res => res.write(`data: ${JSON.stringify({ stageChanged: brandKey, from: prev, to: curr })}\n\n`));
     const linked = db.prepare(
       "SELECT * FROM jobs WHERE linked_printer_id=? AND status != 'Done'"
     ).all(printer.id);
