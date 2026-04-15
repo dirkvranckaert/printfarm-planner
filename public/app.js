@@ -20,6 +20,9 @@ let statusMeta = {
   'Post Printing': { color: '#d97706' },
   'Done':          { color: '#64748b' },
   'Awaiting':      { color: '#7c3aed' },
+  // System-only: server flips a linked job to 'Paused' while the printer
+  // is paused; cleared on resume. NOT exposed in any user status picker.
+  'Paused':        { color: '#f59e0b' },
 };
 
 // ---- API helper ----
@@ -563,6 +566,8 @@ async function loadStatusColors() {
     'Post Printing': { color: colors['Post Printing'] ?? '#d97706' },
     'Done':          { color: colors['Done']          ?? '#64748b' },
     'Awaiting':      { color: colors['Awaiting']      ?? '#7c3aed' },
+    // System-only (see top of file). Not exposed in settings pickers.
+    'Paused':        { color: colors['Paused']        ?? '#f59e0b' },
   };
 }
 
@@ -3476,8 +3481,8 @@ async function openStatusOverview() {
   ]);
   const printerMap = Object.fromEntries(allPrinters.map(p => [p.id, p]));
 
-  const statusOrder = ['Printing', 'Awaiting', 'Post Printing', 'Planned', 'Done'];
-  const expandByDefault = new Set(['Printing', 'Awaiting', 'Post Printing']);
+  const statusOrder = ['Printing', 'Paused', 'Awaiting', 'Post Printing', 'Planned', 'Done'];
+  const expandByDefault = new Set(['Printing', 'Paused', 'Awaiting', 'Post Printing']);
 
   const scheduled = allJobs.filter(j => !j.queued);
 
