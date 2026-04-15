@@ -6,6 +6,7 @@ const path    = require('path');
 const db     = require('./db');
 const brands = require('./brands');
 const push   = require('./push');
+const pause  = require('./pause');
 const { parse3mf, extractThumbnails } = require('./parse3mf');
 const sharedAuth = require('./shared-auth');
 
@@ -151,9 +152,11 @@ brands.onUpdate((brandKey, status) => {
 
     linked.forEach(job => {
       if (curr === 'RUNNING' && job.status !== 'Printing') {
-        // First RUNNING tick after linking: mark as Printing and snap start/end
-        // to reflect the actual print start (may differ from scheduled start).
-        db.prepare("UPDATE jobs SET status='Printing' WHERE id=?").run(job.id);
+        // First RUNNING tick after linking, or resume from PAUSE. Mark as
+        // Printing, clear any pause snapshot, and snap start/end to reflect
+        // the actual reported remaining (may differ from scheduled end).
+        if (job.status === 'Paused') pause.endPause({ db, jobId: job.id });
+        db.prepare("UPDATE jobs SET status='Printing', paused_at=NULL, paused_remaining_ms=NULL WHERE id=?").run(job.id);
         const refreshed = db.prepare('SELECT * FROM jobs WHERE id=?').get(job.id);
         tryRealign(printer, refreshed, status.remaining, { snapStart: true });
         broadcastJobsUpdated();
@@ -173,8 +176,10 @@ brands.onUpdate((brandKey, status) => {
         }
       }
       if (curr === 'PAUSE' && prev === 'RUNNING') {
-        // Paused mid-print — alert the user. Don't touch the schedule while paused;
-        // the first RUNNING tick on resume will recompute normally.
+        // Paused mid-print — snapshot remaining time, flip status to
+        // 'Paused', and let the periodic pauseTick drift the bar forward.
+        pause.beginPause({ db, jobId: job.id, now: new Date() });
+        broadcastJobsUpdated();
         if (push.isEnabled('paused')) {
           let body = `Printer ${printer.name} PAUSED`;
           if (job.orderNr || job.name) body += ` — '${job.name || ''}${job.orderNr ? ` #${job.orderNr}` : ''}'`;
@@ -258,6 +263,19 @@ setInterval(() => {
       url: `/#job/${job.id}`,
     });
     db.prepare('UPDATE jobs SET start_push_sent=1 WHERE id=?').run(job.id);
+  }
+}, 60_000);
+
+// --- Pause drift tick ---
+// Every 60s, for every job currently paused, bump its end forward to
+// (now + paused_remaining_ms) so the day-view bar drifts with wall-clock.
+// Cascade downstream Planned/Awaiting jobs via scheduling.pushBackChain.
+setInterval(() => {
+  try {
+    const res = pause.pauseTick({ db, now: new Date(), restr: getSchedulingRestrictions() });
+    if (res.updated.length) broadcastJobsUpdated();
+  } catch (err) {
+    console.error('[pauseTick] error:', err.message);
   }
 }, 60_000);
 
@@ -450,6 +468,9 @@ app.put('/api/jobs/:id', (req, res) => {
   db.prepare(
     'UPDATE jobs SET printerId=?, name=?, customerName=?, orderNr=?, start=?, end=?, status=?, colors=?, printFile=?, remarks=?, queued=?, durationMins=?, bedType=? WHERE id=?'
   ).run(printerId, name, customerName, orderNr, normStart, normEnd, status, colors, printFile, remarks, isQueued, durationMins ?? 0, bedType ?? null, req.params.id);
+  // If the user moves a job out of 'Paused' via the edit dialog, clear the
+  // stale pause snapshot so it does not drift on the next tick.
+  if (status !== 'Paused') pause.clearPauseFields({ db, jobId: Number(req.params.id) });
   res.json({ id: Number(req.params.id), ...req.body, start: normStart, end: normEnd, queued: isQueued });
 });
 app.patch('/api/jobs/:id', (req, res) => {
@@ -461,6 +482,11 @@ app.patch('/api/jobs/:id', (req, res) => {
   const setClauses = fields.map(([k]) => `${k}=?`).join(', ');
   const values = [...fields.map(([, v]) => v), req.params.id];
   db.prepare(`UPDATE jobs SET ${setClauses} WHERE id=?`).run(...values);
+  // Status moving out of 'Paused' via a PATCH: clear the pause snapshot.
+  const patchedStatus = Object.fromEntries(fields).status;
+  if (patchedStatus !== undefined && patchedStatus !== 'Paused') {
+    pause.clearPauseFields({ db, jobId: Number(req.params.id) });
+  }
   res.json({ id: Number(req.params.id), ...req.body, ...Object.fromEntries(fields) });
 });
 // Push back a job (and any jobs after it on the same printer) to a later start time.
