@@ -97,6 +97,16 @@ if (!jobColsThumb.some(c => c.name === 'bedType')) {
   db.exec('ALTER TABLE jobs ADD COLUMN bedType TEXT');
 }
 
+// Pause tracking: set on RUNNING->PAUSE, cleared on PAUSE->RUNNING (or
+// when the job is manually moved out of Paused). See server.js + README.
+const jobColsPause = db.pragma('table_info(jobs)');
+if (!jobColsPause.some(c => c.name === 'paused_at')) {
+  db.exec('ALTER TABLE jobs ADD COLUMN paused_at TEXT');
+}
+if (!jobColsPause.some(c => c.name === 'paused_remaining_ms')) {
+  db.exec('ALTER TABLE jobs ADD COLUMN paused_remaining_ms INTEGER');
+}
+
 // One-time migration: if the favourite column was previously added with DEFAULT 0
 // (all printers show favourite=0), set them all to 1 so they appear in day view.
 const favMigrated = db.prepare("SELECT value FROM settings WHERE key='favouriteMigrated'").get();
