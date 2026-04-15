@@ -392,6 +392,14 @@ async function init() {
     const el = document.getElementById('app-version');
     if (el) el.textContent = `v${config.version}`;
   }
+  // Optional deploy line — only rendered if release.env was present AND
+  // complete on the server. If config.deploy is null we leave the element
+  // empty (and CSS hides it via :empty).
+  if (config?.deploy) {
+    const d = config.deploy;
+    const depEl = document.getElementById('app-deploy');
+    if (depEl) depEl.textContent = `${d.branch}.${d.sha} (${d.timestamp})`;
+  }
 
   // Register service worker for push notifications
   if ('serviceWorker' in navigator) {

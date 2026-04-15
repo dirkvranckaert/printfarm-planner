@@ -359,10 +359,16 @@ app.post('/api/push/test', (req, res) => {
 
 // --- App config (read-only, driven by env vars) ---
 const { version } = require('./package.json');
+const { readReleaseInfo } = require('./lib/release-info');
+
+// Read release.env once at startup (deploy pipeline writes it into the
+// release dir; it never changes at runtime for a given process).
+const deployInfo = readReleaseInfo();
 
 app.get('/api/config', (req, res) => {
   res.json({
     version,
+    deploy: deployInfo,
     appName: 'PrintFarm Planner',
     appId: 'printfarm-planner',
     publicUrl: process.env.PUBLIC_URL || null,

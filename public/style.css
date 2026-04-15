@@ -712,7 +712,10 @@ body {
   flex-shrink: 0;
 }
 .modal-footer-right { display: flex; gap: 8px; }
-.app-version { font-size: 11px; color: var(--text-muted); align-self: center; }
+.app-version { font-size: 11px; color: var(--text-muted); }
+.app-version-block { display: flex; flex-direction: column; align-self: center; line-height: 1.25; }
+.app-deploy { font-size: 10px; color: var(--text-muted); opacity: 0.75; }
+.app-deploy:empty { display: none; }
 
 /* ======================== Forms ======================== */
 .form-group { margin-bottom: 14px; }
