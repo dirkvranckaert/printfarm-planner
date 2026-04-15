@@ -340,16 +340,21 @@ function connectSSE() {
     try {
       const updates = JSON.parse(e.data);
       if (updates.jobsUpdated) { renderCalendar(); return; }
-      // Detect stage transitions so the calendar can refresh its paused/running
-      // highlights on linked jobs even when no schedule change happened.
-      let stageChanged = false;
-      for (const [key, next] of Object.entries(updates)) {
-        const prev = printerStatus[key];
-        if (prev?.stage !== next?.stage) stageChanged = true;
+      // Server pushes an explicit stageChanged event on every real
+      // printer stage transition — always re-render on it. Partial frames
+      // from Bambu carry over the old stage (bambu.js:128-160), so the
+      // client-side diff is unreliable.
+      if (updates.stageChanged) { renderCalendar(); return; }
+      // Fallback: any status frame that carries a `stage` field gets a
+      // re-render. renderDay() is idempotent re. scroll position, so this
+      // is cheap (stage only ships on transitions from Bambu).
+      let stagePresent = false;
+      for (const [, next] of Object.entries(updates)) {
+        if (next && typeof next === 'object' && next.stage !== undefined) stagePresent = true;
       }
       Object.assign(printerStatus, updates);
       renderTopbarStatus();
-      if (stageChanged) renderCalendar();
+      if (stagePresent) renderCalendar();
     } catch (_) {}
   };
 
@@ -369,6 +374,10 @@ async function onPageVisible() {
   printers = await api('GET', '/api/printers').catch(() => printers);
   await renderCalendar();
   renderTopbarStatus();
+  // Reset the cached per-printer status map so the first SSE frame after
+  // reconnect seeds fresh — prevents stale PAUSE stages from masking a
+  // RUNNING transition that happened while the tab was backgrounded.
+  printerStatus = {};
   if (!sseSource || sseSource.readyState === EventSource.CLOSED) connectSSE();
 }
 
