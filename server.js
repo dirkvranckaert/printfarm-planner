@@ -363,7 +363,7 @@ const { readReleaseInfo } = require('./lib/release-info');
 
 // Read release.env once at startup (deploy pipeline writes it into the
 // release dir; it never changes at runtime for a given process).
-const deployInfo = readReleaseInfo();
+const deployInfo = readReleaseInfo(__dirname);
 
 app.get('/api/config', (req, res) => {
   res.json({
