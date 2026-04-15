@@ -59,6 +59,17 @@ function clearPauseFields({ db, jobId }) {
 }
 
 /**
+ * Force a job out of 'Paused' on a PAUSE -> FINISH/IDLE stage transition
+ * (user cancelled the print directly on the printer touchscreen). Clears the
+ * stale pause snapshot, flips status to 'Post Printing', and unlinks the
+ * printer. Crucially does NOT bump 'end' forward -- the print is actually
+ * stopping, not continuing.
+ */
+function finishFromPause({ db, jobId }) {
+  db.prepare("UPDATE jobs SET paused_at=NULL, paused_remaining_ms=NULL, status='Post Printing', linked_printer_id=NULL WHERE id=?").run(jobId);
+}
+
+/**
  * Periodic tick: for every job currently paused, bump `end` forward to
  * `now + paused_remaining_ms` and cascade downstream Planned/Awaiting jobs
  * via scheduling.pushBackChain. The paused job's `start` moves with `end`
@@ -131,4 +142,4 @@ function pauseTick({ db, now, restr }) {
   return { updated };
 }
 
-module.exports = { beginPause, endPause, clearPauseFields, pauseTick };
+module.exports = { beginPause, endPause, clearPauseFields, finishFromPause, pauseTick };

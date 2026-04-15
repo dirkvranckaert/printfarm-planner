@@ -168,8 +168,18 @@ brands.onUpdate((brandKey, status) => {
           push.sendToAll({ title: 'PrintFarm', body: `Printer ${printer.name} has started printing`, tag: `started-${printer.id}`, url: `/#job/${job.id}` });
         }
       }
-      if ((curr === 'FINISH' || curr === 'IDLE') && prev === 'RUNNING' && job.status === 'Printing') {
-        db.prepare("UPDATE jobs SET status='Post Printing', linked_printer_id=NULL WHERE id=?").run(job.id);
+      if ((curr === 'FINISH' || curr === 'IDLE')
+          && (prev === 'RUNNING' || prev === 'PAUSE')
+          && (job.status === 'Printing' || job.status === 'Paused')) {
+        // PAUSE -> FINISH/IDLE happens when the user cancels a paused print
+        // directly on the printer touchscreen. Clear the stale pause snapshot
+        // before flipping to Post Printing -- the print is actually stopping,
+        // not continuing, so 'end' must NOT be bumped forward.
+        if (job.status === 'Paused') {
+          pause.finishFromPause({ db, jobId: job.id });
+        } else {
+          db.prepare("UPDATE jobs SET status='Post Printing', linked_printer_id=NULL WHERE id=?").run(job.id);
+        }
         broadcastJobsUpdated();
         if (push.isEnabled('done')) {
           let body = `Printer ${printer.name} has done printing `;

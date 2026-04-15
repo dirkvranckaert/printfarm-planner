@@ -195,6 +195,51 @@ describe('pause.endPause', () => {
   });
 });
 
+describe('pause.finishFromPause (PAUSE -> FINISH/IDLE direct transition)', () => {
+  test('PAUSE -> FINISH: clears pause fields, flips to Post Printing, unlinks printer, does not touch end', () => {
+    const db = makeDb();
+    const printer = addPrinter(db);
+    const job = addJob(db, printer.id, {
+      name: 'A', status: 'Printing',
+      start: '2026-04-13T08:00:00.000Z', end: '2026-04-13T09:00:00.000Z',
+      linked_printer_id: printer.id,
+    });
+    pause.beginPause({ db, jobId: job.id, now: new Date('2026-04-13T08:30:00.000Z') });
+    // Simulate user cancelling the paused print on the touchscreen:
+    // the server branch sees curr='FINISH', prev='PAUSE', job.status='Paused'.
+    pause.finishFromPause({ db, jobId: job.id });
+    const after = getJob(db, job.id);
+    expect(after.status).toBe('Post Printing');
+    expect(after.paused_at).toBeNull();
+    expect(after.paused_remaining_ms).toBeNull();
+    expect(after.linked_printer_id).toBeNull();
+    // 'end' is NOT bumped forward -- the print is stopping, not continuing.
+    expect(after.end).toBe('2026-04-13T09:00:00.000Z');
+    expect(after.start).toBe('2026-04-13T08:00:00.000Z');
+  });
+
+  test('PAUSE -> IDLE: same end state (Post Printing + cleared fields)', () => {
+    const db = makeDb();
+    const printer = addPrinter(db);
+    const job = addJob(db, printer.id, {
+      name: 'B', status: 'Printing',
+      start: '2026-04-13T10:00:00.000Z', end: '2026-04-13T11:00:00.000Z',
+      linked_printer_id: printer.id,
+    });
+    pause.beginPause({ db, jobId: job.id, now: new Date('2026-04-13T10:15:00.000Z') });
+    expect(getJob(db, job.id).status).toBe('Paused');
+    // Same helper regardless of FINISH vs IDLE -- the server branch collapses
+    // both into one path.
+    pause.finishFromPause({ db, jobId: job.id });
+    const after = getJob(db, job.id);
+    expect(after.status).toBe('Post Printing');
+    expect(after.paused_at).toBeNull();
+    expect(after.paused_remaining_ms).toBeNull();
+    expect(after.linked_printer_id).toBeNull();
+    expect(after.end).toBe('2026-04-13T11:00:00.000Z');
+  });
+});
+
 describe('pause.clearPauseFields', () => {
   test('wipes paused_at and paused_remaining_ms without touching status', () => {
     const db = makeDb();
