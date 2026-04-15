@@ -223,6 +223,37 @@ BambuLab MQTT has two broker regions:
 
 ---
 
+## Live job realignment & pause drift
+
+When a job is linked to a physical printer (via `linked_printer_id`), the server continuously rewrites the job's `start` / `end` timestamps so the day-view bar always reflects the real state of the print. This runs entirely server-side — the client only re-renders when an SSE event fires.
+
+### Live realign (RUNNING ticks)
+
+- Every time a linked printer reports its `mc_remaining_time` while `gcode_state == 'RUNNING'`, `realign.realignLinkedJob` shifts the currently-printing job so its `end` matches `now + remaining_mins`. The block's **duration** is kept constant — start and end move together, the block slides without resizing.
+- Throttled to one realign per linked printer per 60s (see `REALIGN_MIN_INTERVAL_MS` in `server.js`) to avoid thrashing on Bambu's ~2s MQTT cadence.
+- If the new predicted end is **later** than the stored end (>2 min threshold), downstream Planned/Awaiting jobs on the same printer cascade backward via `scheduling.pushBackChain`, honoring warm/cool buffers, silent hours and closures.
+- If the new predicted end is **earlier**, only the current job is pulled back — downstream jobs stay put, creating a "free gap" the user can fill manually. Pull-forward never cascades.
+
+### Pause drift (PAUSE ticks)
+
+Bambu freezes `mc_remaining_time` while the printer is paused, so the live-realign pipeline is gated off during PAUSE (it would drift `predicted_end` later every tick, then snap back on resume). Instead:
+
+1. **On `RUNNING → PAUSE`** (`pause.beginPause`): the server snapshots `paused_at = now` and `paused_remaining_ms = max(0, job.end - now)` onto the job row and flips `status = 'Paused'`. `start` / `end` are not touched on the transition itself. The row status `'Paused'` is **system-only** — it is not exposed in any user-facing status picker; only the pause/resume pipeline writes it.
+2. **Every 60s while paused** (`pause.pauseTick`, piggy-backed on the upcoming-notifications interval): for every paused job, the server rewrites `end = now + paused_remaining_ms` and shifts `start` to preserve the original duration. The day-view bar drifts forward with the now-line. Downstream Planned/Awaiting jobs cascade backward via `scheduling.pushBackChain`, same as the RUNNING realign.
+3. **On `PAUSE → RUNNING`** (`pause.endPause`): the server clears `paused_at` and `paused_remaining_ms`, flips `status = 'Printing'`, and the existing snap-start realign re-snaps the block against the real reported `remaining`.
+
+### Edge cases
+
+- **Multi-pause** (pause → resume → pause): each fresh pause recomputes `paused_remaining_ms` from the freshly-realigned `end` written by the last RUNNING tick (or pauseTick).
+- **Manual status change out of Paused** (Done / Cancelled / Planned via the edit dialog or status picker): the PUT/PATCH job routes call `pause.clearPauseFields` so the row does not carry a stale `paused_at` forever.
+- **Server restart while paused**: because `paused_at` and `paused_remaining_ms` are persisted in SQLite, the first pauseTick after restart recomputes `end = now + paused_remaining_ms` and cascades downstream. The bar may jump forward by however long the server was down — that is the correct behavior.
+
+### SSE stage transitions
+
+Bambu often sends partial MQTT frames (temps / remaining without `gcode_state`), which `bambu.js` merges onto the previous status via a spread. The client-side diff would therefore miss any stage transition masked by a partial frame. To fix this, the server emits an explicit `{ stageChanged, from, to }` SSE event on every real transition (see `server.js` onUpdate handler); the client always re-renders the calendar on this event in addition to its own stage-present fallback.
+
+---
+
 ## Push notifications
 
 PrintFarm Planner can send browser push notifications for key events. Notifications work even when the tab is not focused, and on mobile when the browser is in the background.
