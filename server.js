@@ -624,6 +624,26 @@ app.post('/api/jobs/:id/pull-forward', (req, res) => {
   res.json({ updatedCount: updates.length, updates });
 });
 
+// Server-side proxy for the filament-manager catalog. The browser cannot fetch
+// the sibling app directly (cross-origin, no CORS, auth cookies don't travel).
+// This endpoint does a server-to-server fetch using shared-auth, just like
+// /api/admin/remap-colors already does, and returns the catalog to the client.
+app.get('/api/filament-catalog', async (req, res) => {
+  const filamentUrl = process.env.FILAMENT_URL || '';
+  if (!filamentUrl) return res.json([]);
+  try {
+    const headers = {};
+    const setCookie = sharedAuth.createSharedCookie('catalog-proxy');
+    if (setCookie) headers.Cookie = setCookie.split(';')[0];
+    const r = await fetch(`${filamentUrl}/api/filaments`, { headers });
+    if (!r.ok) return res.json([]);
+    const list = await r.json();
+    res.json(Array.isArray(list) ? list : []);
+  } catch {
+    res.json([]);
+  }
+});
+
 // One-shot admin endpoint to remap historic colors[*].name + .brand against
 // the filament-manager catalog. Default is DRY RUN — pass ?commit=1 to write.
 // Reuses filament-match.js so the logic matches the live import path.
