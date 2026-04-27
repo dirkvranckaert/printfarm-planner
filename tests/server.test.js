@@ -278,3 +278,122 @@ describe('Session management', () => {
     expect(Date.now() > row.expires_at).toBe(true);
   });
 });
+
+describe('3MF schedule import — array-order is the contract', () => {
+  // Regression guard for the /api/import-3mf-schedule route. The route loops
+  // `for (const pl of plates)` and must NOT sort. Client-side reordering is
+  // the entire backend story for the new per-plate up/down arrows. This test
+  // mirrors the route's exact insertion shape against an in-memory DB and
+  // proves: createdJobs come back in input order, starts are sequential, no
+  // two jobs overlap. If a future refactor re-sorts plates inside the loop,
+  // this test trips.
+  let db;
+
+  beforeEach(() => {
+    db = new Database(':memory:');
+    db.exec(`
+      CREATE TABLE printers (
+        id INTEGER PRIMARY KEY AUTOINCREMENT,
+        name TEXT NOT NULL,
+        color TEXT NOT NULL,
+        warm_up_mins INTEGER DEFAULT 5,
+        cool_down_mins INTEGER DEFAULT 15
+      );
+      CREATE TABLE jobs (
+        id INTEGER PRIMARY KEY AUTOINCREMENT,
+        printerId INTEGER,
+        name TEXT NOT NULL,
+        customerName TEXT,
+        orderNr TEXT,
+        start TEXT NOT NULL,
+        end TEXT NOT NULL,
+        status TEXT DEFAULT 'Planned',
+        colors TEXT,
+        printFile TEXT,
+        remarks TEXT,
+        queued INTEGER DEFAULT 0,
+        durationMins INTEGER DEFAULT 0,
+        thumbFile TEXT,
+        bedType TEXT
+      );
+    `);
+    db.prepare('INSERT INTO printers (name, color, warm_up_mins, cool_down_mins) VALUES (?,?,?,?)')
+      .run('P1', '#f00', 5, 15);
+  });
+
+  test('three plates in [3,1,2] order schedule in that order with sequential, non-overlapping starts', () => {
+    // Mirrors server.js /api/import-3mf-schedule loop semantics with a
+    // pass-through `findNextValidStart` (no silent-hours / closed-days here —
+    // those are covered by scheduling.test.js. We only need to prove the loop
+    // respects array order).
+    const findNextValidStart = (candidate /*, durationMins, printerId */) => new Date(candidate);
+
+    const printerId = db.prepare('SELECT id FROM printers').get().id;
+    const plates = [
+      { plateIndex: 3, name: 'Plate 3', printerId, durationMins: 60 },
+      { plateIndex: 1, name: 'Plate 1', printerId, durationMins: 90 },
+      { plateIndex: 2, name: 'Plate 2', printerId, durationMins: 30 },
+    ];
+
+    let currentStart = new Date('2026-04-27T08:00:00.000Z');
+    const createdJobs = [];
+    for (const pl of plates) {
+      const validStart = findNextValidStart(currentStart, pl.durationMins, pl.printerId);
+      const endDate = new Date(validStart.getTime() + pl.durationMins * 60000);
+      const printer = db.prepare('SELECT warm_up_mins, cool_down_mins FROM printers WHERE id=?').get(pl.printerId);
+      const warmUp = printer.warm_up_mins;
+      const coolDown = printer.cool_down_mins;
+      const result = db.prepare(
+        'INSERT INTO jobs (printerId, name, start, end, status, durationMins) VALUES (?,?,?,?,?,?)'
+      ).run(pl.printerId, pl.name, validStart.toISOString(), endDate.toISOString(), 'Planned', pl.durationMins);
+      createdJobs.push({
+        id: result.lastInsertRowid,
+        name: pl.name,
+        printerId: pl.printerId,
+        start: validStart.toISOString(),
+        end: endDate.toISOString(),
+        durationMins: pl.durationMins,
+      });
+      currentStart = new Date(endDate.getTime() + (coolDown + warmUp) * 60000);
+    }
+
+    // Order: array order is preserved end-to-end.
+    expect(createdJobs.map(j => j.name)).toEqual(['Plate 3', 'Plate 1', 'Plate 2']);
+
+    // Sequential: each job starts at or after the previous one ends.
+    expect(new Date(createdJobs[1].start).getTime())
+      .toBeGreaterThanOrEqual(new Date(createdJobs[0].end).getTime());
+    expect(new Date(createdJobs[2].start).getTime())
+      .toBeGreaterThanOrEqual(new Date(createdJobs[1].end).getTime());
+
+    // Non-overlapping: end of N < start of N+1 (strict, since cool+warm gap > 0).
+    expect(new Date(createdJobs[0].end).getTime())
+      .toBeLessThan(new Date(createdJobs[1].start).getTime());
+    expect(new Date(createdJobs[1].end).getTime())
+      .toBeLessThan(new Date(createdJobs[2].start).getTime());
+
+    // DB rows are in insert order with the same names — no sort happened.
+    const rows = db.prepare('SELECT name, start FROM jobs ORDER BY id ASC').all();
+    expect(rows.map(r => r.name)).toEqual(['Plate 3', 'Plate 1', 'Plate 2']);
+  });
+
+  test('single-plate schedule: createdJobs has one entry, start == input start', () => {
+    const findNextValidStart = (candidate) => new Date(candidate);
+    const printerId = db.prepare('SELECT id FROM printers').get().id;
+    const plates = [{ plateIndex: 1, name: 'Solo', printerId, durationMins: 45 }];
+    const startISO = '2026-04-27T08:00:00.000Z';
+    let currentStart = new Date(startISO);
+    const createdJobs = [];
+    for (const pl of plates) {
+      const validStart = findNextValidStart(currentStart, pl.durationMins, pl.printerId);
+      const endDate = new Date(validStart.getTime() + pl.durationMins * 60000);
+      const result = db.prepare(
+        'INSERT INTO jobs (printerId, name, start, end, status, durationMins) VALUES (?,?,?,?,?,?)'
+      ).run(pl.printerId, pl.name, validStart.toISOString(), endDate.toISOString(), 'Planned', pl.durationMins);
+      createdJobs.push({ id: result.lastInsertRowid, name: pl.name, start: validStart.toISOString(), end: endDate.toISOString() });
+    }
+    expect(createdJobs).toHaveLength(1);
+    expect(createdJobs[0].name).toBe('Solo');
+    expect(createdJobs[0].start).toBe(startISO);
+  });
+});

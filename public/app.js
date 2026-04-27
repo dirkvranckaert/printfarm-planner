@@ -3849,6 +3849,18 @@ let import3mfBuffer = null;
 let import3mfBusy = false;
 let import3mfDefaultDate = null;
 let import3mfFilename = null;
+let import3mfPlateOrder = []; // current display order of original plate indices
+
+// Pure helper: swap an entry with its neighbour and return a new array.
+// direction: -1 = up, +1 = down. No-op (returns a fresh copy of `order`)
+// when the move would cross the array boundary.
+function reorderPlates(order, fromIdx, direction) {
+  const next = order.slice();
+  const target = fromIdx + direction;
+  if (target < 0 || target >= next.length) return next;
+  [next[fromIdx], next[target]] = [next[target], next[fromIdx]];
+  return next;
+}
 
 function initImport3mf() {
   document.getElementById('btn-import-3mf')?.addEventListener('click', () => {
@@ -3961,24 +3973,38 @@ function show3mfSchedulePreview(parsed, filename) {
 
   const defaultDate = import3mfDefaultDate || new Date();
   const today = `${defaultDate.getFullYear()}-${String(defaultDate.getMonth()+1).padStart(2,'0')}-${String(defaultDate.getDate()).padStart(2,'0')}`;
+  // Default the manual time field to "now" (HH:mm, padded), not 08:00.
+  // We use the wall clock at render time, regardless of any dragged-in date.
+  const nowForTime = new Date();
+  const nowHHMM = `${String(nowForTime.getHours()).padStart(2,'0')}:${String(nowForTime.getMinutes()).padStart(2,'0')}`;
   import3mfDefaultDate = null; // reset
   const totalMins = parsed.plates.reduce((s, pl) => s + (pl.printTimeMinutes || 0), 0);
 
-  const rows = parsed.plates.map((pl, i) => {
+  // Reset display order for this dialog (identity).
+  import3mfPlateOrder = parsed.plates.map((_, i) => i);
+
+  // Render a single plate row given the original plate index `i` and its
+  // visible position `pos` (used to disable boundary arrows).
+  function renderPlateRow(i, pos, total) {
+    const pl = parsed.plates[i];
     const thumb = parsed.thumbnails?.[pl.index];
     const nameDefault = pl.plateName || pl.objects?.join(', ') || `Plate ${pl.index}`;
     const typeInfo = pl.filamentType || '';
     const colorDots = (pl.filaments || []).map(f =>
       f.color ? `<span style="display:inline-block;width:12px;height:12px;border-radius:3px;background:${f.color};border:1px solid rgba(0,0,0,.15);vertical-align:middle" title="${ntc.name(f.color)?.[1] || f.color}"></span>` : ''
     ).join(' ');
+    const upDisabled = pos === 0;
+    const downDisabled = pos === total - 1;
+    const arrowBtn = (dir, disabled) => `<button type="button" data-sched-move="${i}" data-sched-dir="${dir}" ${disabled ? 'disabled' : ''} title="Move ${dir === -1 ? 'up' : 'down'}" style="background:none;border:1px solid var(--border);border-radius:3px;padding:0 6px;font-size:13px;line-height:1.4;cursor:${disabled ? 'not-allowed' : 'pointer'};opacity:${disabled ? '0.35' : '1'}">${dir === -1 ? '▲' : '▼'}</button>`;
 
-    return `<div style="display:flex;gap:12px;padding:12px;background:var(--bg);border:1px solid var(--border);border-radius:6px">
+    return `<div data-sched-row="${i}" style="display:flex;gap:12px;padding:12px;background:var(--bg);border:1px solid var(--border);border-radius:6px">
       ${thumb ? `<img src="${thumb}" style="width:64px;height:64px;object-fit:cover;border-radius:4px;border:1px solid var(--border);flex-shrink:0" alt="">` : ''}
       <div style="flex:1;min-width:0">
         <div style="display:flex;align-items:center;gap:8px;margin-bottom:4px">
           <label style="display:inline-flex;align-items:center;gap:4px;cursor:pointer"><input type="checkbox" checked data-sched-check="${i}" style="width:auto"> <strong>Plate ${pl.index}</strong></label>
           <span style="color:var(--text-muted);font-size:12px">${typeInfo}${pl.bedType ? ` / ${formatBedType(pl.bedType)}` : ''}</span>
           ${colorDots}
+          <span style="margin-left:auto;display:inline-flex;gap:4px">${arrowBtn(-1, upDisabled)}${arrowBtn(1, downDisabled)}</span>
         </div>
         <div style="display:grid;grid-template-columns:1fr 1fr;gap:4px 12px;font-size:13px">
           <div><label style="font-size:11px;color:var(--text-muted)">Name</label><input type="text" value="${escHtml(nameDefault)}" data-sched-name="${i}" style="width:100%;padding:4px 8px;font-size:13px"></div>
@@ -3994,29 +4020,106 @@ function show3mfSchedulePreview(parsed, filename) {
         </div>
       </div>
     </div>`;
-  });
+  }
+
+  function renderRowsHtml() {
+    return import3mfPlateOrder.map((i, pos) => renderPlateRow(i, pos, import3mfPlateOrder.length)).join('');
+  }
+
+  // Snapshot/restore field values keyed on original plate index so reorder
+  // never wipes typed-in customer name / order # / printer / name / checkbox.
+  function snapshotFieldValues() {
+    const snap = {};
+    for (const i of import3mfPlateOrder) {
+      const get = sel => document.querySelector(sel);
+      snap[i] = {
+        name:     get(`[data-sched-name="${i}"]`)?.value,
+        printer:  get(`[data-sched-printer="${i}"]`)?.value,
+        customer: get(`[data-sched-customer="${i}"]`)?.value,
+        ordernr:  get(`[data-sched-ordernr="${i}"]`)?.value,
+        checked:  get(`[data-sched-check="${i}"]`)?.checked,
+      };
+    }
+    return snap;
+  }
+
+  function applyFieldValues(snap) {
+    for (const i of Object.keys(snap)) {
+      const v = snap[i];
+      const setVal = (sel, val) => { const el = document.querySelector(sel); if (el != null && val !== undefined) el.value = val; };
+      const setChk = (sel, val) => { const el = document.querySelector(sel); if (el != null && val !== undefined) el.checked = val; };
+      setVal(`[data-sched-name="${i}"]`, v.name);
+      setVal(`[data-sched-printer="${i}"]`, v.printer);
+      setVal(`[data-sched-customer="${i}"]`, v.customer);
+      setVal(`[data-sched-ordernr="${i}"]`, v.ordernr);
+      setChk(`[data-sched-check="${i}"]`, v.checked);
+    }
+  }
 
   document.getElementById('import3mf-body').innerHTML = `
     <div style="display:flex;flex-direction:column;gap:12px">
       <div style="padding:8px 0;border-bottom:1px solid var(--border)">
         <div style="display:flex;gap:16px;align-items:center;margin-bottom:8px">
-          <label style="font-size:13px;cursor:pointer;margin:0"><input type="radio" name="sched-mode" value="manual" checked style="margin-right:4px"> Pick date/time</label>
-          <label style="font-size:13px;cursor:pointer;margin:0"><input type="radio" name="sched-mode" value="first-available" style="margin-right:4px"> First available slot</label>
+          <label style="font-size:13px;cursor:pointer;margin:0"><input type="radio" name="sched-mode" value="manual" style="margin-right:4px"> Pick date/time</label>
+          <label style="font-size:13px;cursor:pointer;margin:0"><input type="radio" name="sched-mode" value="first-available" checked style="margin-right:4px"> First available slot</label>
           <div style="flex:1;text-align:right;font-size:13px;color:var(--text-muted)" id="sched-total-label">Total: ${Math.floor(totalMins / 60)}h ${Math.round(totalMins % 60)}m across ${parsed.plates.length} plate${parsed.plates.length > 1 ? 's' : ''}</div>
         </div>
-        <div id="sched-manual-fields" style="display:flex;gap:12px;align-items:end">
+        <div id="sched-manual-fields" style="display:none;gap:12px;align-items:end">
           <div><label style="font-size:12px;font-weight:600;color:var(--text-muted)">Start Date</label><input type="date" id="sched-start-date" value="${today}" style="padding:6px 10px;font-size:14px"></div>
-          <div><label style="font-size:12px;font-weight:600;color:var(--text-muted)">Start Time</label><input type="time" id="sched-start-time" value="08:00" style="padding:6px 10px;font-size:14px"></div>
+          <div><label style="font-size:12px;font-weight:600;color:var(--text-muted)">Start Time</label><input type="time" id="sched-start-time" value="${nowHHMM}" style="padding:6px 10px;font-size:14px"></div>
         </div>
-        <div id="sched-auto-fields" style="display:none;font-size:13px;color:var(--text-muted);padding:6px 0">
+        <div id="sched-auto-fields" style="display:block;font-size:13px;color:var(--text-muted);padding:6px 0">
           Jobs will be scheduled at the first available moment per printer, respecting silent hours and closed days.
         </div>
       </div>
-      ${rows.join('')}
+      <div style="display:flex;justify-content:flex-end;font-size:12px;padding:0">
+        <a href="#" id="sched-toggle-all" style="color:var(--primary);text-decoration:none">Deselect all</a>
+      </div>
+      <div id="sched-rows">${renderRowsHtml()}</div>
     </div>`;
 
-  // Radio toggle for scheduling mode
+  function recomputeTotal() {
+    let mins = 0, count = 0;
+    parsed.plates.forEach((pl, i) => {
+      const checked = document.querySelector(`[data-sched-check="${i}"]`)?.checked;
+      if (checked) { mins += pl.printTimeMinutes || 0; count++; }
+    });
+    const label = document.getElementById('sched-total-label');
+    if (label) label.textContent = `Total: ${Math.floor(mins/60)}h ${Math.round(mins%60)}m across ${count} plate${count !== 1 ? 's' : ''}`;
+  }
+
+  function refreshToggleAllLabel() {
+    const link = document.getElementById('sched-toggle-all');
+    if (!link) return;
+    const anyChecked = Array.from(document.querySelectorAll('[data-sched-check]')).some(cb => cb.checked);
+    link.textContent = anyChecked ? 'Deselect all' : 'Select all';
+  }
+
+  function attachRowListeners() {
+    // Per-checkbox: total + toggle-all label.
+    document.querySelectorAll('[data-sched-check]').forEach(cb => {
+      cb.addEventListener('change', () => { recomputeTotal(); refreshToggleAllLabel(); });
+    });
+    // Per-arrow: snapshot, swap, re-render rows region, restore, rewire.
+    document.querySelectorAll('[data-sched-move]').forEach(btn => {
+      btn.addEventListener('click', () => {
+        if (btn.disabled) return;
+        const origIdx = parseInt(btn.getAttribute('data-sched-move'), 10);
+        const dir = parseInt(btn.getAttribute('data-sched-dir'), 10);
+        const pos = import3mfPlateOrder.indexOf(origIdx);
+        if (pos < 0) return;
+        const snap = snapshotFieldValues();
+        import3mfPlateOrder = reorderPlates(import3mfPlateOrder, pos, dir);
+        document.getElementById('sched-rows').innerHTML = renderRowsHtml();
+        applyFieldValues(snap);
+        attachRowListeners();
+        refreshToggleAllLabel();
+      });
+    });
+  }
+
   setTimeout(() => {
+    // Radio toggle for scheduling mode
     document.querySelectorAll('input[name="sched-mode"]').forEach(r => {
       r.addEventListener('change', () => {
         const isAuto = r.value === 'first-available' && r.checked;
@@ -4025,18 +4128,22 @@ function show3mfSchedulePreview(parsed, filename) {
       });
     });
 
-    // Update totals when checkboxes change
-    document.querySelectorAll('[data-sched-check]').forEach(cb => {
-      cb.addEventListener('change', () => {
-        let mins = 0, count = 0;
-        parsed.plates.forEach((pl, i) => {
-          const checked = document.querySelector(`[data-sched-check="${i}"]`)?.checked;
-          if (checked) { mins += pl.printTimeMinutes || 0; count++; }
-        });
-        const label = document.getElementById('sched-total-label');
-        if (label) label.textContent = `Total: ${Math.floor(mins/60)}h ${Math.round(mins%60)}m across ${count} plate${count !== 1 ? 's' : ''}`;
+    // Select all / Deselect all link
+    document.getElementById('sched-toggle-all')?.addEventListener('click', e => {
+      e.preventDefault();
+      const checks = Array.from(document.querySelectorAll('[data-sched-check]'));
+      const anyChecked = checks.some(cb => cb.checked);
+      const target = !anyChecked; // if none checked → check all; else uncheck all
+      checks.forEach(cb => {
+        if (cb.checked !== target) {
+          cb.checked = target;
+          cb.dispatchEvent(new Event('change', { bubbles: true }));
+        }
       });
+      refreshToggleAllLabel();
     });
+
+    attachRowListeners();
   }, 0);
 }
 
@@ -4061,7 +4168,8 @@ async function confirm3mfSchedule() {
     // Falls back to ntc names if filament-manager is unreachable.
     const filamentCatalog = await fetchFilamentCatalog().catch(() => []);
 
-    const plates = import3mfParsed.plates.map((pl, i) => {
+    const plates = import3mfPlateOrder.map(i => {
+      const pl = import3mfParsed.plates[i];
       const check = document.querySelector(`[data-sched-check="${i}"]`);
       if (check && !check.checked) return null;
       const isDual = pl.isDualExtruder || (pl.nozzleCount || 1) >= 2;
