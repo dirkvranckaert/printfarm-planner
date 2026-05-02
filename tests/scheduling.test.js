@@ -484,3 +484,101 @@ describe('pullForwardChain', () => {
     expect(updates).toHaveLength(0);
   });
 });
+
+// =============================================================================
+// snapAvoidingJobs — pure copy of the function in public/app.js
+// =============================================================================
+// Local re-implementation matching public/app.js:1304. Kept in-file (same
+// pattern as utils.test.js) because public/app.js is browser-side and not
+// CommonJS-exported. If this drifts from the live function, the test will
+// silently pass — keep them in sync.
+function makeSnapAvoidingJobs({ printers, jobs, navDate }) {
+  const dayS = new Date(navDate); dayS.setHours(0,0,0,0);
+  return function snapAvoidingJobs(proposedStart, durationMins, printerId, excludeJobId) {
+    const printer = printers.find(p => p.id === printerId);
+    const myWu = printer?.warm_up_mins ?? 0;
+    const myCd = printer?.cool_down_mins ?? 0;
+    const intervals = Object.values(jobs)
+      .filter(j => !j.queued && j.printerId === printerId && j.id !== excludeJobId)
+      .map(j => {
+        const s = (new Date(j.start).getTime() - dayS.getTime()) / 60_000;
+        const e = (new Date(j.end).getTime() - dayS.getTime()) / 60_000;
+        return { start: s - myWu, end: e + myCd };
+      });
+    const myStart = proposedStart - myWu;
+    const myEnd   = proposedStart + durationMins + myCd;
+    for (const iv of intervals) {
+      if (myStart < iv.end && myEnd > iv.start) {
+        const snapBefore = iv.start - durationMins - myCd;
+        const snapAfter  = iv.end + myWu;
+        const distBefore = Math.abs(proposedStart - snapBefore);
+        const distAfter  = Math.abs(proposedStart - snapAfter);
+        return Math.max(0, distBefore < distAfter ? snapBefore : snapAfter);
+      }
+    }
+    return proposedStart;
+  };
+}
+
+describe('snapAvoidingJobs (queue-drop buffer-aware snapping)', () => {
+  // navDate: midnight on a fixed day; intervals expressed in minutes-from-midnight.
+  const navDate = new Date('2026-05-02T00:00:00.000');
+  const dayMs = navDate.getTime();
+  // Helper: minutes-from-midnight → ISO string for jobs cache.
+  const m2iso = (mins) => new Date(dayMs + mins * 60_000).toISOString();
+  const PRINTER = { id: 1, warm_up_mins: 5, cool_down_mins: 15 };
+
+  test('proposed start in an empty gap is returned unchanged', () => {
+    const snap = makeSnapAvoidingJobs({ printers: [PRINTER], jobs: {}, navDate });
+    expect(snap(540, 60, 1, null)).toBe(540); // 09:00, 60-min job, empty col
+  });
+
+  test('proposed start blocked by neighbour cool-down snaps before that neighbour', () => {
+    // Existing job 09:00–10:00 → interval (with buffers) = [535, 615].
+    // Drop a 30-min job proposed at 09:30 (myStart=565, myEnd=615) — overlap.
+    // snapBefore = 535 - 30 - 15 = 490 ; snapAfter = 615 + 5 = 620
+    // distBefore = |570 - 490| = 80 ; distAfter = |570 - 620| = 50 → snapAfter wins.
+    const jobs = { 100: { id: 100, queued: false, printerId: 1, start: m2iso(540), end: m2iso(600) } };
+    const snap = makeSnapAvoidingJobs({ printers: [PRINTER], jobs, navDate });
+    expect(snap(570, 30, 1, null)).toBe(620);
+  });
+
+  test('proposed start blocked by neighbour warm-up snaps before that neighbour', () => {
+    // Existing job 14:00–15:00 → interval (with buffers) [14:00-5, 15:00+15] = [835, 915].
+    // Drop a 30-min job proposed at 14:00 (overlap).
+    // snapBefore = 835 - 30 - 15 = 790 (13:10) ; snapAfter = 915 + 5 = 920 (15:20)
+    // distBefore = |840 - 790| = 50 ; distAfter = |840 - 920| = 80 → snapBefore wins.
+    const jobs = { 100: { id: 100, queued: false, printerId: 1, start: m2iso(840), end: m2iso(900) } };
+    const snap = makeSnapAvoidingJobs({ printers: [PRINTER], jobs, navDate });
+    expect(snap(840, 30, 1, null)).toBe(790);
+  });
+
+  test('queued jobs in the cache are ignored', () => {
+    // A queued job with the same printerId should NOT block the drop.
+    const jobs = { 100: { id: 100, queued: true, printerId: 1, start: m2iso(540), end: m2iso(600) } };
+    const snap = makeSnapAvoidingJobs({ printers: [PRINTER], jobs, navDate });
+    expect(snap(570, 30, 1, null)).toBe(570);
+  });
+
+  test('jobs on a different printer are ignored', () => {
+    const jobs = { 100: { id: 100, queued: false, printerId: 2, start: m2iso(540), end: m2iso(600) } };
+    const snap = makeSnapAvoidingJobs({ printers: [PRINTER], jobs, navDate });
+    expect(snap(570, 30, 1, null)).toBe(570);
+  });
+
+  test('excludeJobId removes that job from blocking intervals', () => {
+    // The dragged "move" of an existing job should not block itself.
+    const jobs = { 100: { id: 100, queued: false, printerId: 1, start: m2iso(540), end: m2iso(600) } };
+    const snap = makeSnapAvoidingJobs({ printers: [PRINTER], jobs, navDate });
+    expect(snap(545, 60, 1, 100)).toBe(545);
+  });
+
+  test('result is clamped to >= 0', () => {
+    // Job at 00:30–01:00; drop a 60-min proposed at 00:00 → snapBefore goes negative.
+    // iv = [30-5, 60+15] = [25, 75]. snapBefore = 25 - 60 - 15 = -50 ; snapAfter = 75 + 5 = 80.
+    // distBefore = |0 - -50| = 50 ; distAfter = |0 - 80| = 80 → snapBefore wins, clamped to 0.
+    const jobs = { 100: { id: 100, queued: false, printerId: 1, start: m2iso(30), end: m2iso(60) } };
+    const snap = makeSnapAvoidingJobs({ printers: [PRINTER], jobs, navDate });
+    expect(snap(0, 60, 1, null)).toBe(0);
+  });
+});

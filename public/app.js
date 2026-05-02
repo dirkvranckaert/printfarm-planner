@@ -908,9 +908,6 @@ function minutesOnDay(job, day) {
 // Calendar dispatcher
 // =============================================================================
 async function renderCalendar() {
-  const scr = document.getElementById('day-scroll');
-  const savedScroll = scr ? scr.scrollTop : 0;
-
   closures = await api('GET', '/api/closures');
   updateHeader();
   await renderTodayPanel();
@@ -923,8 +920,12 @@ async function renderCalendar() {
   // Clear mobile printer switcher when not in day view
   if (view !== 'day') document.getElementById('mobile-printer-switcher').innerHTML = '';
 
-  const scr2 = document.getElementById('day-scroll');
-  if (scr2 && savedScroll > 0) scr2.scrollTop = savedScroll;
+  // Day-view scroll preservation lives entirely inside renderDay() — it
+  // captures prevScrollTop right before the innerHTML swap and restores it
+  // (unless pendingScrollToNow is set, in which case scrollToNow wins via
+  // a deferred rAF). An outer capture/restore here used to fight that
+  // mechanism: a stale pre-await savedScroll would clobber whatever
+  // renderDay just did, causing scroll jitter during SSE bursts. See #140.
 }
 
 function updateHeader() {
@@ -1376,9 +1377,14 @@ function onDragMove(e) {
 
     if (targetCol) {
       const rect  = targetCol.getBoundingClientRect();
-      const y     = snap15(Math.max(0, Math.min(e.clientY - rect.top, DAY_MINS + 240 - drag.durationMins)));
+      const proposed = snap15(Math.max(0, Math.min(e.clientY - rect.top, DAY_MINS + 240 - drag.durationMins)));
+      drag.printerId = parseInt(targetCol.dataset.printerId);
+      // Avoid landing on top of an existing job's warm-up / cool-down buffer
+      // on the same printer column. Mirrors the "move" branch behaviour so
+      // queue-drag drops don't ignore pre/post print time.
+      const snapped = snapAvoidingJobs(proposed, drag.durationMins, drag.printerId, drag.jobId);
+      const y = Math.max(0, Math.min(snapped, DAY_MINS + 240 - drag.durationMins));
       drag.currentMins = y;
-      drag.printerId   = parseInt(targetCol.dataset.printerId);
 
       if (drag.colEl !== targetCol) {
         if (drag.previewEl) drag.previewEl.remove();
@@ -2141,9 +2147,9 @@ function setupBottomSheet() {
     });
   });
   // Bottom sheet conflict resolution
-  document.getElementById('bs-move-after')?.addEventListener('click', async () => { hideBottomSheet(); if (bsJobId) await resolveConflictMoveAfter(bsJobId); });
-  document.getElementById('bs-move-next-day')?.addEventListener('click', async () => { hideBottomSheet(); if (bsJobId) await resolveConflictNextDay(bsJobId); });
-  document.getElementById('bs-move-printer')?.addEventListener('click', async () => { hideBottomSheet(); if (bsJobId) await resolveConflictMovePrinter(bsJobId); });
+  document.getElementById('bs-move-after')?.addEventListener('click', async () => { const id = bsJobId; hideBottomSheet(); if (id !== null) await resolveConflictMoveAfter(id); });
+  document.getElementById('bs-move-next-day')?.addEventListener('click', async () => { const id = bsJobId; hideBottomSheet(); if (id !== null) await resolveConflictNextDay(id); });
+  document.getElementById('bs-move-printer')?.addEventListener('click', async () => { const id = bsJobId; hideBottomSheet(); if (id !== null) await resolveConflictMovePrinter(id); });
 
   document.getElementById('bs-duplicate').addEventListener('click', () => {
     if (bsJobId !== null) duplicateJob(bsJobId);
@@ -3645,19 +3651,19 @@ function setupListeners() {
 
   // Conflict resolution
   document.getElementById('ctx-move-after').addEventListener('click', async () => {
-    if (ctxJobId === null) return;
+    const id = ctxJobId;
     hideCtxMenu();
-    await resolveConflictMoveAfter(ctxJobId);
+    if (id !== null) await resolveConflictMoveAfter(id);
   });
   document.getElementById('ctx-move-next-day').addEventListener('click', async () => {
-    if (ctxJobId === null) return;
+    const id = ctxJobId;
     hideCtxMenu();
-    await resolveConflictNextDay(ctxJobId);
+    if (id !== null) await resolveConflictNextDay(id);
   });
   document.getElementById('ctx-move-printer').addEventListener('click', async () => {
-    if (ctxJobId === null) return;
+    const id = ctxJobId;
     hideCtxMenu();
-    await resolveConflictMovePrinter(ctxJobId);
+    if (id !== null) await resolveConflictMovePrinter(id);
   });
   document.getElementById('ctx-delete').addEventListener('click', async () => {
     if (ctxJobId !== null && confirm('Delete this print job?')) {
