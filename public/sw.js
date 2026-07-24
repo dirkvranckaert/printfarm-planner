@@ -1,4 +1,4 @@
-const CACHE_NAME = 'printfarm-v3';
+const CACHE_NAME = 'printfarm-v4';
 const SHELL_URLS = ['/', '/index.html', '/style.css', '/app.js', '/favicon.svg', '/manifest.json'];
 
 // Cache app shell on install
