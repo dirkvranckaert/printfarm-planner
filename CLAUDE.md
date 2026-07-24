@@ -66,14 +66,16 @@ npm test
 Deployed via the shared infrastructure repo: `../infrastructure/apps/printfarm-planner/deploy.sh`
 
 - **Production port:** 3457
-- **Domain:** `planner.app3.be`
+- **Domain:** `printfarm.app3.be` → `46.101.206.198` (APP3 proxy VPS)
+  - ⚠️ Repo-name-shaped subdomains were never wired up. `planner.app3.be` and `printfarm-planner.app3.be` resolve to `185.103.156.20` (Combell parking) and return HTTP 404. Never smoke-check against them — a stale `planner.app3.be` line here already sent a release engineer chasing a non-existent proxy/DNS bug twice (2026-05-02, 2026-07-24).
+  - Siblings: `filament-manager` → `filaments.app3.be`, `project-calculator` → `3dprojects.app3.be`.
 - **PM2 name:** `printfarm-planner`
 - **Server:** `app3-node-01` (142.93.105.91)
 
 ## Gotchas
 
 - **pm2 cwd caching:** pm2 caches cwd at first start. Delete + restart if you change ecosystem.config.js.
-- **Service worker:** cache-first strategy. Bump cache version in `public/sw.js` to force updates.
+- **Service worker:** `public/sw.js` is cache-first over `SHELL_URLS`, which includes `/style.css`, and `index.html` loads it with no cache-busting query. So **any** change to a shell asset under `public/` must bump `CACHE_NAME` in the same commit (current value: `printfarm-v4`). Skip it and the first load after deploy serves the old asset — change only shows on a second reload, which reads as "the fix didn't work". `skipWaiting()`, the activate-time cache purge and `clients.claim()` are already wired, so the version bump alone is enough.
 - **MQTT reconnect:** if the MQTT broker is unreachable, `bambu.js` retries silently. Check pm2 logs if printer status stops updating.
 - **SQLite WAL mode:** the `data/` directory must be writable and on a local filesystem (not NFS).
 
