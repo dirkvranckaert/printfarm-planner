@@ -1483,10 +1483,10 @@ body.is-resizing,    body.is-resizing    * { cursor: ns-resize  !important; user
   width: 46px; min-height: 58px; border-radius: 5px;
   display: flex; flex-direction: column; align-items: center; justify-content: center;
   padding: 4px 2px; gap: 2px; font-size: 10px; font-weight: 600;
-  border: 2px solid transparent; box-sizing: border-box; text-align: center;
+  border: 1px solid var(--border); box-sizing: border-box; text-align: center;
   background: var(--surface-2); color: var(--text-muted);
 }
-.ams-slot-active { border-color: rgba(255,255,255,.9); box-shadow: 0 0 0 1px rgba(0,0,0,.2); }
+.ams-slot-active { border-width: 2px; border-color: rgba(255,255,255,.9); box-shadow: 0 0 0 1px rgba(0,0,0,.2); }
 [data-theme="light"] .ams-slot-active { border-color: rgba(0,0,0,.55); box-shadow: none; }
 @media (prefers-color-scheme: light) {
   :not([data-theme]) .ams-slot-active { border-color: rgba(0,0,0,.55); box-shadow: none; }
