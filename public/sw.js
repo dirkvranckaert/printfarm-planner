@@ -1,5 +1,5 @@
-const CACHE_NAME = 'printfarm-v4';
-const SHELL_URLS = ['/', '/index.html', '/style.css', '/app.js', '/favicon.svg', '/manifest.json'];
+const CACHE_NAME = 'printfarm-v6';
+const SHELL_URLS = ['/', '/index.html', '/style.css', '/statusCount.js', '/app.js', '/favicon.svg', '/manifest.json'];
 
 // Cache app shell on install
 self.addEventListener('install', event => {

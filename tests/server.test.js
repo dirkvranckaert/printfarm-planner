@@ -1,3 +1,12 @@
+// Point the app's DB singleton at a throwaway temp file and flag the test env
+// BEFORE anything requires ../db or ../server (both read these at load time).
+const os   = require('os');
+const fs   = require('fs');
+const path = require('path');
+process.env.NODE_ENV = 'test';
+process.env.PLANNER_DB_PATH =
+  process.env.PLANNER_DB_PATH || path.join(os.tmpdir(), `printfarm-test-${process.pid}.db`);
+
 const Database = require('better-sqlite3');
 
 describe('Printer CRUD', () => {
@@ -151,6 +160,11 @@ describe('Job CRUD', () => {
     const job = db.prepare('SELECT * FROM jobs WHERE id=?').get(r.lastInsertRowid);
     expect(job.status).toBe('Printing');
   });
+
+  // NOTE: the context-menu-status-persistence test and the badge-count test
+  // moved out of this in-memory block. They now exercise real shipped code:
+  //   - status persistence -> real PATCH /api/jobs/:id route (supertest), below
+  //   - badge count -> shared pure fn public/statusCount.js, below
 
   test('deleting a printer cascades to its jobs', () => {
     const pid = db.prepare('SELECT id FROM printers').get().id;
@@ -395,5 +409,82 @@ describe('3MF schedule import — array-order is the contract', () => {
     expect(createdJobs).toHaveLength(1);
     expect(createdJobs[0].name).toBe('Solo');
     expect(createdJobs[0].start).toBe(startISO);
+  });
+});
+
+// Drives the REAL Express PATCH /api/jobs/:id route in-process via supertest,
+// against the app's real DB layer (pointed at a temp file). This catches
+// route-level regressions a raw SQL UPDATE cannot — e.g. 'status' being dropped
+// from the route's allowed-fields whitelist.
+describe('PATCH /api/jobs/:id — status persistence (real route via supertest)', () => {
+  const request = require('supertest');
+  let app, appDb, printerId;
+  const SESSION_TOKEN = 'test-session-token';
+  const authCookie = `pf_session=${SESSION_TOKEN}`;
+
+  beforeAll(() => {
+    appDb = require('../db');     // singleton, temp-file DB (PLANNER_DB_PATH)
+    app   = require('../server'); // exports the Express app (no listen under test)
+    // Valid session so the auth middleware lets the PATCH through.
+    appDb.prepare('INSERT OR REPLACE INTO sessions (token, expires_at) VALUES (?,?)')
+      .run(SESSION_TOKEN, Date.now() + 3_600_000);
+  });
+
+  beforeEach(() => {
+    appDb.exec('DELETE FROM jobs; DELETE FROM printers;');
+    const r = appDb.prepare('INSERT INTO printers (name, color) VALUES (?,?)').run('P1', '#f00');
+    printerId = r.lastInsertRowid;
+  });
+
+  afterAll(() => {
+    try { appDb.close(); } catch { /* ignore */ }
+    try { fs.unlinkSync(process.env.PLANNER_DB_PATH); } catch { /* ignore */ }
+  });
+
+  test.each(['Planned', 'Awaiting', 'Printing', 'Post Printing', 'Done'])(
+    'context-menu status %s persists via PATCH /api/jobs/:id',
+    async (status) => {
+      const r = appDb.prepare('INSERT INTO jobs (printerId, name, start, end, status) VALUES (?,?,?,?,?)')
+        .run(printerId, 'Job', '2026-03-27T10:00', '2026-03-27T12:00', 'Planned');
+      const id = r.lastInsertRowid;
+
+      const res = await request(app)
+        .patch(`/api/jobs/${id}`)
+        .set('Cookie', authCookie)
+        .send({ status });
+
+      expect(res.status).toBe(200);
+      // The DB assertion is the real check: if the route stopped persisting
+      // 'status' (e.g. removed from its allowed list), this row stays 'Planned'.
+      const persisted = appDb.prepare('SELECT status FROM jobs WHERE id=?').get(id).status;
+      expect(persisted).toBe(status);
+    }
+  );
+});
+
+// The menu-badge count is now shared shipped logic (public/statusCount.js). The
+// frontend updateStatusOverviewBadge() and this test call the SAME function, so
+// the test exercises real code, not a SQL re-implementation. Change the status
+// keys or the queued rule in that fn and this test trips.
+describe('status-overview badge count (shared pure fn)', () => {
+  const countAttentionJobs = require('../public/statusCount.js');
+
+  test('counts non-queued Post Printing + Paused jobs only', () => {
+    const jobs = [
+      { name: 'a', status: 'Post Printing', queued: 0 },
+      { name: 'b', status: 'Paused',        queued: 0 },
+      { name: 'c', status: 'Printing',      queued: 0 }, // not an attention status
+      { name: 'd', status: 'Post Printing', queued: 1 }, // queued → excluded
+    ];
+    expect(countAttentionJobs(jobs)).toBe(2);
+  });
+
+  test('returns 0 when nothing needs attention', () => {
+    const jobs = [
+      { status: 'Printing', queued: 0 },
+      { status: 'Done',     queued: 0 },
+      { status: 'Planned',  queued: 0 },
+    ];
+    expect(countAttentionJobs(jobs)).toBe(0);
   });
 });
