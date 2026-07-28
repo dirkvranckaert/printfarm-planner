@@ -97,9 +97,13 @@ app.use(express.static('public'));
 // --- Live status (SSE) ---
 const sseClients = new Set();
 
-// Connect all brand integrations on startup
-brands.connectAll(db);
-push.init(db);
+// Connect all brand integrations on startup.
+// Skipped under NODE_ENV=test (Jest) so importing the app for supertest does
+// not open MQTT connections or leave timers running.
+if (process.env.NODE_ENV !== 'test') {
+  brands.connectAll(db);
+  push.init(db);
+}
 
 // Track previous stage per brandKey for auto-transition logic
 const prevStage = new Map();
@@ -244,6 +248,10 @@ brands.onUpdate((brandKey, status) => {
   prevStage.set(brandKey, curr);
 });
 
+// --- Background timers ---
+// Skipped under NODE_ENV=test so importing the app for supertest leaves no
+// open handles / running intervals.
+if (process.env.NODE_ENV !== 'test') {
 // --- Upcoming job notifications ---
 setInterval(() => {
   if (!push.isEnabled('upcoming')) return;
@@ -292,6 +300,7 @@ setInterval(() => {
     console.error('[pauseTick] error:', err.message);
   }
 }, 60_000);
+} // end NODE_ENV !== 'test' background timers
 
 // --- Brand-specific API routers ---
 // Each brand module exposes an Express router for its own auth/config endpoints.
@@ -999,6 +1008,12 @@ app.get('/api/uploads/:filename', (req, res) => {
   res.sendFile(filepath);
 });
 
-app.listen(process.env.PORT || 3000, () => {
-  console.log(`PrintFarm Planner running on port ${process.env.PORT || 3000}`);
-});
+// Only bind a port when run directly (node server.js). Under supertest the app
+// is imported and driven in-process, so listening is skipped.
+if (require.main === module) {
+  app.listen(process.env.PORT || 3000, () => {
+    console.log(`PrintFarm Planner running on port ${process.env.PORT || 3000}`);
+  });
+}
+
+module.exports = app;

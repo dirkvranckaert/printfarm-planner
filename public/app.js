@@ -1123,6 +1123,17 @@ async function scheduleFromQueue(jobId) {
 // =============================================================================
 // Day view
 // =============================================================================
+// Rebuild jobsCache from a full /api/jobs fetch. Unlike a merge, this DROPS
+// entries for jobs deleted since the last fetch, so the status-overview badge
+// and dialog never over-count or show phantom rows. Every full-DB render path
+// (day/week/month/upcoming + openStatusOverview) funnels through here, and the
+// live SSE path re-renders via renderCalendar() -> these same renders, so it
+// stays correct too.
+function rebuildJobsCache(allJobs) {
+  jobsCache = {};
+  allJobs.forEach(j => { jobsCache[j.id] = j; });
+}
+
 async function renderDay() {
   const container = document.getElementById('calendar-container');
   if (!printers.length) { renderEmpty(container); return; }
@@ -1132,8 +1143,8 @@ async function renderDay() {
   const scheduledJobs = allJobs.filter(j => !j.queued);
   const jobs          = scheduledJobs.filter(j => overlapsDay(j, navDate));
 
-  // Populate jobs cache
-  allJobs.forEach(j => { jobsCache[j.id] = j; });
+  // Rebuild jobs cache fresh (prunes deleted jobs — see rebuildJobsCache)
+  rebuildJobsCache(allJobs);
 
   // Detect conflicts across scheduled jobs only (buffer times included)
   const printerMap  = Object.fromEntries(printers.map(p => [p.id, p]));
@@ -1786,7 +1797,7 @@ async function renderWeek() {
 
   const allJobs  = await api('GET', '/api/jobs');
   const weekJobs = allJobs.filter(j => !j.queued && overlapsRange(j, ws, re));
-  allJobs.forEach(j => { jobsCache[j.id] = j; });
+  rebuildJobsCache(allJobs);
   const today    = todayMidnight();
 
   const DAY_NAMES = ['Sun','Mon','Tue','Wed','Thu','Fri','Sat'];
@@ -1879,7 +1890,7 @@ async function renderMonth() {
 
   const allJobs   = await api('GET', '/api/jobs');
   const monthJobs = allJobs.filter(j => !j.queued && overlapsRange(j, gs, ge));
-  allJobs.forEach(j => { jobsCache[j.id] = j; });
+  rebuildJobsCache(allJobs);
   const today     = todayMidnight();
 
   let h = '<div class="month-view"><div class="month-grid">';
@@ -1955,7 +1966,7 @@ async function renderUpcoming() {
   if (!printers.length) { renderEmpty(container); return; }
 
   const allJobs = await api('GET', '/api/jobs');
-  allJobs.forEach(j => { jobsCache[j.id] = j; });
+  rebuildJobsCache(allJobs);
 
   const today = todayMidnight();
   const upcoming = allJobs
@@ -3503,9 +3514,8 @@ let soCollapsed = null;
 function updateStatusOverviewBadge() {
   const badge = document.getElementById('status-overview-badge');
   if (!badge) return;
-  const count = Object.values(jobsCache).filter(j =>
-    !j.queued && (j.status === 'Post Printing' || j.status === 'Paused')
-  ).length;
+  // Shared pure count (public/statusCount.js) — same logic the test exercises.
+  const count = countAttentionJobs(Object.values(jobsCache));
   if (count > 0) {
     badge.textContent = String(count);
     badge.classList.remove('hidden');
@@ -3604,7 +3614,7 @@ async function openStatusOverview() {
     api('GET', '/api/jobs'),
     api('GET', '/api/printers'),
   ]);
-  allJobs.forEach(j => { jobsCache[j.id] = j; });
+  rebuildJobsCache(allJobs);
   printers = allPrinters;
   if (soCollapsed === null) {
     soCollapsed = new Set(SO_STATUS_ORDER.filter(s => !SO_EXPAND_DEFAULT.includes(s)));

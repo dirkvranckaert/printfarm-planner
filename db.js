@@ -5,7 +5,9 @@ const fs = require('fs');
 const dataDir = path.join(__dirname, 'data');
 fs.mkdirSync(dataDir, { recursive: true });
 
-const db = new Database(path.join(dataDir, 'planner.db'));
+// PLANNER_DB_PATH lets tests point at a throwaway temp DB. Defaults to the
+// real on-disk planner.db for normal runs.
+const db = new Database(process.env.PLANNER_DB_PATH || path.join(dataDir, 'planner.db'));
 
 db.exec(`
   CREATE TABLE IF NOT EXISTS printers (
