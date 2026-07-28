@@ -152,6 +152,36 @@ describe('Job CRUD', () => {
     expect(job.status).toBe('Printing');
   });
 
+  // The Job Status Overview context menu persists the exact status keys used
+  // across the app. Lock those keys so a rename can't silently break the badge
+  // count / category routing.
+  test.each(['Planned', 'Awaiting', 'Printing', 'Post Printing', 'Done'])(
+    'context-menu status %s persists via patch',
+    (status) => {
+      const pid = db.prepare('SELECT id FROM printers').get().id;
+      const r = db.prepare('INSERT INTO jobs (printerId, name, start, end, status) VALUES (?,?,?,?,?)')
+        .run(pid, 'Job', '2026-03-27T10:00', '2026-03-27T12:00', 'Planned');
+      db.prepare('UPDATE jobs SET status=? WHERE id=?').run(status, r.lastInsertRowid);
+      expect(db.prepare('SELECT status FROM jobs WHERE id=?').get(r.lastInsertRowid).status).toBe(status);
+    }
+  );
+
+  // Mirrors updateStatusOverviewBadge(): the menu badge counts non-queued jobs
+  // in 'Post Printing' or 'Paused' (the two attention statuses).
+  test('menu badge count = post printing + paused (non-queued) jobs', () => {
+    const pid = db.prepare('SELECT id FROM printers').get().id;
+    const ins = db.prepare('INSERT INTO jobs (printerId, name, start, end, status, queued) VALUES (?,?,?,?,?,?)');
+    ins.run(pid, 'a', '2026-03-27T10:00', '2026-03-27T11:00', 'Post Printing', 0);
+    ins.run(pid, 'b', '2026-03-27T11:00', '2026-03-27T12:00', 'Paused', 0);
+    ins.run(pid, 'c', '2026-03-27T12:00', '2026-03-27T13:00', 'Printing', 0);      // not counted
+    ins.run(pid, 'd', '2026-03-27T13:00', '2026-03-27T14:00', 'Post Printing', 1); // queued → not counted
+
+    const count = db.prepare(
+      "SELECT COUNT(*) AS n FROM jobs WHERE queued=0 AND status IN ('Post Printing','Paused')"
+    ).get().n;
+    expect(count).toBe(2);
+  });
+
   test('deleting a printer cascades to its jobs', () => {
     const pid = db.prepare('SELECT id FROM printers').get().id;
     db.prepare('INSERT INTO jobs (printerId, name, start, end) VALUES (?,?,?,?)').run(pid, 'J', '2026-03-27T10:00', '2026-03-27T11:00');

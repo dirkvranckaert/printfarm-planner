@@ -342,12 +342,12 @@ function connectSSE() {
   sseSource.onmessage = (e) => {
     try {
       const updates = JSON.parse(e.data);
-      if (updates.jobsUpdated) { renderCalendar(); return; }
+      if (updates.jobsUpdated) { renderCalendar().then(refreshStatusOverviewIfOpen); return; }
       // Server pushes an explicit stageChanged event on every real
       // printer stage transition — always re-render on it. Partial frames
       // from Bambu carry over the old stage (bambu.js:128-160), so the
       // client-side diff is unreliable.
-      if (updates.stageChanged) { renderCalendar(); return; }
+      if (updates.stageChanged) { renderCalendar().then(refreshStatusOverviewIfOpen); return; }
       // Fallback: any status frame that carries a `stage` field gets a
       // re-render. renderDay() is idempotent re. scroll position, so this
       // is cheap (stage only ships on transitions from Bambu).
@@ -357,7 +357,7 @@ function connectSSE() {
       }
       Object.assign(printerStatus, updates);
       renderTopbarStatus();
-      if (stagePresent) renderCalendar();
+      if (stagePresent) renderCalendar().then(refreshStatusOverviewIfOpen);
     } catch (_) {}
   };
 
@@ -916,6 +916,9 @@ async function renderCalendar() {
   else if (view === 'week')     await renderWeek();
   else if (view === 'upcoming') await renderUpcoming();
   else                          await renderMonth();
+
+  // Live-refresh the "Job Status" menu badge (post printing + paused count).
+  updateStatusOverviewBadge();
 
   // Clear mobile printer switcher when not in day view
   if (view !== 'day') document.getElementById('mobile-printer-switcher').innerHTML = '';
@@ -2140,6 +2143,7 @@ function setupBottomSheet() {
         const savedScroll = scr ? scr.scrollTop : 0;
         await api('PATCH', `/api/jobs/${bsJobId}`, { status: btn.dataset.status });
         await renderCalendar();
+        refreshStatusOverviewIfOpen();
         const scr2 = document.getElementById('day-scroll');
         if (scr2) scr2.scrollTop = savedScroll;
       }
@@ -3484,19 +3488,42 @@ function syncUrlToState({ replace = false } = {}) {
 // =============================================================================
 // Status overview modal
 // =============================================================================
-async function openStatusOverview() {
-  const [allJobs, allPrinters] = await Promise.all([
-    api('GET', '/api/jobs'),
-    api('GET', '/api/printers'),
-  ]);
-  const printerMap = Object.fromEntries(allPrinters.map(p => [p.id, p]));
 
-  const statusOrder = ['Printing', 'Paused', 'Awaiting', 'Post Printing', 'Planned', 'Done'];
-  const expandByDefault = new Set(['Printing', 'Paused', 'Awaiting', 'Post Printing']);
+// Dialog category order — 'Paused' sits directly after 'Printing'. (The
+// context menu that sets a status deliberately omits 'Paused' — it is a
+// system-only status; see #ctx-menu / .bs-status-btn in index.html.)
+const SO_STATUS_ORDER   = ['Planned', 'Awaiting', 'Printing', 'Paused', 'Post Printing', 'Done'];
+const SO_EXPAND_DEFAULT = ['Printing', 'Paused', 'Awaiting', 'Post Printing'];
+// Persisted set of collapsed sections so a live re-render keeps the user's
+// expand/collapse choices. null until the overview is first opened.
+let soCollapsed = null;
 
-  const scheduled = allJobs.filter(j => !j.queued);
+// Count shown on the "Job Status" menu entry: jobs needing attention =
+// (Post Printing) + (Paused). Refreshed live from renderCalendar().
+function updateStatusOverviewBadge() {
+  const badge = document.getElementById('status-overview-badge');
+  if (!badge) return;
+  const count = Object.values(jobsCache).filter(j =>
+    !j.queued && (j.status === 'Post Printing' || j.status === 'Paused')
+  ).length;
+  if (count > 0) {
+    badge.textContent = String(count);
+    badge.classList.remove('hidden');
+  } else {
+    badge.textContent = '';
+    badge.classList.add('hidden');
+  }
+}
 
+// Render the overview body from the current jobsCache + printers. Called on
+// open and re-called live whenever a job status changes while it is open.
+function renderStatusOverviewBody() {
   const body = document.getElementById('status-overview-body');
+  if (!body) return;
+
+  const printerMap = Object.fromEntries(printers.map(p => [p.id, p]));
+  const scheduled = Object.values(jobsCache).filter(j => !j.queued);
+
   const p2 = n => String(n).padStart(2, '0');
   const fmtDateTime = d => {
     const dt = new Date(d);
@@ -3504,12 +3531,12 @@ async function openStatusOverview() {
   };
 
   let h = '';
-  statusOrder.forEach(status => {
+  SO_STATUS_ORDER.forEach(status => {
     const group = scheduled
       .filter(j => (j.status ?? 'Planned') === status)
       .sort((a, b) => new Date(b.start) - new Date(a.start));
 
-    const expanded = expandByDefault.has(status);
+    const expanded = !soCollapsed.has(status);
     h += `<div class="so-section">
       <div class="so-section-header" data-so-status="${escHtml(status)}">
         <span class="job-status-badge" style="${statusBadgeStyle(status)}">${escHtml(status)}</span>
@@ -3542,24 +3569,47 @@ async function openStatusOverview() {
 
   body.innerHTML = h;
 
-  // Collapsible toggle
+  // Collapsible toggle — persist state in soCollapsed so re-renders keep it.
   body.querySelectorAll('.so-section-header').forEach(hdr => {
     hdr.addEventListener('click', () => {
+      const status = hdr.dataset.soStatus;
       const sectionBody = hdr.nextElementSibling;
       const toggle = hdr.querySelector('.so-section-toggle');
       const isHidden = sectionBody.classList.toggle('hidden');
       toggle.textContent = isHidden ? '▼' : '▲';
+      if (isHidden) soCollapsed.add(status); else soCollapsed.delete(status);
     });
   });
 
-  // Click row → jump to job in day calendar
+  // Left-click row → jump to job in day calendar.
+  // Right-click row → status context menu (reuses #ctx-menu / showCtxMenu).
   body.querySelectorAll('.so-row[data-job-id]').forEach(row => {
     row.addEventListener('click', () => {
       closeModal('status-overview-modal');
       goToJob(parseInt(row.dataset.jobId));
     });
+    row.addEventListener('contextmenu', e => showCtxMenu(e, parseInt(row.dataset.jobId)));
   });
+}
 
+// Re-render the overview in place if it is currently open (after a live
+// status change), keeping expand/collapse state intact.
+function refreshStatusOverviewIfOpen() {
+  const modal = document.getElementById('status-overview-modal');
+  if (modal && !modal.classList.contains('hidden')) renderStatusOverviewBody();
+}
+
+async function openStatusOverview() {
+  const [allJobs, allPrinters] = await Promise.all([
+    api('GET', '/api/jobs'),
+    api('GET', '/api/printers'),
+  ]);
+  allJobs.forEach(j => { jobsCache[j.id] = j; });
+  printers = allPrinters;
+  if (soCollapsed === null) {
+    soCollapsed = new Set(SO_STATUS_ORDER.filter(s => !SO_EXPAND_DEFAULT.includes(s)));
+  }
+  renderStatusOverviewBody();
   document.getElementById('status-overview-modal').classList.remove('hidden');
 }
 
@@ -3597,6 +3647,7 @@ function setupListeners() {
         const savedScroll = scr ? scr.scrollTop : 0;
         await api('PATCH', `/api/jobs/${ctxJobId}`, { status: btn.dataset.status });
         await renderCalendar();
+        refreshStatusOverviewIfOpen();
         const scr2 = document.getElementById('day-scroll');
         if (scr2) scr2.scrollTop = savedScroll;
       }
