@@ -38,6 +38,7 @@ Dirk (primary), potentially other Printseed users. Accessed via browser (PWA-cap
 - **MQTT for Bambu** — real-time printer status without polling. The MQTT connection is managed in `bambu.js` with auto-reconnect.
 - **Schema inline in db.js** — schema is defined directly in `db.js` using `CREATE IF NOT EXISTS` (not in a separate SQL file like Hebbes).
 - **CORS configured per-sibling** — only allows origins from the other Printseed apps, configured via env vars.
+- **Job status model** — stored status values (exact): `Planned`, `Awaiting` (shown as "awaiting confirmation" in UI), `Printing`, `Post Printing`, `Done`, `Paused`. `Paused` is **system-only** — set by the pause pipeline (`pause.js`); it must NEVER appear in a status context menu or be user-selectable. Status order convention: context menu + change dialog both go planned → awaiting confirmation → printing → post printing → done; the Job Status Overview dialog additionally shows `Paused` directly after Printing. The "Job Status" menu badge = count of `Post Printing` + `Paused` (attention statuses); that count is the pure fn `countAttentionJobs` in `public/statusCount.js`, shared by the browser badge and the Jest test. Status changes go through `PATCH /api/jobs/:id` (status is a whitelisted field).
 
 ## Coding conventions
 
@@ -75,7 +76,7 @@ Deployed via the shared infrastructure repo: `../infrastructure/apps/printfarm-p
 ## Gotchas
 
 - **pm2 cwd caching:** pm2 caches cwd at first start. Delete + restart if you change ecosystem.config.js.
-- **Service worker:** `public/sw.js` is cache-first over `SHELL_URLS`, which includes `/style.css`, and `index.html` loads it with no cache-busting query. So **any** change to a shell asset under `public/` must bump `CACHE_NAME` in the same commit (current value: `printfarm-v4`). Skip it and the first load after deploy serves the old asset — change only shows on a second reload, which reads as "the fix didn't work". `skipWaiting()`, the activate-time cache purge and `clients.claim()` are already wired, so the version bump alone is enough.
+- **Service worker:** `public/sw.js` is cache-first over `SHELL_URLS`, which includes `/style.css`, and `index.html` loads it with no cache-busting query. So **any** change to a shell asset under `public/` must bump `CACHE_NAME` in the same commit (current value: `printfarm-v6`). Skip it and the first load after deploy serves the old asset — change only shows on a second reload, which reads as "the fix didn't work". `skipWaiting()`, the activate-time cache purge and `clients.claim()` are already wired, so the version bump alone is enough.
 - **MQTT reconnect:** if the MQTT broker is unreachable, `bambu.js` retries silently. Check pm2 logs if printer status stops updating.
 - **SQLite WAL mode:** the `data/` directory must be writable and on a local filesystem (not NFS).
 
