@@ -20,6 +20,9 @@ let statusMeta = {
   'Post Printing': { color: '#d97706' },
   'Done':          { color: '#64748b' },
   'Awaiting':      { color: '#7c3aed' },
+  // Pending auto-link: set via "Link when printer starts"; server flips it to
+  // 'Printing' when the printer starts. Not a user-selectable status button.
+  'Awaiting Printer': { color: '#0891b2' },
   // System-only: server flips a linked job to 'Paused' while the printer
   // is paused; cleared on resume. NOT exposed in any user status picker.
   'Paused':        { color: '#f59e0b' },
@@ -574,6 +577,8 @@ async function loadStatusColors() {
     'Post Printing': { color: colors['Post Printing'] ?? '#d97706' },
     'Done':          { color: colors['Done']          ?? '#64748b' },
     'Awaiting':      { color: colors['Awaiting']      ?? '#7c3aed' },
+    // Pending auto-link (see top of file). Not exposed in settings pickers.
+    'Awaiting Printer': { color: colors['Awaiting Printer'] ?? '#0891b2' },
     // System-only (see top of file). Not exposed in settings pickers.
     'Paused':        { color: colors['Paused']        ?? '#f59e0b' },
   };
@@ -2067,6 +2072,70 @@ function isMobileView() { return window.innerWidth <= 480; }
 // Detect touch device on first touch
 document.addEventListener('touchstart', () => { isTouchDevice = true; }, { once: true, passive: true });
 
+// ---- Link menu state (shared by desktop ctx-menu + mobile bottom sheet) ----
+const LINK_START_WINDOW_MS = 60 * 60 * 1000; // mirror awaiting-printer.WINDOW_MS
+
+// A job is eligible to pre-link ("Link when printer starts") only when its
+// start is in the past or at most 1h ahead. Server enforces this too; this is
+// UX-only so the option is hidden when it would be rejected.
+function isStartWithinLinkWindow(startISO) {
+  if (!startISO) return false;
+  const t = new Date(startISO).getTime();
+  if (Number.isNaN(t)) return false;
+  return t <= Date.now() + LINK_START_WINDOW_MS;
+}
+
+// Decide the single link/unlink/prelink/cancel item to show for a job, or null
+// to hide it. Keeps desktop + mobile menus in lockstep.
+function jobLinkMenuState(job) {
+  if (!job) return null;
+  const printer = printers.find(p => p.id === job.printerId);
+  const isRunning = getPrinterLiveStatus(printer)?.stage === 'RUNNING';
+  if (job.status === 'Awaiting Printer') {
+    return { label: '🔗 Cancel auto-link', action: 'cancel-await' };
+  }
+  if (job.linked_printer_id) {
+    return { label: '🔗 Unlink from printer', action: 'unlink' };
+  }
+  if (isRunning) {
+    const printerBusy = Object.values(jobsCache)
+      .some(j => j.id !== job.id && j.linked_printer_id === printer?.id);
+    return printerBusy ? null : { label: '🔗 Link to printer', action: 'link' };
+  }
+  // Printer idle/preparing → offer pre-link if the job is eligible and the
+  // printer has no other job already waiting to auto-link.
+  const hasPending = Object.values(jobsCache).some(
+    j => j.id !== job.id && j.status === 'Awaiting Printer' && j.linked_printer_id === printer?.id
+  );
+  if (!hasPending && isStartWithinLinkWindow(job.start)) {
+    return { label: '🔗 Link when printer starts', action: 'prelink' };
+  }
+  return null;
+}
+
+// Apply a chosen link action (link / unlink / prelink / cancel-await) for a
+// job id. Returns true on success; surfaces server rejections via alert.
+async function applyLinkAction(jobId, action) {
+  const job = jobsCache[jobId];
+  try {
+    if (action === 'unlink') {
+      await api('PATCH', `/api/jobs/${jobId}`, { linked_printer_id: null });
+    } else if (action === 'cancel-await') {
+      await api('PATCH', `/api/jobs/${jobId}`, { linked_printer_id: null, status: 'Planned' });
+    } else if (action === 'prelink') {
+      await api('PATCH', `/api/jobs/${jobId}`, { linked_printer_id: job?.printerId ?? null, status: 'Awaiting Printer' });
+    } else {
+      await api('PATCH', `/api/jobs/${jobId}`, { linked_printer_id: job?.printerId ?? null, status: 'Printing' });
+    }
+    return true;
+  } catch (err) {
+    let msg = err.message;
+    try { msg = JSON.parse(err.message).error || msg; } catch { /* raw text */ }
+    alert(msg);
+    return false;
+  }
+}
+
 // ---- Bottom sheet (mobile context menu) ----
 let bsJobId = null;
 
@@ -2085,25 +2154,15 @@ function showBottomSheet(jobId) {
     btn.classList.toggle('ctx-status-active', btn.dataset.status === currentStatus);
   });
 
-  // Link/unlink
-  const ctxPrinter = printers.find(p => p.id === job.printerId);
+  // Link / unlink / pre-link
   const linkItem = document.getElementById('bs-link-item');
   const linkSep  = document.getElementById('bs-link-sep');
-  const isLinked = !!job.linked_printer_id;
-  const isRunning = getPrinterLiveStatus(ctxPrinter)?.stage === 'RUNNING';
-  const printerBusy = isRunning && !isLinked &&
-    Object.values(jobsCache).some(j => j.id !== jobId && j.linked_printer_id === ctxPrinter?.id);
-
-  if (isLinked) {
+  const linkState = jobLinkMenuState(job);
+  if (linkState) {
     linkItem.classList.remove('hidden');
     linkSep.classList.remove('hidden');
-    linkItem.textContent = '🔗 Unlink from printer';
-    linkItem.dataset.action = 'unlink';
-  } else if (isRunning && !printerBusy) {
-    linkItem.classList.remove('hidden');
-    linkSep.classList.remove('hidden');
-    linkItem.textContent = '🔗 Link to printer';
-    linkItem.dataset.action = 'link';
+    linkItem.textContent = linkState.label;
+    linkItem.dataset.action = linkState.action;
   } else {
     linkItem.classList.add('hidden');
     linkSep.classList.add('hidden');
@@ -2199,14 +2258,10 @@ function setupBottomSheet() {
   });
   document.getElementById('bs-link-item').addEventListener('click', async () => {
     if (bsJobId === null) return;
-    const btn = document.getElementById('bs-link-item');
-    if (btn.dataset.action === 'unlink') {
-      await api('PATCH', `/api/jobs/${bsJobId}`, { linked_printer_id: null });
-    } else {
-      const job = jobsCache[bsJobId];
-      await api('PATCH', `/api/jobs/${bsJobId}`, { linked_printer_id: job?.printerId ?? null, status: 'Printing' });
-    }
+    const action = document.getElementById('bs-link-item').dataset.action;
+    const id = bsJobId;
     hideBottomSheet();
+    await applyLinkAction(id, action);
     renderCalendar();
   });
 }
@@ -2307,26 +2362,15 @@ function showCtxMenu(e, jobId) {
     btn.classList.toggle('ctx-status-active', btn.dataset.status === currentStatus)
   );
 
-  // Show link / unlink option based on job + printer state
-  const ctxJob     = jobsCache[jobId];
-  const ctxPrinter = printers.find(p => p.id === ctxJob?.printerId);
+  // Show link / unlink / pre-link option based on job + printer state
   const linkItem   = document.getElementById('ctx-link-item');
   const linkSep    = document.getElementById('ctx-link-sep');
-  const isLinked   = !!ctxJob?.linked_printer_id;
-  const isRunning  = getPrinterLiveStatus(ctxPrinter)?.stage === 'RUNNING';
-  const printerBusy = isRunning && !isLinked &&
-    Object.values(jobsCache).some(j => j.id !== jobId && j.linked_printer_id === ctxPrinter?.id);
-
-  if (isLinked) {
+  const linkState  = jobLinkMenuState(jobsCache[jobId]);
+  if (linkState) {
     linkItem.classList.remove('hidden');
     linkSep.style.display = '';
-    linkItem.textContent  = '🔗 Unlink from printer';
-    linkItem.dataset.action = 'unlink';
-  } else if (isRunning && !printerBusy) {
-    linkItem.classList.remove('hidden');
-    linkSep.style.display = '';
-    linkItem.textContent  = '🔗 Link to printer';
-    linkItem.dataset.action = 'link';
+    linkItem.textContent  = linkState.label;
+    linkItem.dataset.action = linkState.action;
   } else {
     linkItem.classList.add('hidden');
     linkSep.style.display = 'none';
@@ -3503,8 +3547,8 @@ function syncUrlToState({ replace = false } = {}) {
 // Dialog category order — 'Paused' sits directly after 'Printing'. (The
 // context menu that sets a status deliberately omits 'Paused' — it is a
 // system-only status; see #ctx-menu / .bs-status-btn in index.html.)
-const SO_STATUS_ORDER   = ['Planned', 'Awaiting', 'Printing', 'Paused', 'Post Printing', 'Done'];
-const SO_EXPAND_DEFAULT = ['Printing', 'Paused', 'Awaiting', 'Post Printing'];
+const SO_STATUS_ORDER   = ['Planned', 'Awaiting', 'Awaiting Printer', 'Printing', 'Paused', 'Post Printing', 'Done'];
+const SO_EXPAND_DEFAULT = ['Awaiting Printer', 'Printing', 'Paused', 'Awaiting', 'Post Printing'];
 // Persisted set of collapsed sections so a live re-render keeps the user's
 // expand/collapse choices. null until the overview is first opened.
 let soCollapsed = null;
@@ -3736,14 +3780,10 @@ function setupListeners() {
   // Link / unlink
   document.getElementById('ctx-link-item').addEventListener('click', async () => {
     if (ctxJobId === null) return;
-    const btn = document.getElementById('ctx-link-item');
-    if (btn.dataset.action === 'unlink') {
-      await api('PATCH', `/api/jobs/${ctxJobId}`, { linked_printer_id: null });
-    } else {
-      const job = jobsCache[ctxJobId];
-      await api('PATCH', `/api/jobs/${ctxJobId}`, { linked_printer_id: job?.printerId ?? null, status: 'Printing' });
-    }
+    const action = document.getElementById('ctx-link-item').dataset.action;
+    const id = ctxJobId;
     hideCtxMenu();
+    await applyLinkAction(id, action);
     renderCalendar();
   });
 
