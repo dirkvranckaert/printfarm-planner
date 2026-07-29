@@ -1,5 +1,12 @@
-const CACHE_NAME = 'printfarm-v7';
+const CACHE_NAME = 'printfarm-v8';
 const SHELL_URLS = ['/', '/index.html', '/style.css', '/statusCount.js', '/app.js', '/favicon.svg', '/manifest.json'];
+
+// App shell CODE (HTML/CSS/JS): served network-first so a deploy reaches
+// returning users on their next load. Previously these were cache-first with
+// only background revalidation (`cached || fetchPromise`), which pinned each
+// browser to whatever app.js it first cached until CACHE_NAME changed — so a
+// shipped fix never reached a user until someone remembered to bump the cache.
+const CODE_SHELL = new Set(['/', '/index.html', '/style.css', '/statusCount.js', '/app.js']);
 
 // Cache app shell on install
 self.addEventListener('install', event => {
@@ -30,7 +37,22 @@ self.addEventListener('fetch', event => {
     return;
   }
 
-  // Static assets: cache-first, fall back to network
+  // App shell code: network-first. Serve the freshest HTML/CSS/JS when online
+  // (updating the cache), and fall back to the cached copy only when offline.
+  if (CODE_SHELL.has(url.pathname)) {
+    event.respondWith(
+      fetch(event.request).then(response => {
+        if (response.ok) {
+          const clone = response.clone();
+          caches.open(CACHE_NAME).then(cache => cache.put(event.request, clone));
+        }
+        return response;
+      }).catch(() => caches.match(event.request))
+    );
+    return;
+  }
+
+  // Other static assets (favicon, manifest, uploads, …): cache-first, fall back to network
   event.respondWith(
     caches.match(event.request).then(cached => {
       const fetchPromise = fetch(event.request).then(response => {
