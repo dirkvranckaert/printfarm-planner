@@ -7,6 +7,7 @@ const db     = require('./db');
 const brands = require('./brands');
 const push   = require('./push');
 const pause  = require('./pause');
+const awaitingPrinter = require('./awaiting-printer');
 const { parse3mf, extractThumbnails } = require('./parse3mf');
 const sharedAuth = require('./shared-auth');
 
@@ -160,6 +161,14 @@ brands.onUpdate((brandKey, status) => {
 
     linked.forEach(job => {
       if (curr === 'RUNNING' && job.status !== 'Printing') {
+        // 'Awaiting Printer' = pre-linked via "Link when printer starts". Only
+        // auto-link if the job's start is still within the window at THIS
+        // moment; a printer starting a far-ahead job's sibling must not sweep
+        // it up. Out-of-window pending jobs stay pending (user resolves them).
+        if (job.status === awaitingPrinter.STATUS
+            && !awaitingPrinter.isWithinStartWindow(job.start, new Date())) {
+          return;
+        }
         // First RUNNING tick after linking, or resume from PAUSE. Mark as
         // Printing, clear any pause snapshot, and snap start/end to reflect
         // the actual reported remaining (may differ from scheduled end).
@@ -503,6 +512,19 @@ app.put('/api/jobs/:id', (req, res) => {
   res.json({ id: Number(req.params.id), ...req.body, start: normStart, end: normEnd, queued: isQueued });
 });
 app.patch('/api/jobs/:id', (req, res) => {
+  // "Link when printer starts": enter the 'Awaiting Printer' pending state.
+  // The start-time window + one-pending-per-printer invariant are enforced
+  // here, at the point the user sets it. The auto-link on RUNNING reuses the
+  // existing linked_printer_id transition in the SSE handler above.
+  if (req.body.status === awaitingPrinter.STATUS) {
+    const id = Number(req.params.id);
+    const job = db.prepare('SELECT * FROM jobs WHERE id=?').get(id);
+    if (!job) return res.status(404).json({ error: 'Job not found' });
+    const printerId = req.body.linked_printer_id ?? job.printerId;
+    const result = awaitingPrinter.assignPending({ db, jobId: id, printerId, now: new Date() });
+    if (!result.ok) return res.status(result.code).json({ error: result.error });
+    return res.json(db.prepare('SELECT * FROM jobs WHERE id=?').get(id));
+  }
   const allowed = ['printerId', 'name', 'customerName', 'orderNr', 'start', 'end', 'status', 'colors', 'printFile', 'remarks', 'queued', 'durationMins', 'linked_printer_id', 'bedType'];
   const fields = Object.entries(req.body)
     .filter(([k]) => allowed.includes(k))
