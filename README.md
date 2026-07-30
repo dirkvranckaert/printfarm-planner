@@ -24,6 +24,7 @@ Built with Node.js + Express + SQLite. Protected by session-based cookie auth. D
 - **Per-printer buffer times** — configurable warm-up and cool-down periods shown as cross-hatched blocks in day view; included in conflict detection and drag overlap prevention
 - **Connected Accounts** — BambuLab account linked/unlinked directly from the Printers modal; account status shown in the printer list and edit dialog
 - **Browser push notifications** — opt-in push alerts for printer started, printer finished (with job/customer/order details), and upcoming scheduled jobs; per-type on/off toggles in Settings
+- **Link when printer starts** — pre-link a job to an idle/preparing printer (desktop context-menu + mobile bottom-sheet). Sets system status `Awaiting Printer`; when the printer starts, the pending job auto-links to `Printing`. Guards: one pending job per printer, and the job's start must be past or within 1h. "Cancel auto-link" resets it to `Planned`.
 
 ---
 
@@ -62,7 +63,7 @@ printfarm-planner/
     ├── login.html        ← Login page (served unauthenticated)
     ├── app.js            ← All frontend logic; uses fetch() to call the REST API
     ├── style.css
-    ├── sw.js             ← Service worker: handles Web Push events, shows notifications
+    ├── sw.js             ← Service worker: Web Push events + network-first shell caching (offline fallback)
     └── favicon.svg
 ```
 
@@ -419,6 +420,8 @@ Printer body fields: `name`, `color` (hex), `brand`, `bambu_serial?`, `pinned?` 
 | DELETE | `/api/jobs/:id` | Delete job |
 
 Job body fields: `printerId` (int), `name`, `customerName`, `orderNr`, `start` (datetime-local string), `end` (datetime-local string), `queued` (bool), `status` (`Planned` / `Printing` / `Post Printing` / `Done`), `colors`, `printFile`, `remarks`
+
+`Paused` and `Awaiting Printer` are system-managed statuses — set by the server (pause pipeline / link-when-printer-starts), not user-selectable via this field. PATCH with `status: 'Awaiting Printer'` triggers the pre-link flow (see the "Link when printer starts" feature): 409 if another job is already pending on that printer, 400/404 if the start time is ineligible (empty/queued, or more than 1h in the future).
 
 Queued jobs have `queued = 1`; scheduled jobs have `queued = 0` with real datetime values.
 

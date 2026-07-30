@@ -31,6 +31,7 @@ Dirk (primary), potentially other Printseed users. Accessed via browser (PWA-cap
 | `parse3mf.js` | Extract metadata + thumbnails from .3mf print files |
 | `shared-auth.js` | Validate cross-app JWT tokens (Printseed SSO pattern) |
 | `push.js` | Web push subscription CRUD + notification dispatch |
+| `awaiting-printer.js` | Pre-link job to idle/preparing printer ("Link when printer starts"): `STATUS`, `WINDOW_MS`, `isWithinStartWindow`, `assignPending` |
 
 ## Key decisions
 
@@ -38,7 +39,9 @@ Dirk (primary), potentially other Printseed users. Accessed via browser (PWA-cap
 - **MQTT for Bambu** — real-time printer status without polling. The MQTT connection is managed in `bambu.js` with auto-reconnect.
 - **Schema inline in db.js** — schema is defined directly in `db.js` using `CREATE IF NOT EXISTS` (not in a separate SQL file like Hebbes).
 - **CORS configured per-sibling** — only allows origins from the other Printseed apps, configured via env vars.
-- **Job status model** — stored status values (exact): `Planned`, `Awaiting` (shown as "awaiting confirmation" in UI), `Printing`, `Post Printing`, `Done`, `Paused`. `Paused` is **system-only** — set by the pause pipeline (`pause.js`); it must NEVER appear in a status context menu or be user-selectable. Status order convention: context menu + change dialog both go planned → awaiting confirmation → printing → post printing → done; the Job Status Overview dialog additionally shows `Paused` directly after Printing. The "Job Status" menu badge = count of `Post Printing` + `Paused` (attention statuses); that count is the pure fn `countAttentionJobs` in `public/statusCount.js`, shared by the browser badge and the Jest test. Status changes go through `PATCH /api/jobs/:id` (status is a whitelisted field).
+- **Job status model** — stored status values (exact): `Planned`, `Awaiting` (shown as "awaiting confirmation" in UI), `Awaiting Printer` (title-case, space — stored verbatim), `Printing`, `Post Printing`, `Done`, `Paused`. `Paused` and `Awaiting Printer` are **system-managed** — never a user-selectable status button. `Paused` set by pause pipeline (`pause.js`); `Awaiting Printer` set by link-when-printer-starts pipeline (`awaiting-printer.js`). Status order convention: context menu + change dialog both go planned → awaiting confirmation → printing → post printing → done; the Job Status Overview dialog additionally shows `Paused` directly after Printing, and `Awaiting Printer` between `Awaiting` and `Printing`. The "Job Status" menu badge = count of `Post Printing` + `Paused` (attention statuses); `Awaiting Printer` is NOT counted (badge unchanged). Badge count = pure fn `countAttentionJobs` in `public/statusCount.js`, shared by browser badge + Jest test. Status changes go through `PATCH /api/jobs/:id` (status is a whitelisted field).
+
+- **Link when printer starts** — pre-link a job to an idle/preparing printer before it starts. Action in BOTH desktop context-menu and mobile bottom-sheet (shared `jobLinkMenuState` + `applyLinkAction` in `public/app.js`). `PATCH /api/jobs/:id` intercepts `status === 'Awaiting Printer'` → `assignPending` (`awaiting-printer.js`). Two guards: **one pending job per printer** (409 on conflict) and **start-time window** — start must be past OR ≤1h in the future (inclusive; `WINDOW_MS = 1h`); empty/queued start ineligible (400/404). When printer transitions to `Printing`/RUNNING, existing linked-job SSE transition auto-links the pending job → `Printing`, skipping out-of-window pending jobs. "Cancel auto-link" clears the link + resets to `Planned`.
 
 ## Coding conventions
 
@@ -64,7 +67,9 @@ npm test
 
 ## Deploy
 
-Deployed via the shared infrastructure repo: `../infrastructure/apps/printfarm-planner/deploy.sh`
+Canonical deploy = `../infrastructure/apps/printfarm-planner/deploy.sh` (infra-repo wrapper → `apps/_template/deploy.sh` engine: atomic releases, SQLite snapshot, auto-rollback, auth health-check expecting 401 on `/login`). **NOT** the repo-root legacy `deploy.sh`.
+
+⚠️ This deploy is NOT covered by the standing auto-deploy permission (scoped to project-calculator only). Harness classifier denies it → **Dirk runs it manually**.
 
 - **Production port:** 3457
 - **Domain:** `printfarm.app3.be` → `46.101.206.198` (APP3 proxy VPS)
@@ -76,7 +81,7 @@ Deployed via the shared infrastructure repo: `../infrastructure/apps/printfarm-p
 ## Gotchas
 
 - **pm2 cwd caching:** pm2 caches cwd at first start. Delete + restart if you change ecosystem.config.js.
-- **Service worker:** `public/sw.js` is cache-first over `SHELL_URLS`, which includes `/style.css`, and `index.html` loads it with no cache-busting query. So **any** change to a shell asset under `public/` must bump `CACHE_NAME` in the same commit (current value: `printfarm-v6`). Skip it and the first load after deploy serves the old asset — change only shows on a second reload, which reads as "the fix didn't work". `skipWaiting()`, the activate-time cache purge and `clients.claim()` are already wired, so the version bump alone is enough.
+- **Service worker:** `public/sw.js` shell assets (`/`, `index.html`, `style.css`, `statusCount.js`, `app.js`) are **network-first** since v8 (cache = offline fallback only). Current `CACHE_NAME`: `printfarm-v8`. Effect: future JS fixes reach browsers on next load WITHOUT a manual cache bump (previously cache-first, so every shell-asset change needed a `CACHE_NAME` bump in the same commit). Intended tradeoffs: no fetch timeout; a server 5xx surfaces instead of falling back to the cached shell. `skipWaiting()`, activate-time cache purge and `clients.claim()` still wired.
 - **MQTT reconnect:** if the MQTT broker is unreachable, `bambu.js` retries silently. Check pm2 logs if printer status stops updating.
 - **SQLite WAL mode:** the `data/` directory must be writable and on a local filesystem (not NFS).
 
