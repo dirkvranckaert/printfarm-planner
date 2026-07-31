@@ -3,10 +3,49 @@
 // =============================================================================
 
 // ---- Constants ----
-const HOUR_HEIGHT = 60;          // px per hour — MUST match --hour-height in style.css
 const DAY_START   = 0;           // first hour rendered in day view
 const DAY_END     = 24;          // exclusive
 const DAY_MINS    = (DAY_END - DAY_START) * 60;  // 1440
+
+// ---- Day-view vertical scale ----
+// The day grid conceptually works in *minutes*: every drag position, job
+// start/end and now-line is a minute offset from midnight. Those minute values
+// are turned into CSS pixels through PX_PER_MIN. Historically this was a fixed
+// 1 px = 1 min (HOUR_HEIGHT = 60). It is now recomputed each renderDay() so the
+// full 24h grid grows to fill leftover viewport height on tall screens, while a
+// floor (MIN_PX_PER_MIN) keeps short screens scrolling instead of squashing.
+const MIN_PX_PER_MIN = 1;        // floor density = 60 px/hour (the historical size)
+let   PX_PER_MIN     = MIN_PX_PER_MIN;
+let   dayScaleCorrecting = false;  // guards the one-shot first-render scale correction
+let   HOUR_HEIGHT    = 60 * PX_PER_MIN;  // px per hour — derived from PX_PER_MIN
+
+// minute <-> pixel conversions. Every day-grid position MUST go through these
+// so overlays (job blocks, buffers, now-line, drag targets) stay aligned when
+// the grid is scaled.
+const minToPx = m  => m  * PX_PER_MIN;
+const pxToMin = px => px / PX_PER_MIN;
+
+function setDayScale(pxPerMin) {
+  PX_PER_MIN  = pxPerMin;
+  HOUR_HEIGHT = 60 * PX_PER_MIN;
+}
+
+// Pick a px-per-minute density so the 24h grid fills the scroll viewport when
+// there is spare height, but never drops below MIN_PX_PER_MIN (so a short
+// window keeps the historical density and scrolls). Measured off the live
+// #day-scroll when present (its clientHeight is independent of body content),
+// else estimated from #calendar-container minus the sticky header/banner.
+function computeDayScale() {
+  const scroll = document.getElementById('day-scroll');
+  let avail;
+  if (scroll) {
+    avail = scroll.clientHeight;
+  } else {
+    const container = document.getElementById('calendar-container');
+    avail = (container ? container.clientHeight : 0) - 40; // ~header height
+  }
+  return Math.max(MIN_PX_PER_MIN, avail / DAY_MINS);
+}
 
 const PRESET_COLORS = [
   '#4f9cf9', '#f94f4f', '#22c55e', '#f59e0b', '#a855f7',
@@ -1190,9 +1229,12 @@ async function renderDay() {
     h += `<div class="day-closed-banner">🔒 ${lbl} — no jobs can be scheduled on this day</div>`;
   }
 
+  // Scale the grid to fill leftover viewport height (see computeDayScale).
+  setDayScale(computeDayScale());
+
   // Scrollable body
   h += `<div class="day-view-scroll" id="day-scroll">`;
-  h += `<div class="day-view-body" style="height:${DAY_MINS}px">`;
+  h += `<div class="day-view-body" style="height:${minToPx(DAY_MINS)}px">`;
 
   // Time gutter
   h += '<div class="day-time-gutter">';
@@ -1221,8 +1263,8 @@ async function renderDay() {
       // Clamp to day boundaries using ms arithmetic (avoids midnight roll-over bugs)
       const startMins = (start.getTime() - dayS.getTime()) / 60_000;
       const endMins   = (end.getTime()   - dayS.getTime()) / 60_000;
-      const topPx  = Math.max(0, startMins);           // 1 min = 1 px at HOUR_HEIGHT=60
-      const htPx   = Math.max(Math.min(endMins, DAY_MINS) - topPx, 18);
+      const topPx  = Math.max(0, minToPx(startMins));
+      const htPx   = Math.max(minToPx(Math.min(endMins, DAY_MINS)) - topPx, 18); // 18px visual floor
 
       const status     = job.status ?? 'Planned';
       const isConflict = conflictIds.has(job.id);
@@ -1239,7 +1281,7 @@ async function renderDay() {
 
       // Warm-up buffer block (before job)
       if (warmUp > 0) {
-        const bTop = Math.max(0, topPx - warmUp);
+        const bTop = Math.max(0, topPx - minToPx(warmUp));
         const bHt  = topPx - bTop;
         if (bHt > 0) {
           h += `<div class="buffer-block" data-job-id="${job.id}" data-buffer-type="warmup" style="top:${bTop}px;height:${bHt}px">${bHt >= 10 ? '<span class="buffer-label">Warm-up</span>' : ''}</div>`;
@@ -1269,7 +1311,7 @@ async function renderDay() {
       // Cool-down buffer block (after job)
       if (coolDown > 0) {
         const bTop = topPx + htPx;
-        const bHt  = Math.min(coolDown, DAY_MINS - bTop);
+        const bHt  = Math.min(minToPx(coolDown), minToPx(DAY_MINS) - bTop);
         if (bHt > 0) {
           h += `<div class="buffer-block" data-job-id="${job.id}" data-buffer-type="cooldown" style="top:${bTop}px;height:${bHt}px">${bHt >= 10 ? '<span class="buffer-label">Cool-down</span>' : ''}</div>`;
         }
@@ -1290,6 +1332,19 @@ async function renderDay() {
 
   container.innerHTML = h;
 
+  // On the very first render #day-scroll didn't exist yet, so computeDayScale()
+  // used an estimate. Now that it's in the DOM we can measure it exactly; if the
+  // ideal density differs, re-render once with the correct scale. The guard stops
+  // this recursing more than a single corrective pass.
+  if (!dayScaleCorrecting) {
+    const ideal = computeDayScale();
+    if (Math.abs(ideal - PX_PER_MIN) > 0.02) {
+      dayScaleCorrecting = true;
+      try { await renderDay(); } finally { dayScaleCorrecting = false; }
+      return;
+    }
+  }
+
   // Restore the previous scroll position so SSE re-renders don't reset
   // the user's scroll. If an explicit centre-on-now is pending (Today
   // button, first load, etc.) the rAF scrollToNow at the end of this
@@ -1302,7 +1357,7 @@ async function renderDay() {
   // Now-line
   if (sameDay(new Date(), navDate)) {
     const now    = new Date();
-    const nowPx  = now.getHours() * 60 + now.getMinutes();
+    const nowPx  = minToPx(now.getHours() * 60 + now.getMinutes());
     document.querySelectorAll('.day-printer-col').forEach(col => {
       const line = document.createElement('div');
       line.className = 'now-line';
@@ -1317,8 +1372,9 @@ async function renderDay() {
   attachDayEvents();
 }
 
-// Snap a pixel offset (= minutes at HOUR_HEIGHT=60) to the nearest 15-min boundary.
-function snap15(px) { return Math.round(px / 15) * 15; }
+// Snap a MINUTE offset to the nearest 15-min boundary. Callers convert pixels
+// to minutes via pxToMin() before snapping.
+function snap15(mins) { return Math.round(mins / 15) * 15; }
 
 // Returns a start position (in minutes) that avoids overlapping any other job's buffer zone on the same printer column.
 function snapAvoidingJobs(proposedStart, durationMins, printerId, excludeJobId) {
@@ -1363,8 +1419,8 @@ function updateDragPreview() {
   const printer   = printers.find(p => p.id === printerId);
   const color     = printer?.color ?? '#0f766e';
 
-  previewEl.style.top             = startMins + 'px';
-  previewEl.style.height          = durMins + 'px';
+  previewEl.style.top             = minToPx(startMins) + 'px';
+  previewEl.style.height          = minToPx(durMins) + 'px';
   previewEl.style.background      = hexRgba(color, 0.22);
   previewEl.style.borderLeftColor = color;
 
@@ -1372,11 +1428,12 @@ function updateDragPreview() {
   previewEl.textContent = h > 0 ? (m > 0 ? `${h}h ${m}m` : `${h}h`) : `${m}m`;
 }
 
-function expandDayBodyForDrag(bottomPx) {
+// bottomMins: how far down the drag reaches, in MINUTES. Converted to px here.
+function expandDayBodyForDrag(bottomMins) {
   const body = document.querySelector('.day-view-body');
   if (!body) return;
-  const needed = Math.max(bottomPx + 40, DAY_MINS);
-  if (needed > parseInt(body.style.height)) body.style.height = needed + 'px';
+  const needed = Math.max(minToPx(bottomMins) + 40, minToPx(DAY_MINS));
+  if (needed > parseFloat(body.style.height)) body.style.height = needed + 'px';
 }
 
 function onDragMove(e) {
@@ -1396,7 +1453,7 @@ function onDragMove(e) {
 
     if (targetCol) {
       const rect  = targetCol.getBoundingClientRect();
-      const proposed = snap15(Math.max(0, Math.min(e.clientY - rect.top, DAY_MINS + 240 - drag.durationMins)));
+      const proposed = snap15(Math.max(0, Math.min(pxToMin(e.clientY - rect.top), DAY_MINS + 240 - drag.durationMins)));
       drag.printerId = parseInt(targetCol.dataset.printerId);
       // Avoid landing on top of an existing job's warm-up / cool-down buffer
       // on the same printer column. Mirrors the "move" branch behaviour so
@@ -1417,8 +1474,8 @@ function onDragMove(e) {
       const { durationMins, previewEl } = drag;
       const printer = printers.find(p => p.id === drag.printerId);
       const color   = printer?.color ?? '#0f766e';
-      previewEl.style.top             = y + 'px';
-      previewEl.style.height          = durationMins + 'px';
+      previewEl.style.top             = minToPx(y) + 'px';
+      previewEl.style.height          = minToPx(durationMins) + 'px';
       expandDayBodyForDrag(y + durationMins);
       previewEl.style.background      = hexRgba(color, 0.22);
       previewEl.style.borderLeftColor = color;
@@ -1434,7 +1491,7 @@ function onDragMove(e) {
 
   if (drag.type === 'create') {
     const rect = drag.colEl.getBoundingClientRect();
-    const y = Math.max(0, Math.min(e.clientY - rect.top, DAY_MINS));
+    const y = Math.max(0, Math.min(pxToMin(e.clientY - rect.top), DAY_MINS));
     drag.currentMins = snap15(y);
     if (Math.abs(drag.currentMins - drag.anchorMins) >= 15) drag.moved = true;
     updateDragPreview();
@@ -1460,36 +1517,36 @@ function onDragMove(e) {
     }
 
     const rect = drag.colEl.getBoundingClientRect();
-    const y    = snap15(Math.max(0, Math.min(e.clientY - rect.top, DAY_MINS + 240)));
+    const y    = snap15(Math.max(0, Math.min(pxToMin(e.clientY - rect.top), DAY_MINS + 240)));
 
     const snapped = snapAvoidingJobs(snap15(Math.max(0, Math.min(y - drag.offsetMins, DAY_MINS + 240 - drag.durationMins))), drag.durationMins, drag.printerId, drag.jobId);
     const newTop  = Math.max(0, Math.min(snapped, DAY_MINS + 240 - drag.durationMins));
     if (Math.abs(newTop - drag.currentTopMins) >= 1) drag.moved = true;
     drag.currentTopMins = newTop;
-    drag.jobEl.style.top = newTop + 'px';
+    drag.jobEl.style.top = minToPx(newTop) + 'px';
     drag.jobEl.style.opacity = '0.75';
     drag.jobEl.style.zIndex  = '10';
     expandDayBodyForDrag(newTop + drag.durationMins);
     if (drag.warmUpEl) {
       const bTop = Math.max(0, newTop - drag.warmUpMins);
       const bHt  = newTop - bTop;
-      drag.warmUpEl.style.top    = bTop + 'px';
-      drag.warmUpEl.style.height = bHt  + 'px';
+      drag.warmUpEl.style.top    = minToPx(bTop) + 'px';
+      drag.warmUpEl.style.height = minToPx(bHt)  + 'px';
     }
     if (drag.coolDownEl) {
-      drag.coolDownEl.style.top = (newTop + drag.durationMins) + 'px';
+      drag.coolDownEl.style.top = minToPx(newTop + drag.durationMins) + 'px';
     }
     return;
   }
 
   const rect = drag.colEl.getBoundingClientRect();
-  const y    = snap15(Math.max(0, Math.min(e.clientY - rect.top, DAY_MINS + 240)));
+  const y    = snap15(Math.max(0, Math.min(pxToMin(e.clientY - rect.top), DAY_MINS + 240)));
 
   if (drag.type === 'resize') {
     const newEnd = Math.max(drag.startMins + 15, y);
     if (Math.abs(newEnd - drag.currentEndMins) >= 1) drag.moved = true;
     drag.currentEndMins = newEnd;
-    drag.jobEl.style.height  = (newEnd - drag.startMins) + 'px';
+    drag.jobEl.style.height  = minToPx(newEnd - drag.startMins) + 'px';
     drag.jobEl.style.opacity = '0.75';
     expandDayBodyForDrag(newEnd);
   }
@@ -1530,7 +1587,7 @@ async function onDragEnd() {
 
     await renderCalendar();
     const scr = document.getElementById('day-scroll');
-    if (scr) scr.scrollTop = Math.max(0, currentMins - 120);
+    if (scr) scr.scrollTop = Math.max(0, minToPx(currentMins) - 120);
     return;
   }
 
@@ -1615,7 +1672,7 @@ function attachDayEvents() {
       const colEl   = el.closest('.day-printer-col');
       const colRect = colEl.getBoundingClientRect();
       const elRect  = el.getBoundingClientRect();
-      const topMins = elRect.top - colRect.top;
+      const topMins = pxToMin(elRect.top - colRect.top);
       const printer = printers.find(p => p.id === parseInt(colEl.dataset.printerId));
 
       drag = {
@@ -1624,7 +1681,7 @@ function attachDayEvents() {
         jobId,
         colEl,
         job,
-        offsetMins: snap15(e.clientY - elRect.top),
+        offsetMins: snap15(pxToMin(e.clientY - elRect.top)),
         currentTopMins: topMins,
         durationMins: Math.round((new Date(job.end) - new Date(job.start)) / 60_000),
         moved: false,
@@ -1652,7 +1709,7 @@ function attachDayEvents() {
       const colEl  = jobEl.closest('.day-printer-col');
       const colRect = colEl.getBoundingClientRect();
       const elRect  = jobEl.getBoundingClientRect();
-      const startMins = elRect.top - colRect.top;
+      const startMins = pxToMin(elRect.top - colRect.top);
 
       drag = {
         type: 'resize',
@@ -1661,7 +1718,7 @@ function attachDayEvents() {
         colEl,
         job,
         startMins,
-        currentEndMins: elRect.bottom - colRect.top,
+        currentEndMins: pxToMin(elRect.bottom - colRect.top),
         moved: false,
       };
       document.body.classList.add('is-resizing');
@@ -1675,7 +1732,7 @@ function attachDayEvents() {
       if (e.button !== 0 || e.target.closest('.job-block')) return;
       if (isDayClosed(navDate)) return; // closed day — no new jobs
       const rect       = col.getBoundingClientRect();
-      const anchorMins = snap15(Math.max(0, e.clientY - rect.top));
+      const anchorMins = snap15(Math.max(0, pxToMin(e.clientY - rect.top)));
       const previewEl  = document.createElement('div');
       previewEl.className = 'drag-preview';
       col.appendChild(previewEl);
@@ -1728,9 +1785,9 @@ function scrollToNow() {
     return;
   }
   const now = new Date();
-  // 1 px = 1 minute at HOUR_HEIGHT=60, so this is the exact position of the
-  // now-line inside the scrollable content.
-  const nowPx = now.getHours() * HOUR_HEIGHT + now.getMinutes();
+  // Exact pixel position of the now-line inside the scrollable content, at the
+  // current grid scale.
+  const nowPx = minToPx(now.getHours() * 60 + now.getMinutes());
   const viewport = scroll.clientHeight;
   // Centre the now-line. Browser clamps the bottom edge automatically; we
   // clamp the top so early mornings don't try to scroll above 0.
@@ -1785,7 +1842,7 @@ function updateNowLine() {
   const lines = document.querySelectorAll('.now-line');
   if (!lines.length) return;
   const now   = new Date();
-  const nowPx = now.getHours() * 60 + now.getMinutes();
+  const nowPx = minToPx(now.getHours() * 60 + now.getMinutes());
   lines.forEach(line => { line.style.top = `${nowPx}px`; });
 }
 
@@ -2747,7 +2804,7 @@ async function saveJob() {
     navDate = new Date(jobStart); navDate.setHours(0, 0, 0, 0);
     await renderCalendar();
     const scr = document.getElementById('day-scroll');
-    if (scr) scr.scrollTop = Math.max(0, jobStart.getHours() * HOUR_HEIGHT + jobStart.getMinutes() - 120);
+    if (scr) scr.scrollTop = Math.max(0, minToPx(jobStart.getHours() * 60 + jobStart.getMinutes()) - 120);
   }
 }
 
