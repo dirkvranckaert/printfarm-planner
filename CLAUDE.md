@@ -69,7 +69,7 @@ npm test
 
 Canonical deploy = `../infrastructure/apps/printfarm-planner/deploy.sh` (infra-repo wrapper → `apps/_template/deploy.sh` engine: atomic releases, SQLite snapshot, auto-rollback, auth health-check expecting 401 on `/login`). **NOT** the repo-root legacy `deploy.sh`.
 
-⚠️ This deploy is NOT covered by the standing auto-deploy permission (scoped to project-calculator only). Harness classifier denies it → **Dirk runs it manually**.
+This deploy is **standing-authorised for the team** (Senne / release engineer) via `~/.claude/settings.json` `autoMode.allow` (authorised 2026-07-31, same as project-calculator / Receptiq web / ka-social-web). Runs without a per-deploy confirmation. Safety comes from the engine: auth health-check expecting 401 on `/login` + auto-rollback on failure. Precondition: `npm test` green.
 
 - **Production port:** 3457
 - **Domain:** `printfarm.app3.be` → `46.101.206.198` (APP3 proxy VPS)
