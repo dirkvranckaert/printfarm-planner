@@ -61,7 +61,7 @@ const iso = ms => new Date(ms).toISOString();
 describe('awaitingPrinter.isWithinStartWindow', () => {
   const now = new Date('2026-07-29T12:00:00Z');
 
-  test('start in the past is eligible', () => {
+  test('start 1h in the past (interior) is eligible', () => {
     expect(isWithinStartWindow(iso(now.getTime() - 60 * 60 * 1000), now)).toBe(true);
   });
 
@@ -69,16 +69,24 @@ describe('awaitingPrinter.isWithinStartWindow', () => {
     expect(isWithinStartWindow(iso(now.getTime()), now)).toBe(true);
   });
 
-  test('start 59 min in the future is eligible', () => {
+  test('start 59 min in the future (interior) is eligible', () => {
     expect(isWithinStartWindow(iso(now.getTime() + 59 * 60 * 1000), now)).toBe(true);
   });
 
-  test('start exactly 1h in the future is eligible (inclusive)', () => {
+  test('start exactly WINDOW_MS in the future is eligible (inclusive)', () => {
     expect(isWithinStartWindow(iso(now.getTime() + WINDOW_MS), now)).toBe(true);
   });
 
-  test('start 61 min in the future is rejected', () => {
-    expect(isWithinStartWindow(iso(now.getTime() + 61 * 60 * 1000), now)).toBe(false);
+  test('start just beyond WINDOW_MS in the future is rejected', () => {
+    expect(isWithinStartWindow(iso(now.getTime() + WINDOW_MS + 60 * 1000), now)).toBe(false);
+  });
+
+  test('start exactly WINDOW_MS in the past is eligible (inclusive)', () => {
+    expect(isWithinStartWindow(iso(now.getTime() - WINDOW_MS), now)).toBe(true);
+  });
+
+  test('start just beyond WINDOW_MS in the past is rejected', () => {
+    expect(isWithinStartWindow(iso(now.getTime() - WINDOW_MS - 60 * 1000), now)).toBe(false);
   });
 
   test('empty start is rejected', () => {
@@ -107,8 +115,8 @@ describe('awaitingPrinter.assignPending', () => {
     expect(job.linked_printer_id).toBe(printerId);
   });
 
-  test('rejects a job scheduled more than 1h ahead (window guard)', () => {
-    const id = addJob(db, printerId, { start: iso(now.getTime() + 2 * 60 * 60 * 1000) });
+  test('rejects a job scheduled beyond the window ahead (window guard)', () => {
+    const id = addJob(db, printerId, { start: iso(now.getTime() + 25 * 60 * 60 * 1000) });
     const res = assignPending({ db, jobId: id, printerId, now });
     expect(res.ok).toBe(false);
     expect(res.code).toBe(400);
@@ -177,7 +185,14 @@ describe('auto-link on RUNNING transition (shipped guard)', () => {
 
   test('far-ahead pending job is NOT swept up when the printer starts', () => {
     // start became far-future relative to the actual moment the printer started
-    const id = addJob(db, printerId, { status: STATUS, start: iso(now.getTime() + 3 * 60 * 60 * 1000), linked_printer_id: printerId });
+    const id = addJob(db, printerId, { status: STATUS, start: iso(now.getTime() + 25 * 60 * 60 * 1000), linked_printer_id: printerId });
+    simulateRunningTransition(db, printerId, now);
+    expect(getJob(db, id).status).toBe(STATUS);
+  });
+
+  test('stale pending job (>24h in the past) is NOT swept up when the printer starts', () => {
+    // start fell outside the now-WINDOW_MS lower bound by the time the printer started
+    const id = addJob(db, printerId, { status: STATUS, start: iso(now.getTime() - 25 * 60 * 60 * 1000), linked_printer_id: printerId });
     simulateRunningTransition(db, printerId, now);
     expect(getJob(db, id).status).toBe(STATUS);
   });
@@ -221,8 +236,8 @@ describe('PATCH /api/jobs/:id — "Link when printer starts" entry (real route)'
     expect(job.linked_printer_id).toBe(printerId);
   });
 
-  test('job scheduled >1h ahead is rejected (400) and left unchanged', async () => {
-    const id = insertJob(Date.now() + 3 * 60 * 60 * 1000);
+  test('job scheduled beyond the window ahead is rejected (400) and left unchanged', async () => {
+    const id = insertJob(Date.now() + 25 * 60 * 60 * 1000);
     const res = await request(app).patch(`/api/jobs/${id}`).set('Cookie', authCookie)
       .send({ status: STATUS, linked_printer_id: printerId });
     expect(res.status).toBe(400);
