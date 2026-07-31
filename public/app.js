@@ -1842,7 +1842,7 @@ function updateNowLine() {
   const lines = document.querySelectorAll('.now-line');
   if (!lines.length) return;
   const now   = new Date();
-  const nowPx = now.getHours() * 60 + now.getMinutes();
+  const nowPx = minToPx(now.getHours() * 60 + now.getMinutes());
   lines.forEach(line => { line.style.top = `${nowPx}px`; });
 }
 
