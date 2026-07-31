@@ -10,12 +10,12 @@
 // the auto-link. This module only owns the *entry* into the pending state and
 // the two invariants around it:
 //
-//   1. Start-time window: the pending job's start must be in the past OR at
-//      most WINDOW_MS into the future. Guards against auto-linking a job that
-//      is scheduled far ahead. Checked both when the user sets the pending
-//      state AND again at the RUNNING transition (relative to that moment), so
-//      a printer that starts a *different* print doesn't sweep up a far-ahead
-//      pending job.
+//   1. Start-time window: the pending job's start must be within WINDOW_MS of
+//      now on either side (past OR future). Guards against auto-linking a job
+//      that is scheduled far ahead or is long stale. Checked both when the user
+//      sets the pending state AND again at the RUNNING transition (relative to
+//      that moment), so a printer that starts a *different* print doesn't sweep
+//      up an out-of-window pending job.
 //   2. One pending job per printer: at most one job may sit in 'Awaiting
 //      Printer' for a given printer at a time.
 //
@@ -23,18 +23,19 @@
 // driven by an in-memory SQLite in tests.
 
 const STATUS = 'Awaiting Printer';
-const WINDOW_MS = 60 * 60 * 1000; // 1 hour
+const WINDOW_MS = 24 * 60 * 60 * 1000; // 24 hours
 
 /**
  * True when `startISO` is eligible for auto-linking relative to `now`:
- * any time in the past, or up to WINDOW_MS in the future. Empty/invalid
+ * within WINDOW_MS of now on either side (past or future). Empty/invalid
  * start times (e.g. queued jobs) are never eligible.
  */
 function isWithinStartWindow(startISO, now) {
   if (!startISO) return false;
   const startMs = new Date(startISO).getTime();
   if (Number.isNaN(startMs)) return false;
-  return startMs <= now.getTime() + WINDOW_MS;
+  const nowMs = now.getTime();
+  return startMs >= nowMs - WINDOW_MS && startMs <= nowMs + WINDOW_MS;
 }
 
 /**
@@ -51,7 +52,7 @@ function assignPending({ db, jobId, printerId, now }) {
     return {
       ok: false,
       code: 400,
-      error: 'Job start time must be in the past or within the next hour to auto-link.',
+      error: 'Job start time must be within 24 hours of now to auto-link.',
     };
   }
   const existing = db.prepare(

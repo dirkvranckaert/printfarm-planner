@@ -2073,16 +2073,17 @@ function isMobileView() { return window.innerWidth <= 480; }
 document.addEventListener('touchstart', () => { isTouchDevice = true; }, { once: true, passive: true });
 
 // ---- Link menu state (shared by desktop ctx-menu + mobile bottom sheet) ----
-const LINK_START_WINDOW_MS = 60 * 60 * 1000; // mirror awaiting-printer.WINDOW_MS
+const LINK_START_WINDOW_MS = 24 * 60 * 60 * 1000; // mirror awaiting-printer.WINDOW_MS
 
 // A job is eligible to pre-link ("Link when printer starts") only when its
-// start is in the past or at most 1h ahead. Server enforces this too; this is
-// UX-only so the option is hidden when it would be rejected.
+// start is within 24h of now (past or future). Server enforces this too; this
+// is UX-only so the option is hidden when it would be rejected.
 function isStartWithinLinkWindow(startISO) {
   if (!startISO) return false;
   const t = new Date(startISO).getTime();
   if (Number.isNaN(t)) return false;
-  return t <= Date.now() + LINK_START_WINDOW_MS;
+  const now = Date.now();
+  return t >= now - LINK_START_WINDOW_MS && t <= now + LINK_START_WINDOW_MS;
 }
 
 // Decide the single link/unlink/prelink/cancel item to show for a job, or null
