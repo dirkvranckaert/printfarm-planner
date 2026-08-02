@@ -1,6 +1,45 @@
 // Pure scheduling helpers — no DB, no Express. Imported by server.js and tests.
 
 const DEFAULT_TZ = 'Europe/Brussels';
+const MAX_COPIES = 50;
+
+/**
+ * Expand a plate list by each plate's `copies` count, preserving array order.
+ * Copy 1 keeps the plate's name; copies 2..N get a " (copy k)" suffix so they
+ * stay distinguishable in the planner. The scheduling loop then treats each
+ * expanded entry exactly like a separate plate — so copies cascade back-to-back
+ * on the plate's printer, inheriting the same cool-down/warm-up inter-job gap
+ * as multi-plate scheduling.
+ *
+ * A missing/undefined `copies` means 1 (so N=1 payloads are unchanged). Invalid
+ * (non-integer, < 1) or oversized (> maxCopies) values throw — the caller maps
+ * that to a 400 so copies are never silently dropped or clamped server-side.
+ *
+ * @param {Array<object>} plates    Plate payloads (each may carry `copies`).
+ * @param {number}        maxCopies Hard cap per plate.
+ * @returns {Array<object>} Flat, order-preserving list with `copies` stripped.
+ */
+function expandPlateCopies(plates, maxCopies = MAX_COPIES) {
+  const out = [];
+  for (const pl of plates || []) {
+    const copies = pl.copies == null ? 1 : pl.copies;
+    if (!Number.isInteger(copies) || copies < 1) {
+      throw new Error(`Invalid copies for plate ${pl.plateIndex ?? '?'}: must be an integer >= 1`);
+    }
+    if (copies > maxCopies) {
+      throw new Error(`Too many copies for plate ${pl.plateIndex ?? '?'}: max ${maxCopies}`);
+    }
+    for (let k = 1; k <= copies; k++) {
+      const copy = { ...pl };
+      delete copy.copies;
+      if (copies > 1 && k > 1) {
+        copy.name = `${pl.name || `Plate ${pl.plateIndex}`} (copy ${k})`;
+      }
+      out.push(copy);
+    }
+  }
+  return out;
+}
 
 function timeToMinutes(timeStr) {
   const [h, m] = (timeStr || '00:00').split(':').map(Number);
@@ -254,6 +293,8 @@ function pullForwardChain(chain, to, restr, closures, otherJobs, warmUpMs, coolD
 
 module.exports = {
   DEFAULT_TZ,
+  MAX_COPIES,
+  expandPlateCopies,
   timeToMinutes,
   getZoneParts,
   tzOffset,
