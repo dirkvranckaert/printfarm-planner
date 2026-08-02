@@ -936,6 +936,12 @@ app.post('/api/import-3mf-schedule', express.raw({ type: '*/*', limit: '500mb' }
     const isFirstAvailable = mode === 'first-available';
     if (!plates?.length || (!isFirstAvailable && !startISO && !startDate)) return res.status(400).json({ error: 'plates and start time required' });
 
+    // Expand each plate by its `copies` count (default 1), preserving order.
+    // Validate up-front so an invalid/oversized count rejects before any file
+    // IO — copies are never silently dropped. Copies cascade back-to-back on
+    // the plate's printer via the same loop that handles multiple plates.
+    const expandedPlates = scheduling.expandPlateCopies(plates);
+
     // Save the 3MF file
     const fileId = crypto.randomBytes(8).toString('hex');
     const storedName = `${fileId}.3mf`;
@@ -964,7 +970,7 @@ app.post('/api/import-3mf-schedule', express.raw({ type: '*/*', limit: '500mb' }
     }
     const createdJobs = [];
 
-    for (const pl of plates) {
+    for (const pl of expandedPlates) {
       const durationMins = pl.durationMins || 0;
 
       // Run through smart scheduling to find valid start
