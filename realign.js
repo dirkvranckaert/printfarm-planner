@@ -37,7 +37,15 @@ const CASCADABLE_STATUSES = new Set(['Planned', 'Awaiting']);
  * @returns {{ changed: boolean, deltaMs: number, updated: Array<{id, start, end}> }}
  */
 function realignLinkedJob({ db, printer, job, remainingMins, now, restr, snapStart = false, thresholdMs = DEFAULT_THRESHOLD_MS }) {
-  if (remainingMins == null || remainingMins < 0) {
+  // remainingMins <= 0 is not a real ETA for a still-PRINTING job — Bambu
+  // reports mc_remaining_time = 0 during the first frames of a print (heating /
+  // prep, before the slicer ETA is populated). Realigning on it would set
+  // predictedEnd = now and, since the block keeps its full duration, yank the
+  // whole block into the past (start = now - duration), colliding with earlier
+  // jobs. Skip this tick and keep the last known good end; the next tick with a
+  // real remaining snaps it back. Actual completion is handled by the
+  // FINISH/IDLE stage transition, not by a remaining=0 reading.
+  if (remainingMins == null || remainingMins <= 0) {
     return { changed: false, deltaMs: 0, updated: [] };
   }
 

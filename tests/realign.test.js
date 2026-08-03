@@ -70,6 +70,29 @@ describe('realignLinkedJob — threshold and no-op cases', () => {
     expect(getJob(db, job.id).end).toBe('2026-04-13T09:00:00.000Z');
   });
 
+  test('zero remainingMins → no change (transient at print start, no past-jump)', () => {
+    const db = makeDb();
+    const printer = addPrinter(db);
+    // A long linked print scheduled 06:30 → +28h, currently Printing. On the
+    // first RUNNING tick Bambu momentarily reports mc_remaining_time = 0 before
+    // the slicer ETA loads. Realigning on it would set end=now and drag the
+    // block ~28h into the past, overlapping earlier jobs. It must NOT move.
+    const job = addJob(db, printer.id, {
+      name: 'Shipping Container', status: 'Printing',
+      start: '2026-08-03T04:30:00.000Z', end: '2026-08-04T08:32:00.000Z',
+      linked_printer_id: printer.id,
+    });
+    const res = realignLinkedJob({
+      db, printer, job, remainingMins: 0,
+      now: new Date('2026-08-03T05:00:00.000Z'), restr: RESTR,
+      snapStart: true, // first-tick path bypasses the threshold — still must not jump
+    });
+    expect(res.changed).toBe(false);
+    const after = getJob(db, job.id);
+    expect(after.start).toBe('2026-08-03T04:30:00.000Z');
+    expect(after.end).toBe('2026-08-04T08:32:00.000Z');
+  });
+
   test('delta under 2-minute threshold → no change', () => {
     const db = makeDb();
     const printer = addPrinter(db);
