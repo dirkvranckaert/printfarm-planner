@@ -180,6 +180,14 @@
           </select>
         </div>
         <div class="form-group">
+          <label for="job-cooldown">Cool-down (min)</label>
+          <input type="number" id="job-cooldown" min="0" placeholder="Printer default">
+          <div style="font-size:11px;color:var(--text-muted);margin-top:2px">
+            Gap reserved after this print before the next job. Snapshotted from the
+            printer when the job is created; override here to nudge a single job.
+          </div>
+        </div>
+        <div class="form-group">
           <label>Color(s) / Filament</label>
           <input type="hidden" id="job-colors">
           <div id="job-colors-editor"></div>

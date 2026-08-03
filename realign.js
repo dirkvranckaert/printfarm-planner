@@ -51,7 +51,10 @@ function realignLinkedJob({ db, printer, job, remainingMins, now, restr, snapSta
 
   const tz = restr?.timezone || scheduling.DEFAULT_TZ;
   const warmUpMs = (printer.warm_up_mins ?? 5) * 60000;
-  const coolDownMs = (printer.cool_down_mins ?? 15) * 60000;
+  // The gap the finishing (current) print reserves before the next job uses
+  // THAT job's snapshotted cool-down, falling back to the live printer setting
+  // for jobs created before the per-job snapshot existed.
+  const coolDownMs = (job.cool_down_mins ?? printer.cool_down_mins ?? 15) * 60000;
 
   const currentStartDate = scheduling.parseJobTime(job.start, tz);
   const currentEndDate = scheduling.parseJobTime(job.end, tz);
@@ -85,8 +88,11 @@ function realignLinkedJob({ db, printer, job, remainingMins, now, restr, snapSta
   if (deltaMs > 0) {
     const closures = db.prepare('SELECT startDate, endDate FROM closures').all();
     const allSamePrinter = db.prepare(
-      "SELECT id, name, status, start, end FROM jobs WHERE printerId=? AND queued=0 AND start!='' AND id!=?"
-    ).all(printer.id, job.id);
+      "SELECT id, name, status, start, end, cool_down_mins FROM jobs WHERE printerId=? AND queued=0 AND start!='' AND id!=?"
+    ).all(printer.id, job.id).map(j => ({
+      ...j,
+      coolDownMs: (j.cool_down_mins ?? printer.cool_down_mins ?? 15) * 60000,
+    }));
 
     // Downstream chain = jobs on this printer whose current start is at or after
     // the current job's ORIGINAL stored end, in cascadable state.

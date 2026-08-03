@@ -2194,6 +2194,48 @@ async function applyLinkAction(jobId, action) {
   }
 }
 
+// Which of the four "push/pull toward now" job options should be offered for a
+// given job. Shared by the desktop context menu and the mobile bottom sheet so
+// both stay in lock-step.
+//   - Push back to now: pointless once the job's start is already in the past.
+//   - Pull forward to now: pointless for a job still scheduled in the future.
+//   - All four: hidden for jobs anchored to a printer rather than a chosen slot
+//     — currently Printing, linked to a printer, or Awaiting Printer — and for
+//     unscheduled (queued) jobs, which have no start to move.
+function pushOptionVisibility(job, now = Date.now()) {
+  const anchored = !job
+    || job.status === 'Printing'
+    || job.status === 'Awaiting Printer'
+    || job.linked_printer_id != null
+    || !!job.queued;
+  if (anchored) {
+    return { pushNow: false, pushTo: false, pullNow: false, pullTo: false };
+  }
+  const startMs = job.start ? new Date(job.start).getTime() : NaN;
+  const startInPast   = Number.isFinite(startMs) && startMs <= now;
+  const startInFuture = Number.isFinite(startMs) && startMs > now;
+  return {
+    pushNow: !startInPast,
+    pushTo: true,
+    pullNow: !startInFuture,
+    pullTo: true,
+  };
+}
+
+// Apply pushOptionVisibility to the four menu buttons under the given id prefix
+// ('ctx' for the desktop menu, 'bs' for the bottom sheet).
+function applyPushOptionVisibility(job, prefix) {
+  const vis = pushOptionVisibility(job);
+  const toggle = (id, show) => {
+    const el = document.getElementById(id);
+    if (el) el.classList.toggle('hidden', !show);
+  };
+  toggle(`${prefix}-push-now`, vis.pushNow);
+  toggle(`${prefix}-push-to`,  vis.pushTo);
+  toggle(`${prefix}-pull-now`, vis.pullNow);
+  toggle(`${prefix}-pull-to`,  vis.pullTo);
+}
+
 // ---- Bottom sheet (mobile context menu) ----
 let bsJobId = null;
 
@@ -2225,6 +2267,9 @@ function showBottomSheet(jobId) {
     linkItem.classList.add('hidden');
     linkSep.classList.add('hidden');
   }
+
+  // Gate the push/pull-to-now options
+  applyPushOptionVisibility(job, 'bs');
 
   // Conflict resolution in bottom sheet
   const bsConflict = document.getElementById('bs-conflict-section');
@@ -2434,6 +2479,9 @@ function showCtxMenu(e, jobId) {
     linkSep.style.display = 'none';
   }
 
+  // Gate the push/pull-to-now options
+  applyPushOptionVisibility(jobsCache[jobId], 'ctx');
+
   // Show/hide conflict resolution options
   const conflictSection = document.getElementById('ctx-conflict-section');
   if (lastConflictIds.has(jobId)) {
@@ -2595,6 +2643,7 @@ async function duplicateJob(jobId) {
     printFile:    job.printFile,
     remarks:      job.remarks,
     status:       job.status,
+    cool_down_mins: job.cool_down_mins,
     queued:       false,
   });
 }
@@ -2659,6 +2708,7 @@ async function openJobModal(jobId = null, prefill = {}) {
       document.getElementById('job-printfile').style.display = '';
     }
     document.getElementById('job-remarks').value   = job.remarks      ?? '';
+    document.getElementById('job-cooldown').value  = job.cool_down_mins ?? '';
     editingJobStatus = job.status ?? 'Planned';
     setQueuedMode(isQueued);
     // Populate queue duration fields
@@ -2692,6 +2742,8 @@ async function openJobModal(jobId = null, prefill = {}) {
     document.getElementById('job-printfile-display').innerHTML = '';
     document.getElementById('job-thumb-group').style.display = 'none';
     document.getElementById('job-remarks').value   = prefill.remarks      ?? '';
+    // Leave blank on create → server snapshots the printer's cool-down.
+    document.getElementById('job-cooldown').value  = prefill.cool_down_mins ?? '';
     editingJobStatus = prefill.status ?? 'Planned';
     setQueuedMode(isQueued);
     // Populate queue duration fields from prefill
@@ -2734,6 +2786,10 @@ async function saveJob() {
   const bedType      = document.getElementById('job-bedtype').value || null;
   const remarks      = document.getElementById('job-remarks').value.trim();
   const status       = editingJobStatus;
+  // Blank cool-down → omit so the server keeps the snapshot (or takes a fresh
+  // one from the printer on create). A number is a manual per-job override.
+  const cooldownRaw  = document.getElementById('job-cooldown').value.trim();
+  const coolDownMins = cooldownRaw === '' ? null : (parseInt(cooldownRaw, 10) || 0);
 
   if (!name)      return alert('Please enter a job name.');
   if (!printerId) return alert('Please select a printer.');
@@ -2744,6 +2800,7 @@ async function saveJob() {
     if (qh === 0 && qm === 0) return alert('Please enter an expected duration.');
     const durationMins = qh * 60 + qm;
     const data = { printerId, name, customerName, orderNr, colors, printFile, bedType, remarks, status, queued: true, durationMins };
+    if (coolDownMins != null) data.cool_down_mins = coolDownMins;
     if (wasEditing) await api('PUT', `/api/jobs/${editJobId}`, data);
     else            await api('POST', '/api/jobs', data);
     closeModal('job-modal');
@@ -2781,6 +2838,7 @@ async function saveJob() {
   }
 
   const data = { printerId, name, customerName, orderNr, colors, printFile, bedType, remarks, start, end, status, queued: false };
+  if (coolDownMins != null) data.cool_down_mins = coolDownMins;
   if (wasEditing) await api('PUT', `/api/jobs/${editJobId}`, data);
   else            await api('POST', '/api/jobs', data);
 
