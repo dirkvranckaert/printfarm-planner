@@ -109,6 +109,23 @@ if (!jobColsPause.some(c => c.name === 'paused_remaining_ms')) {
   db.exec('ALTER TABLE jobs ADD COLUMN paused_remaining_ms INTEGER');
 }
 
+// Per-job cool-down snapshot. Historically the inter-job cool-down came live
+// from the printer's cool_down_mins, so changing that setting reshuffled every
+// existing (past, future AND ongoing) job on that printer. Each job now carries
+// its own cool_down_mins, snapshotted from its printer at creation; scheduling
+// reads the per-job value. Backfill existing rows with their printer's CURRENT
+// cool_down_mins (or the 15-min code default when the printer is missing/NULL —
+// the same fallback scheduling used before), so the recomputed schedule is
+// byte-identical to before this migration. Idempotent: the column is added and
+// backfilled only once, and the backfill only touches NULL rows.
+const jobColsCool = db.pragma('table_info(jobs)');
+if (!jobColsCool.some(c => c.name === 'cool_down_mins')) {
+  db.exec('ALTER TABLE jobs ADD COLUMN cool_down_mins INTEGER');
+  db.exec(`UPDATE jobs SET cool_down_mins =
+    COALESCE((SELECT p.cool_down_mins FROM printers p WHERE p.id = jobs.printerId), 15)
+    WHERE cool_down_mins IS NULL`);
+}
+
 // One-time migration: if the favourite column was previously added with DEFAULT 0
 // (all printers show favourite=0), set them all to 1 so they appear in day view.
 const favMigrated = db.prepare("SELECT value FROM settings WHERE key='favouriteMigrated'").get();

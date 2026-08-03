@@ -488,28 +488,42 @@ app.get('/api/jobs/:id', (req, res) => {
   if (!row) return res.status(404).json(null);
   res.json(row);
 });
+// Resolve the cool-down (minutes) to persist on a job. A valid explicit client
+// value (manual override) wins; otherwise fall back to `fallback` when given
+// (e.g. the job's existing snapshot on edit), else snapshot the printer's
+// current cool_down_mins (or the 15-min default) — the create-time snapshot.
+function resolveJobCoolDown(explicit, printerId, fallback) {
+  const n = Number(explicit);
+  if (Number.isInteger(n) && n >= 0) return n;
+  if (fallback != null) return fallback;
+  const p = printerId ? db.prepare('SELECT cool_down_mins FROM printers WHERE id=?').get(printerId) : null;
+  return p?.cool_down_mins ?? 15;
+}
 app.post('/api/jobs', (req, res) => {
   const { printerId, name, customerName, orderNr, start, end, status, colors, printFile, remarks, queued, durationMins, bedType } = req.body;
   const isQueued = queued ? 1 : 0;
   const normStart = isQueued ? '' : (normalizeJobTime(start) ?? '');
   const normEnd = isQueued ? '' : (normalizeJobTime(end) ?? '');
+  const coolDownMins = resolveJobCoolDown(req.body.cool_down_mins, printerId);
   const result = db.prepare(
-    'INSERT INTO jobs (printerId, name, customerName, orderNr, start, end, status, colors, printFile, remarks, queued, durationMins, bedType) VALUES (?,?,?,?,?,?,?,?,?,?,?,?,?)'
-  ).run(printerId, name, customerName, orderNr, normStart, normEnd, status ?? 'Planned', colors, printFile, remarks, isQueued, durationMins ?? 0, bedType ?? null);
-  res.status(201).json({ id: result.lastInsertRowid, ...req.body, start: normStart, end: normEnd, queued: isQueued });
+    'INSERT INTO jobs (printerId, name, customerName, orderNr, start, end, status, colors, printFile, remarks, queued, durationMins, bedType, cool_down_mins) VALUES (?,?,?,?,?,?,?,?,?,?,?,?,?,?)'
+  ).run(printerId, name, customerName, orderNr, normStart, normEnd, status ?? 'Planned', colors, printFile, remarks, isQueued, durationMins ?? 0, bedType ?? null, coolDownMins);
+  res.status(201).json({ id: result.lastInsertRowid, ...req.body, start: normStart, end: normEnd, queued: isQueued, cool_down_mins: coolDownMins });
 });
 app.put('/api/jobs/:id', (req, res) => {
   const { printerId, name, customerName, orderNr, start, end, status, colors, printFile, remarks, queued, durationMins, bedType } = req.body;
   const isQueued = queued ? 1 : 0;
   const normStart = isQueued ? '' : (normalizeJobTime(start) ?? '');
   const normEnd = isQueued ? '' : (normalizeJobTime(end) ?? '');
+  const existing = db.prepare('SELECT cool_down_mins FROM jobs WHERE id=?').get(req.params.id);
+  const coolDownMins = resolveJobCoolDown(req.body.cool_down_mins, printerId, existing?.cool_down_mins);
   db.prepare(
-    'UPDATE jobs SET printerId=?, name=?, customerName=?, orderNr=?, start=?, end=?, status=?, colors=?, printFile=?, remarks=?, queued=?, durationMins=?, bedType=? WHERE id=?'
-  ).run(printerId, name, customerName, orderNr, normStart, normEnd, status, colors, printFile, remarks, isQueued, durationMins ?? 0, bedType ?? null, req.params.id);
+    'UPDATE jobs SET printerId=?, name=?, customerName=?, orderNr=?, start=?, end=?, status=?, colors=?, printFile=?, remarks=?, queued=?, durationMins=?, bedType=?, cool_down_mins=? WHERE id=?'
+  ).run(printerId, name, customerName, orderNr, normStart, normEnd, status, colors, printFile, remarks, isQueued, durationMins ?? 0, bedType ?? null, coolDownMins, req.params.id);
   // If the user moves a job out of 'Paused' via the edit dialog, clear the
   // stale pause snapshot so it does not drift on the next tick.
   if (status !== 'Paused') pause.clearPauseFields({ db, jobId: Number(req.params.id) });
-  res.json({ id: Number(req.params.id), ...req.body, start: normStart, end: normEnd, queued: isQueued });
+  res.json({ id: Number(req.params.id), ...req.body, start: normStart, end: normEnd, queued: isQueued, cool_down_mins: coolDownMins });
 });
 app.patch('/api/jobs/:id', (req, res) => {
   // "Link when printer starts": enter the 'Awaiting Printer' pending state.
@@ -525,7 +539,7 @@ app.patch('/api/jobs/:id', (req, res) => {
     if (!result.ok) return res.status(result.code).json({ error: result.error });
     return res.json(db.prepare('SELECT * FROM jobs WHERE id=?').get(id));
   }
-  const allowed = ['printerId', 'name', 'customerName', 'orderNr', 'start', 'end', 'status', 'colors', 'printFile', 'remarks', 'queued', 'durationMins', 'linked_printer_id', 'bedType'];
+  const allowed = ['printerId', 'name', 'customerName', 'orderNr', 'start', 'end', 'status', 'colors', 'printFile', 'remarks', 'queued', 'durationMins', 'linked_printer_id', 'bedType', 'cool_down_mins'];
   const fields = Object.entries(req.body)
     .filter(([k]) => allowed.includes(k))
     .map(([k, v]) => (k === 'start' || k === 'end') && v ? [k, normalizeJobTime(v)] : [k, v]);
@@ -563,8 +577,11 @@ app.post('/api/jobs/:id/push-back', (req, res) => {
   const closures = db.prepare('SELECT startDate, endDate FROM closures').all();
 
   const allSamePrinter = db.prepare(
-    "SELECT id, name, status, start, end FROM jobs WHERE printerId=? AND queued=0 AND start!=''"
-  ).all(anchor.printerId);
+    "SELECT id, name, status, start, end, cool_down_mins FROM jobs WHERE printerId=? AND queued=0 AND start!=''"
+  ).all(anchor.printerId).map(j => ({
+    ...j,
+    coolDownMs: (j.cool_down_mins ?? printer?.cool_down_mins ?? 15) * 60000,
+  }));
 
   const anchorStartMs = parseJobTime(anchor.start, tz).getTime();
   const CASCADABLE_STATUSES = new Set(['Planned', 'Awaiting']);
@@ -625,8 +642,11 @@ app.post('/api/jobs/:id/pull-forward', (req, res) => {
   const closures = db.prepare('SELECT startDate, endDate FROM closures').all();
 
   const allSamePrinter = db.prepare(
-    "SELECT id, name, status, start, end FROM jobs WHERE printerId=? AND queued=0 AND start!=''"
-  ).all(anchor.printerId);
+    "SELECT id, name, status, start, end, cool_down_mins FROM jobs WHERE printerId=? AND queued=0 AND start!=''"
+  ).all(anchor.printerId).map(j => ({
+    ...j,
+    coolDownMs: (j.cool_down_mins ?? printer?.cool_down_mins ?? 15) * 60000,
+  }));
 
   const anchorStartMs = parseJobTime(anchor.start, tz).getTime();
   const windowEndMs = windowEnd.getTime();
@@ -882,7 +902,8 @@ function findNextValidStart(candidate, durationMins, printerId) {
   const coolDownMs = (printer?.cool_down_mins ?? 15) * 60000;
   const closures = db.prepare('SELECT startDate, endDate FROM closures').all();
   const jobs = printerId
-    ? db.prepare("SELECT start, end FROM jobs WHERE printerId=? AND queued=0 AND start!='' ORDER BY start").all(printerId)
+    ? db.prepare("SELECT start, end, cool_down_mins FROM jobs WHERE printerId=? AND queued=0 AND start!='' ORDER BY start").all(printerId)
+        .map(j => ({ ...j, coolDownMs: (j.cool_down_mins ?? printer?.cool_down_mins ?? 15) * 60000 }))
     : [];
   return scheduling.findNextValidStart(candidate, durationMins, restr, closures, jobs, warmUpMs, coolDownMs);
 }
@@ -986,7 +1007,7 @@ app.post('/api/import-3mf-schedule', express.raw({ type: '*/*', limit: '500mb' }
       const colorsStr = pl.colors ? JSON.stringify(pl.colors) : null;
 
       const result = db.prepare(
-        'INSERT INTO jobs (printerId, name, customerName, orderNr, start, end, status, colors, printFile, remarks, queued, durationMins, thumbFile, bedType) VALUES (?,?,?,?,?,?,?,?,?,?,?,?,?,?)'
+        'INSERT INTO jobs (printerId, name, customerName, orderNr, start, end, status, colors, printFile, remarks, queued, durationMins, thumbFile, bedType, cool_down_mins) VALUES (?,?,?,?,?,?,?,?,?,?,?,?,?,?,?)'
       ).run(
         pl.printerId || null,
         pl.name || `Plate ${pl.plateIndex}`,
@@ -1001,7 +1022,8 @@ app.post('/api/import-3mf-schedule', express.raw({ type: '*/*', limit: '500mb' }
         0,
         durationMins,
         thumbFile || null,
-        pl.bedType || null
+        pl.bedType || null,
+        coolDown
       );
 
       createdJobs.push({

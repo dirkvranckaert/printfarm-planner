@@ -114,9 +114,12 @@ function advanceToSilentEnd(date, silentEnd, tz) {
  * @param {number} durationMins  Job duration in minutes.
  * @param {object} restr         { silentStart, silentEnd, closedDays, timezone }
  * @param {Array<{startDate:string, endDate:string}>} closures  YYYY-MM-DD ranges (inclusive).
- * @param {Array<{start:string, end:string}>}         jobs      ISO start/end, ordered by start.
+ * @param {Array<{start:string, end:string, coolDownMs?:number}>} jobs  ISO start/end, ordered
+ *                            by start. Each job may carry its own `coolDownMs` (per-job snapshot);
+ *                            when absent, the `coolDownMs` argument is used as the fallback.
  * @param {number} warmUpMs      Warm-up buffer in ms.
- * @param {number} coolDownMs    Cool-down buffer in ms.
+ * @param {number} coolDownMs    Cool-down buffer in ms for the job BEING placed (the candidate).
+ *                            Also the fallback for any existing job in `jobs` without its own.
  * @returns {Date}
  */
 function findNextValidStart(candidate, durationMins, restr, closures, jobs, warmUpMs, coolDownMs) {
@@ -169,10 +172,13 @@ function findNextValidStart(candidate, durationMins, restr, closures, jobs, warm
       const jStartDate = parseJobTime(j.start, tz);
       const jEndDate = parseJobTime(j.end, tz);
       if (!jStartDate || !jEndDate) continue;
+      // The gap after an existing job uses THAT job's own cool-down (the
+      // finishing print it belongs to), falling back to the candidate default.
+      const jCoolDownMs = j.coolDownMs != null ? j.coolDownMs : coolDownMs;
       const jStart = jStartDate.getTime() - warmUpMs;
-      const jEnd = jEndDate.getTime() + coolDownMs;
+      const jEnd = jEndDate.getTime() + jCoolDownMs;
       if (myStart < jEnd && myEnd > jStart) {
-        current = new Date(jEndDate.getTime() + coolDownMs + warmUpMs);
+        current = new Date(jEndDate.getTime() + jCoolDownMs + warmUpMs);
         hitJob = true;
         break;
       }
@@ -204,9 +210,11 @@ function pushBackChain(chain, to, restr, closures, otherJobs, warmUpMs, coolDown
   const tz = restr?.timezone || DEFAULT_TZ;
   const updates = [];
   let prevEndMs = null;
+  let prevCoolDownMs = null;
 
   for (let i = 0; i < chain.length; i++) {
     const job = chain[i];
+    const myCoolDownMs = job.coolDownMs != null ? job.coolDownMs : coolDownMs;
     const origStartMs = parseJobTime(job.start, tz).getTime();
     const origEndMs = parseJobTime(job.end, tz).getTime();
     const durationMs = origEndMs - origStartMs;
@@ -214,9 +222,9 @@ function pushBackChain(chain, to, restr, closures, otherJobs, warmUpMs, coolDown
 
     const candidate = i === 0
       ? new Date(to.getTime())
-      : new Date(prevEndMs + coolDownMs + warmUpMs);
+      : new Date(prevEndMs + prevCoolDownMs + warmUpMs);
 
-    const newStart = findNextValidStart(candidate, durationMins, restr, closures, otherJobs, warmUpMs, coolDownMs);
+    const newStart = findNextValidStart(candidate, durationMins, restr, closures, otherJobs, warmUpMs, myCoolDownMs);
 
     // If the chained job doesn't actually need to move, the gap absorbed the push — stop.
     if (newStart.getTime() <= origStartMs) {
@@ -226,6 +234,7 @@ function pushBackChain(chain, to, restr, closures, otherJobs, warmUpMs, coolDown
     const newEnd = new Date(newStart.getTime() + durationMs);
     updates.push({ id: job.id, start: newStart.toISOString(), end: newEnd.toISOString() });
     prevEndMs = newEnd.getTime();
+    prevCoolDownMs = myCoolDownMs;
   }
 
   return updates;
@@ -261,9 +270,11 @@ function pullForwardChain(chain, to, restr, closures, otherJobs, warmUpMs, coolD
   const tz = restr?.timezone || DEFAULT_TZ;
   const updates = [];
   let prevEndMs = null;
+  let prevCoolDownMs = null;
 
   for (let i = 0; i < chain.length; i++) {
     const job = chain[i];
+    const myCoolDownMs = job.coolDownMs != null ? job.coolDownMs : coolDownMs;
     const origStartMs = parseJobTime(job.start, tz).getTime();
     const origEndMs = parseJobTime(job.end, tz).getTime();
     const durationMs = origEndMs - origStartMs;
@@ -271,10 +282,10 @@ function pullForwardChain(chain, to, restr, closures, otherJobs, warmUpMs, coolD
 
     const candidate = i === 0
       ? new Date(to.getTime())
-      : new Date(prevEndMs + coolDownMs + warmUpMs);
+      : new Date(prevEndMs + prevCoolDownMs + warmUpMs);
 
     const newStart = findNextValidStart(
-      candidate, durationMins, restr, closures, otherJobs, warmUpMs, coolDownMs
+      candidate, durationMins, restr, closures, otherJobs, warmUpMs, myCoolDownMs
     );
 
     // Pull-forward only moves jobs EARLIER. If findNextValidStart ends up
@@ -286,6 +297,7 @@ function pullForwardChain(chain, to, restr, closures, otherJobs, warmUpMs, coolD
     const newEnd = new Date(newStart.getTime() + durationMs);
     updates.push({ id: job.id, start: newStart.toISOString(), end: newEnd.toISOString() });
     prevEndMs = newEnd.getTime();
+    prevCoolDownMs = myCoolDownMs;
   }
 
   return updates;
