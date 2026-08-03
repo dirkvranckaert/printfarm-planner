@@ -71,7 +71,7 @@ npm test                 # jest
 
 ## Deploy
 
-Canonical deploy = `../infrastructure/apps/printfarm-planner/deploy.sh` (infra-repo wrapper → `apps/_template/deploy.sh` engine: atomic releases, SQLite snapshot, auto-rollback, auth health-check expecting 401 on `/login`). **NOT** the repo-root legacy `deploy.sh`.
+Sole deploy path = `../infrastructure/apps/printfarm-planner/deploy.sh` (infra-repo wrapper → `apps/_template/deploy.sh` engine). Engine gives snapshot + atomic releases + auto-rollback + auth health-check expecting 401 on `/login`. `data/` symlink excluded from releases. Startup migrations in `db.js` run every restart (see Gotchas) — so the snapshot matters. No repo-root deploy script exists; never add one.
 
 This deploy is **standing-authorised for the team** (Senne / release engineer) via `~/.claude/settings.json` `autoMode.allow` (authorised 2026-07-31, same as project-calculator / Receptiq web / ka-social-web). Runs without a per-deploy confirmation. Safety comes from the engine: auth health-check expecting 401 on `/login` + auto-rollback on failure. Precondition: `npm test` green.
 
