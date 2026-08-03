@@ -2230,12 +2230,14 @@ function pushOptionVisibility(job, now = Date.now()) {
     return { pushNow: false, pushTo: false, pullNow: false, pullTo: false };
   }
   const startMs = job.start ? new Date(job.start).getTime() : NaN;
-  const startInPast   = Number.isFinite(startMs) && startMs <= now;
+  const startInPast   = Number.isFinite(startMs) && startMs < now;
   const startInFuture = Number.isFinite(startMs) && startMs > now;
   return {
-    pushNow: !startInPast,
+    // push back to now = move a PAST start later, up to now → past jobs only.
+    pushNow: startInPast,
     pushTo: true,
-    pullNow: !startInFuture,
+    // pull forward to now = move a FUTURE start earlier, to now → future only.
+    pullNow: startInFuture,
     pullTo: true,
   };
 }
