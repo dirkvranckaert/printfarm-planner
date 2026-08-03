@@ -1277,7 +1277,10 @@ async function renderDay() {
 
       const bgAlpha  = isDarkMode() ? 0.5 : 0.15;
       const warmUp   = p.warm_up_mins   ?? 0;
-      const coolDown = p.cool_down_mins ?? 0;
+      // Cool-down buffer is attributed to the FINISHING job, so it renders from
+      // that job's own snapshotted cool_down_mins (matching the authoritative
+      // server schedule); fall back to the printer scalar, then 15, defensively.
+      const coolDown = job.cool_down_mins ?? p.cool_down_mins ?? 15;
 
       // Warm-up buffer block (before job)
       if (warmUp > 0) {
@@ -1380,17 +1383,23 @@ function snap15(mins) { return Math.round(mins / 15) * 15; }
 function snapAvoidingJobs(proposedStart, durationMins, printerId, excludeJobId) {
   const printer = printers.find(p => p.id === printerId);
   const myWu    = printer?.warm_up_mins  ?? 0;
-  const myCd    = printer?.cool_down_mins ?? 0;
+  // The dragged job's trailing cool-down is its own snapshotted value (fall back
+  // to the printer scalar, then 15) — never the printer scalar alone.
+  const movingJob = jobsCache[excludeJobId];
+  const myCd    = movingJob?.cool_down_mins ?? printer?.cool_down_mins ?? 15;
 
   const dayS = new Date(navDate); dayS.setHours(0,0,0,0);
 
-  // Build list of occupied intervals (excluding the dragged job itself)
+  // Build list of occupied intervals (excluding the dragged job itself). Each
+  // interval's trailing buffer uses that job's OWN cool_down_mins, so the snap
+  // gap matches the per-job server schedule (finishing job owns the gap).
   const intervals = Object.values(jobsCache)
     .filter(j => !j.queued && j.printerId === printerId && j.id !== excludeJobId)
     .map(j => {
       const s = (new Date(j.start).getTime() - dayS.getTime()) / 60_000;
       const e = (new Date(j.end).getTime()   - dayS.getTime()) / 60_000;
-      return { start: s - myWu, end: e + myCd };
+      const jCd = j.cool_down_mins ?? printer?.cool_down_mins ?? 15;
+      return { start: s - myWu, end: e + jCd };
     });
 
   // My occupied interval
@@ -1688,7 +1697,7 @@ function attachDayEvents() {
         warmUpEl:     colEl.querySelector(`.buffer-block[data-job-id="${jobId}"][data-buffer-type="warmup"]`),
         coolDownEl:   colEl.querySelector(`.buffer-block[data-job-id="${jobId}"][data-buffer-type="cooldown"]`),
         warmUpMins:   printer?.warm_up_mins  ?? 0,
-        coolDownMins: printer?.cool_down_mins ?? 0,
+        coolDownMins: job.cool_down_mins ?? printer?.cool_down_mins ?? 15,
         printerId:    printer?.id ?? job.printerId,
       };
       document.body.classList.add('is-moving');
