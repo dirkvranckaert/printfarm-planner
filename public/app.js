@@ -861,10 +861,15 @@ function detectConflicts(jobs, printerMap) {
       if (jobs[i].printerId !== jobs[j].printerId) continue;
       const pi = printerMap?.[jobs[i].printerId];
       const pj = printerMap?.[jobs[j].printerId];
+      // Cool-down is attributed to the finishing job: each job's trailing buffer
+      // uses its OWN snapshotted cool_down_mins (fall back printer scalar → 15),
+      // so the warning fires iff there's a real per-job overlap.
+      const iCd = jobs[i].cool_down_mins ?? pi?.cool_down_mins ?? 15;
+      const jCd = jobs[j].cool_down_mins ?? pj?.cool_down_mins ?? 15;
       const iStart = new Date(jobs[i].start).getTime() - (pi?.warm_up_mins  ?? 0) * 60_000;
-      const iEnd   = new Date(jobs[i].end).getTime()   + (pi?.cool_down_mins ?? 0) * 60_000;
+      const iEnd   = new Date(jobs[i].end).getTime()   + iCd * 60_000;
       const jStart = new Date(jobs[j].start).getTime() - (pj?.warm_up_mins  ?? 0) * 60_000;
-      const jEnd   = new Date(jobs[j].end).getTime()   + (pj?.cool_down_mins ?? 0) * 60_000;
+      const jEnd   = new Date(jobs[j].end).getTime()   + jCd * 60_000;
       if (iStart < jEnd && iEnd > jStart) {
         ids.add(jobs[i].id);
         ids.add(jobs[j].id);
@@ -882,29 +887,33 @@ async function resolveConflictMoveAfter(jobId) {
   if (!job) return;
   const printer = printers.find(p => p.id === job.printerId);
   const warmUp = printer?.warm_up_mins ?? 5;
-  const coolDown = printer?.cool_down_mins ?? 15;
+  // Cool-down is per-job (snapshotted); fall back to printer scalar, then 15.
+  const myCoolDown = job.cool_down_mins ?? printer?.cool_down_mins ?? 15;
   const durationMs = new Date(job.end).getTime() - new Date(job.start).getTime();
 
   // Find the conflicting job(s) on the same printer that overlap
   const allJobs = Object.values(jobsCache).filter(j =>
     j.id !== jobId && j.printerId === job.printerId && !j.queued
   );
-  // Find the latest-ending conflicting job
+  // Find the latest-ending conflicting job. Its OWN cool-down owns the gap the
+  // moved job must clear, matching the per-job server schedule.
   let latestEnd = 0;
+  let latestCoolDown = myCoolDown;
   const jobStart = new Date(job.start).getTime() - warmUp * 60000;
-  const jobEnd = new Date(job.end).getTime() + coolDown * 60000;
+  const jobEnd = new Date(job.end).getTime() + myCoolDown * 60000;
   for (const j of allJobs) {
+    const jCoolDown = j.cool_down_mins ?? printer?.cool_down_mins ?? 15;
     const jStart = new Date(j.start).getTime() - warmUp * 60000;
-    const jEnd = new Date(j.end).getTime() + coolDown * 60000;
+    const jEnd = new Date(j.end).getTime() + jCoolDown * 60000;
     if (jStart < jobEnd && jEnd > jobStart) {
       const realEnd = new Date(j.end).getTime();
-      if (realEnd > latestEnd) latestEnd = realEnd;
+      if (realEnd > latestEnd) { latestEnd = realEnd; latestCoolDown = jCoolDown; }
     }
   }
   if (!latestEnd) return;
 
-  // New start = latest conflicting end + cool-down + warm-up
-  const newStart = new Date(latestEnd + (coolDown + warmUp) * 60000);
+  // New start = latest conflicting end + that job's cool-down + warm-up
+  const newStart = new Date(latestEnd + (latestCoolDown + warmUp) * 60000);
   const newEnd = new Date(newStart.getTime() + durationMs);
   await api('PATCH', `/api/jobs/${jobId}`, { start: newStart.toISOString(), end: newEnd.toISOString() });
   await renderCalendar();
@@ -1277,7 +1286,10 @@ async function renderDay() {
 
       const bgAlpha  = isDarkMode() ? 0.5 : 0.15;
       const warmUp   = p.warm_up_mins   ?? 0;
-      const coolDown = p.cool_down_mins ?? 0;
+      // Cool-down buffer is attributed to the FINISHING job, so it renders from
+      // that job's own snapshotted cool_down_mins (matching the authoritative
+      // server schedule); fall back to the printer scalar, then 15, defensively.
+      const coolDown = job.cool_down_mins ?? p.cool_down_mins ?? 15;
 
       // Warm-up buffer block (before job)
       if (warmUp > 0) {
@@ -1380,17 +1392,23 @@ function snap15(mins) { return Math.round(mins / 15) * 15; }
 function snapAvoidingJobs(proposedStart, durationMins, printerId, excludeJobId) {
   const printer = printers.find(p => p.id === printerId);
   const myWu    = printer?.warm_up_mins  ?? 0;
-  const myCd    = printer?.cool_down_mins ?? 0;
+  // The dragged job's trailing cool-down is its own snapshotted value (fall back
+  // to the printer scalar, then 15) — never the printer scalar alone.
+  const movingJob = jobsCache[excludeJobId];
+  const myCd    = movingJob?.cool_down_mins ?? printer?.cool_down_mins ?? 15;
 
   const dayS = new Date(navDate); dayS.setHours(0,0,0,0);
 
-  // Build list of occupied intervals (excluding the dragged job itself)
+  // Build list of occupied intervals (excluding the dragged job itself). Each
+  // interval's trailing buffer uses that job's OWN cool_down_mins, so the snap
+  // gap matches the per-job server schedule (finishing job owns the gap).
   const intervals = Object.values(jobsCache)
     .filter(j => !j.queued && j.printerId === printerId && j.id !== excludeJobId)
     .map(j => {
       const s = (new Date(j.start).getTime() - dayS.getTime()) / 60_000;
       const e = (new Date(j.end).getTime()   - dayS.getTime()) / 60_000;
-      return { start: s - myWu, end: e + myCd };
+      const jCd = j.cool_down_mins ?? printer?.cool_down_mins ?? 15;
+      return { start: s - myWu, end: e + jCd };
     });
 
   // My occupied interval
@@ -1688,7 +1706,7 @@ function attachDayEvents() {
         warmUpEl:     colEl.querySelector(`.buffer-block[data-job-id="${jobId}"][data-buffer-type="warmup"]`),
         coolDownEl:   colEl.querySelector(`.buffer-block[data-job-id="${jobId}"][data-buffer-type="cooldown"]`),
         warmUpMins:   printer?.warm_up_mins  ?? 0,
-        coolDownMins: printer?.cool_down_mins ?? 0,
+        coolDownMins: job.cool_down_mins ?? printer?.cool_down_mins ?? 15,
         printerId:    printer?.id ?? job.printerId,
       };
       document.body.classList.add('is-moving');
@@ -2212,12 +2230,14 @@ function pushOptionVisibility(job, now = Date.now()) {
     return { pushNow: false, pushTo: false, pullNow: false, pullTo: false };
   }
   const startMs = job.start ? new Date(job.start).getTime() : NaN;
-  const startInPast   = Number.isFinite(startMs) && startMs <= now;
+  const startInPast   = Number.isFinite(startMs) && startMs < now;
   const startInFuture = Number.isFinite(startMs) && startMs > now;
   return {
-    pushNow: !startInPast,
+    // push back to now = move a PAST start later, up to now → past jobs only.
+    pushNow: startInPast,
     pushTo: true,
-    pullNow: !startInFuture,
+    // pull forward to now = move a FUTURE start earlier, to now → future only.
+    pullNow: startInFuture,
     pullTo: true,
   };
 }

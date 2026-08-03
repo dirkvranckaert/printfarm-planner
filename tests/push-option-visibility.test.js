@@ -4,8 +4,9 @@
  * Feature A — availability of the four "push/pull toward now" job options.
  *
  * Rules:
- *   - Push back to now: hidden once the job's start is already in the past.
- *   - Pull forward to now: hidden while the job is still scheduled in the future.
+ *   - Push back to now (start later, up to now): shown only for a PAST start.
+ *   - Pull forward to now (start earlier, to now): shown only for a FUTURE start.
+ *   - At exactly start === now: both hidden (no-op either direction).
  *   - All four: hidden for jobs anchored to a printer (Printing, linked, or
  *     Awaiting Printer) and for unscheduled/queued jobs.
  *
@@ -20,6 +21,7 @@ const APP = fs.readFileSync(path.join(__dirname, '..', 'public', 'app.js'), 'utf
 const NOW = new Date('2026-07-29T12:00:00.000Z').getTime();
 const PAST = '2026-07-29T09:00:00.000Z';   // < NOW
 const FUTURE = '2026-07-29T15:00:00.000Z'; // > NOW
+const EXACT = '2026-07-29T12:00:00.000Z';  // === NOW
 
 function boot() {
   document.open();
@@ -41,13 +43,19 @@ beforeAll(() => { vis = boot(); });
 describe('pushOptionVisibility', () => {
   test('future Planned job: push-to-now hidden, pull-to-now shown', () => {
     expect(vis({ status: 'Planned', start: FUTURE })).toEqual({
-      pushNow: true, pushTo: true, pullNow: false, pullTo: true,
+      pushNow: false, pushTo: true, pullNow: true, pullTo: true,
     });
   });
 
   test('past Planned job: pull-to-now hidden, push-to-now shown', () => {
     expect(vis({ status: 'Planned', start: PAST })).toEqual({
-      pushNow: false, pushTo: true, pullNow: true, pullTo: true,
+      pushNow: true, pushTo: true, pullNow: false, pullTo: true,
+    });
+  });
+
+  test('start exactly === now: both push-now and pull-now hidden (…-to variants stay)', () => {
+    expect(vis({ status: 'Planned', start: EXACT })).toEqual({
+      pushNow: false, pushTo: true, pullNow: false, pullTo: true,
     });
   });
 
@@ -82,7 +90,7 @@ describe('pushOptionVisibility', () => {
       expect(document.getElementById(id).classList.contains('hidden')).toBe(true);
     }
     window.eval(`applyPushOptionVisibility({ status: 'Planned', start: '${PAST}' }, 'ctx');`);
-    expect(document.getElementById('ctx-push-now').classList.contains('hidden')).toBe(true);
-    expect(document.getElementById('ctx-pull-now').classList.contains('hidden')).toBe(false);
+    expect(document.getElementById('ctx-push-now').classList.contains('hidden')).toBe(false);
+    expect(document.getElementById('ctx-pull-now').classList.contains('hidden')).toBe(true);
   });
 });
