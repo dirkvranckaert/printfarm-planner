@@ -493,8 +493,14 @@ app.get('/api/jobs/:id', (req, res) => {
 // (e.g. the job's existing snapshot on edit), else snapshot the printer's
 // current cool_down_mins (or the 15-min default) — the create-time snapshot.
 function resolveJobCoolDown(explicit, printerId, fallback) {
-  const n = Number(explicit);
-  if (Number.isInteger(n) && n >= 0) return n;
+  // Only a real numeric value counts as an explicit override. null / '' /
+  // undefined all mean "not provided" — without this guard Number(null) and
+  // Number('') both coerce to 0 and get stored as a bogus 0-min override
+  // instead of falling back to the snapshot / printer / 15-min default.
+  if (explicit != null && explicit !== '') {
+    const n = Number(explicit);
+    if (Number.isInteger(n) && n >= 0) return n;
+  }
   if (fallback != null) return fallback;
   const p = printerId ? db.prepare('SELECT cool_down_mins FROM printers WHERE id=?').get(printerId) : null;
   return p?.cool_down_mins ?? 15;
@@ -542,7 +548,16 @@ app.patch('/api/jobs/:id', (req, res) => {
   const allowed = ['printerId', 'name', 'customerName', 'orderNr', 'start', 'end', 'status', 'colors', 'printFile', 'remarks', 'queued', 'durationMins', 'linked_printer_id', 'bedType', 'cool_down_mins'];
   const fields = Object.entries(req.body)
     .filter(([k]) => allowed.includes(k))
-    .map(([k, v]) => (k === 'start' || k === 'end') && v ? [k, normalizeJobTime(v)] : [k, v]);
+    // Defense-in-depth: cool_down_mins is written raw here, bypassing
+    // resolveJobCoolDown. Drop it unless it's a valid non-negative integer so a
+    // bad value (null/''/negative/non-numeric) can't overwrite the snapshot —
+    // an invalid PATCH keeps the job's existing cool-down.
+    .filter(([k, v]) => k !== 'cool_down_mins' || (v != null && v !== '' && Number.isInteger(Number(v)) && Number(v) >= 0))
+    .map(([k, v]) => {
+      if ((k === 'start' || k === 'end') && v) return [k, normalizeJobTime(v)];
+      if (k === 'cool_down_mins') return [k, Number(v)];
+      return [k, v];
+    });
   if (!fields.length) return res.status(400).json({ error: 'no valid fields' });
   const setClauses = fields.map(([k]) => `${k}=?`).join(', ');
   const values = [...fields.map(([, v]) => v), req.params.id];

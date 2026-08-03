@@ -82,24 +82,29 @@ describe('scheduling reads per-job cool-down', () => {
 });
 
 // ---------------------------------------------------------------------------
-// Migration: byte-identical backfill on a real db.js upgrade.
+// Migration: byte-identical backfill on a real db.js upgrade, verified by
+// driving the REAL scheduler (pushBackChain → findNextValidStart) rather than a
+// bespoke packer. OLD code fed every job the live printer cool-down (a scalar);
+// NEW code feeds each job its own snapshotted cool_down_mins. After the backfill
+// the two must produce the identical schedule.
 // ---------------------------------------------------------------------------
 
-// Deterministic tight-pack that mirrors findNextValidStart's gap model
-// (gap between consecutive jobs = prevJob.cooldown + printer.warmUp). Used to
-// compare the OLD (printer-field) and NEW (per-job-field) schedules.
-function packSchedule(rows, warmUpMins, coolOf) {
+const MIN = 60000;
+
+// Recompute one printer's schedule with the real pushBackChain, pushing the
+// anchor back 60 min so every downstream job is genuinely repacked.
+//   mode 'old': jobs carry NO coolDownMs → the printer's live scalar applies to all.
+//   mode 'new': each job carries its own cool_down_mins; a deliberately-wrong
+//               sentinel scalar is passed, so any accidental fallback corrupts
+//               the result and fails the test.
+function runChain(rows, warmUpMins, printerCoolMins, mode) {
   const sorted = [...rows].sort((a, b) => new Date(a.start) - new Date(b.start));
-  const out = [];
-  let cursor = null;
-  for (const j of sorted) {
-    const durMs = new Date(j.end) - new Date(j.start);
-    const startMs = cursor == null ? new Date(j.start).getTime() : cursor;
-    const endMs = startMs + durMs;
-    out.push({ id: j.id, start: new Date(startMs).toISOString(), end: new Date(endMs).toISOString() });
-    cursor = endMs + (coolOf(j) + warmUpMins) * 60000;
-  }
-  return out;
+  const chain = sorted.map(j => mode === 'new'
+    ? { id: j.id, start: j.start, end: j.end, coolDownMs: j.cool_down_mins * MIN }
+    : { id: j.id, start: j.start, end: j.end });
+  const to = new Date(new Date(sorted[0].start).getTime() + 60 * MIN);
+  const scalar = (mode === 'new' ? 999 : printerCoolMins) * MIN;
+  return pushBackChain(chain, to, RESTR, [], [], warmUpMins * MIN, scalar);
 }
 
 describe('db.js cool_down_mins backfill migration', () => {
@@ -136,12 +141,18 @@ describe('db.js cool_down_mins backfill migration', () => {
     seed.prepare('INSERT INTO printers (id, name, color, warm_up_mins, cool_down_mins) VALUES (?,?,?,?,?)')
       .run(2, 'P2', '#222', 5, 25);
     const insJob = seed.prepare('INSERT INTO jobs (id, printerId, name, start, end, status) VALUES (?,?,?,?,?,?)');
-    // Printer 1 (past + future + ongoing), printer 2 (future).
+    // Printer 1 (past + ongoing + future), tight gaps so the recompute moves them.
     insJob.run(1, 1, 'A', '2026-04-13T08:00:00.000Z', '2026-04-13T09:00:00.000Z', 'Done');
-    insJob.run(2, 1, 'B', '2026-04-13T09:30:00.000Z', '2026-04-13T10:30:00.000Z', 'Printing');
-    insJob.run(3, 1, 'C', '2026-04-13T11:00:00.000Z', '2026-04-13T12:00:00.000Z', 'Planned');
+    insJob.run(2, 1, 'B', '2026-04-13T09:05:00.000Z', '2026-04-13T10:05:00.000Z', 'Printing');
+    insJob.run(3, 1, 'C', '2026-04-13T10:10:00.000Z', '2026-04-13T11:10:00.000Z', 'Planned');
+    // Printer 2 (future).
     insJob.run(4, 2, 'D', '2026-04-14T08:00:00.000Z', '2026-04-14T09:30:00.000Z', 'Planned');
-    insJob.run(5, 2, 'E', '2026-04-14T10:00:00.000Z', '2026-04-14T11:00:00.000Z', 'Planned');
+    insJob.run(5, 2, 'E', '2026-04-14T09:40:00.000Z', '2026-04-14T10:40:00.000Z', 'Planned');
+    // Orphan job: printerId points at a printer that no longer exists. The
+    // backfill must COALESCE to the 15-min code default — the same fallback the
+    // old live-lookup scheduling used for a missing printer.
+    insJob.run(6, 99, 'F', '2026-04-15T08:00:00.000Z', '2026-04-15T09:00:00.000Z', 'Planned');
+    insJob.run(7, 99, 'G', '2026-04-15T09:05:00.000Z', '2026-04-15T10:05:00.000Z', 'Planned');
     seed.close();
 
     // 2. Boot db.js against that file → its startup migrations run, adding and
@@ -155,35 +166,64 @@ describe('db.js cool_down_mins backfill migration', () => {
     if (fs.existsSync(dbPath)) fs.unlinkSync(dbPath);
   });
 
-  test('every job is backfilled with its printer\'s current cool_down_mins', () => {
+  test('every job is backfilled with its printer\'s current cool_down_mins (orphan → 15)', () => {
     const rows = db.prepare('SELECT id, printerId, cool_down_mins FROM jobs ORDER BY id').all();
-    const printerCool = { 1: 10, 2: 25 };
+    const printerCool = { 1: 10, 2: 25, 99: 15 }; // 99 has no printer → 15 default
     for (const r of rows) {
       expect(r.cool_down_mins).toBe(printerCool[r.printerId]);
     }
   });
 
-  test('the recomputed schedule is byte-identical across the migration', () => {
+  test('the recomputed schedule is byte-identical across the migration (real scheduler)', () => {
     const printers = db.prepare('SELECT * FROM printers').all().reduce((m, p) => (m[p.id] = p, m), {});
     for (const pid of [1, 2]) {
-      const jobs = db.prepare("SELECT * FROM jobs WHERE printerId=? ORDER BY start").all(pid);
+      const jobs = db.prepare('SELECT * FROM jobs WHERE printerId=? ORDER BY start').all(pid);
       const p = printers[pid];
-      // OLD behavior: every job used the live printer cool-down.
-      const before = packSchedule(jobs, p.warm_up_mins, () => p.cool_down_mins);
-      // NEW behavior: every job uses its own snapshotted field.
-      const after = packSchedule(jobs, p.warm_up_mins, (j) => j.cool_down_mins);
+      const before = runChain(jobs, p.warm_up_mins, p.cool_down_mins, 'old'); // live printer scalar
+      const after = runChain(jobs, p.warm_up_mins, p.cool_down_mins, 'new');  // per-job snapshot
       expect(after).toEqual(before);
+      expect(after.length).toBeGreaterThan(0); // jobs actually moved — not a vacuous pass
     }
   });
 
+  test('orphan (deleted-printer) jobs schedule identically old-vs-new (both use 15)', () => {
+    const jobs = db.prepare('SELECT * FROM jobs WHERE printerId=99 ORDER BY start').all();
+    expect(jobs.every(j => j.cool_down_mins === 15)).toBe(true);
+    // Orphan → the old live-lookup path fell back to warm 5 / cool 15.
+    const before = runChain(jobs, 5, 15, 'old');
+    const after = runChain(jobs, 5, 15, 'new');
+    expect(after).toEqual(before);
+    expect(after.length).toBeGreaterThan(0);
+  });
+
+  test('a finishing job\'s downstream gap uses its OWN cool_down_mins even when cross-printer-linked', () => {
+    // Physically on printer 1 (cool 10), linked to printer 2 (cool 25), with an
+    // explicit snapshot override of 40 — all three distinct. Inserted post-boot;
+    // the db.js migration already added the linked_printer_id column.
+    db.prepare(`INSERT INTO jobs (id, printerId, name, start, end, status, cool_down_mins, linked_printer_id)
+      VALUES (?,?,?,?,?,?,?,?)`)
+      .run(10, 1, 'LINK', '2026-04-16T08:00:00.000Z', '2026-04-16T09:00:00.000Z', 'Printing', 40, 2);
+    const row = db.prepare('SELECT * FROM jobs WHERE id=10').get();
+    expect(row.linked_printer_id).not.toBe(row.printerId); // genuinely cross-printer
+    // Place a new candidate right after the finishing job. Its gap must use the
+    // job's own 40-min snapshot, not printer1's 10 nor the linked printer2's 25.
+    const finishing = [{ start: row.start, end: row.end, coolDownMs: row.cool_down_mins * MIN }];
+    const start = findNextValidStart(
+      new Date('2026-04-16T09:00:00.000Z'), 60, RESTR, [], finishing, 5 * MIN, 10 * MIN
+    );
+    // 09:00 + 40 (own cool) + 5 (warm) = 09:45.
+    expect(start.toISOString()).toBe('2026-04-16T09:45:00.000Z');
+    db.prepare('DELETE FROM jobs WHERE id=10').run(); // keep DB clean for later tests
+  });
+
   test('changing a printer\'s cool_down_mins after migration does NOT move existing jobs', () => {
-    const jobs = db.prepare("SELECT * FROM jobs WHERE printerId=1 ORDER BY start").all();
-    const before = packSchedule(jobs, 5, (j) => j.cool_down_mins);
-    // Owner bumps the global/printer cool-down from 10 → 40 later on.
+    const jobs = db.prepare('SELECT * FROM jobs WHERE printerId=1 ORDER BY start').all();
+    const before = runChain(jobs, 5, 10, 'new');
+    // Owner bumps printer 1's cool-down from 10 → 40 later on.
     db.prepare('UPDATE printers SET cool_down_mins=40 WHERE id=1').run();
-    const jobsAfter = db.prepare("SELECT * FROM jobs WHERE printerId=1 ORDER BY start").all();
-    const after = packSchedule(jobsAfter, 5, (j) => j.cool_down_mins);
-    expect(after).toEqual(before); // per-job field untouched → schedule frozen
+    const jobsAfter = db.prepare('SELECT * FROM jobs WHERE printerId=1 ORDER BY start').all();
+    const after = runChain(jobsAfter, 5, 40, 'new'); // per-job fields untouched → schedule frozen
+    expect(after).toEqual(before);
   });
 
   test('the backfill is idempotent — re-running touches no rows', () => {

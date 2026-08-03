@@ -121,10 +121,14 @@ if (!jobColsPause.some(c => c.name === 'paused_remaining_ms')) {
 const jobColsCool = db.pragma('table_info(jobs)');
 if (!jobColsCool.some(c => c.name === 'cool_down_mins')) {
   db.exec('ALTER TABLE jobs ADD COLUMN cool_down_mins INTEGER');
-  db.exec(`UPDATE jobs SET cool_down_mins =
-    COALESCE((SELECT p.cool_down_mins FROM printers p WHERE p.id = jobs.printerId), 15)
-    WHERE cool_down_mins IS NULL`);
 }
+// Backfill runs OUTSIDE the column guard so it self-heals on every boot: a crash
+// between the ALTER and this UPDATE would leave the column present but rows NULL,
+// which a guarded backfill would then skip forever. Idempotent — once filled,
+// `WHERE cool_down_mins IS NULL` matches nothing.
+db.exec(`UPDATE jobs SET cool_down_mins =
+  COALESCE((SELECT p.cool_down_mins FROM printers p WHERE p.id = jobs.printerId), 15)
+  WHERE cool_down_mins IS NULL`);
 
 // One-time migration: if the favourite column was previously added with DEFAULT 0
 // (all printers show favourite=0), set them all to 1 so they appear in day view.
