@@ -879,6 +879,54 @@ function detectConflicts(jobs, printerMap) {
   return ids;
 }
 
+// Column-packing for time-overlapping jobs within a single printer column.
+// Classic interval-graph packing (same approach Google/Apple Calendar use):
+// jobs that transitively overlap in time form a cluster; each job gets a
+// sub-column index `col` and the cluster's total column count `nCols`, so the
+// renderer can size it to width = colWidth/nCols at left = col*(colWidth/nCols).
+// Overlap = raw print-window intersection (job.start..job.end); NO warm-up /
+// cool-down buffers — this is horizontal de-collision of the visible blocks
+// only, independent of the ⚠ conflict notion in detectConflicts.
+//
+// Input:  intervals = [{ id, start, end }] with numeric ms/min start & end.
+// Output: Map<id, { col, nCols }>. Non-overlapping (lone) jobs get nCols = 1.
+function computeColumnLayout(intervals) {
+  const layout = new Map();
+  const sorted = [...intervals].sort((a, b) => (a.start - b.start) || (a.end - b.end));
+
+  let cluster   = [];          // jobs in the current overlap cluster
+  let columns   = [];          // columns[k] = end time of last job placed in column k
+  let clusterEnd = -Infinity;  // max end across the current cluster
+
+  const flush = () => {
+    const nCols = columns.length;
+    for (const ev of cluster) layout.set(ev.id, { col: ev._col, nCols });
+    cluster = [];
+    columns = [];
+  };
+
+  for (const ev of sorted) {
+    // A gap (this job starts at/after every current-cluster job has ended)
+    // closes the cluster: the connected component of the overlap graph ends.
+    if (cluster.length && ev.start >= clusterEnd) flush();
+
+    // Place in the first column whose last job has already ended; else new column.
+    let col = -1;
+    for (let k = 0; k < columns.length; k++) {
+      if (columns[k] <= ev.start) { col = k; break; }
+    }
+    if (col === -1) { col = columns.length; columns.push(ev.end); }
+    else            { columns[col] = ev.end; }
+
+    ev._col = col;
+    cluster.push(ev);
+    clusterEnd = Math.max(clusterEnd, ev.end);
+  }
+  if (cluster.length) flush();
+
+  return layout;
+}
+
 // =============================================================================
 // Conflict resolution
 // =============================================================================
@@ -1266,7 +1314,15 @@ async function renderDay() {
     }
 
     // Job blocks
-    jobs.filter(j => j.printerId === p.id).forEach(job => {
+    const colJobs = jobs.filter(j => j.printerId === p.id);
+    // Side-by-side layout: split the column across time-overlapping jobs so
+    // none is hidden behind another. Overlap is on the raw print window only.
+    const colLayout = computeColumnLayout(colJobs.map(j => ({
+      id:    j.id,
+      start: new Date(j.start).getTime(),
+      end:   new Date(j.end).getTime(),
+    })));
+    colJobs.forEach(job => {
       const start = new Date(job.start);
       const end   = new Date(job.end);
       // Clamp to day boundaries using ms arithmetic (avoids midnight roll-over bugs)
@@ -1274,6 +1330,13 @@ async function renderDay() {
       const endMins   = (end.getTime()   - dayS.getTime()) / 60_000;
       const topPx  = Math.max(0, minToPx(startMins));
       const htPx   = Math.max(minToPx(Math.min(endMins, DAY_MINS)) - topPx, 18); // 18px visual floor
+
+      // Horizontal placement: lone job (nCols 1) keeps the CSS full-column
+      // width; overlapping jobs each take colWidth/nCols at left = col*width.
+      const lay = colLayout.get(job.id) ?? { col: 0, nCols: 1 };
+      const splitStyle = lay.nCols > 1
+        ? `left:${(lay.col * 100 / lay.nCols).toFixed(4)}%; width:${(100 / lay.nCols).toFixed(4)}%; right:auto;`
+        : '';
 
       const status     = job.status ?? 'Planned';
       const isConflict = conflictIds.has(job.id);
@@ -1296,13 +1359,13 @@ async function renderDay() {
         const bTop = Math.max(0, topPx - minToPx(warmUp));
         const bHt  = topPx - bTop;
         if (bHt > 0) {
-          h += `<div class="buffer-block" data-job-id="${job.id}" data-buffer-type="warmup" style="top:${bTop}px;height:${bHt}px">${bHt >= 10 ? '<span class="buffer-label">Warm-up</span>' : ''}</div>`;
+          h += `<div class="buffer-block" data-job-id="${job.id}" data-buffer-type="warmup" style="top:${bTop}px;height:${bHt}px;${splitStyle}">${bHt >= 10 ? '<span class="buffer-label">Warm-up</span>' : ''}</div>`;
         }
       }
 
       h += `<div class="job-block${conflictCls}${pausedCls}" data-job-id="${job.id}"
               data-job-start="${job.start}" data-job-end="${job.end}"
-              style="top:${topPx}px; height:${htPx}px;
+              style="top:${topPx}px; height:${htPx}px; ${splitStyle}
                      background:${hexRgba(p.color, bgAlpha)};
                      border-left-color:${isConflict ? '#e53e3e' : isPaused ? '#f59e0b' : p.color};
                      color:var(--text)">
@@ -1325,7 +1388,7 @@ async function renderDay() {
         const bTop = topPx + htPx;
         const bHt  = Math.min(minToPx(coolDown), minToPx(DAY_MINS) - bTop);
         if (bHt > 0) {
-          h += `<div class="buffer-block" data-job-id="${job.id}" data-buffer-type="cooldown" style="top:${bTop}px;height:${bHt}px">${bHt >= 10 ? '<span class="buffer-label">Cool-down</span>' : ''}</div>`;
+          h += `<div class="buffer-block" data-job-id="${job.id}" data-buffer-type="cooldown" style="top:${bTop}px;height:${bHt}px;${splitStyle}">${bHt >= 10 ? '<span class="buffer-label">Cool-down</span>' : ''}</div>`;
         }
       }
     });
