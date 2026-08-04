@@ -1,12 +1,12 @@
 const CACHE_NAME = 'printfarm-v8';
-const SHELL_URLS = ['/', '/index.html', '/style.css', '/statusCount.js', '/app.js', '/favicon.svg', '/manifest.json'];
+const SHELL_URLS = ['/', '/index.html', '/style.css', '/statusCount.js', '/reshoveMove.js', '/app.js', '/favicon.svg', '/manifest.json'];
 
 // App shell CODE (HTML/CSS/JS): served network-first so a deploy reaches
 // returning users on their next load. Previously these were cache-first with
 // only background revalidation (`cached || fetchPromise`), which pinned each
 // browser to whatever app.js it first cached until CACHE_NAME changed — so a
 // shipped fix never reached a user until someone remembered to bump the cache.
-const CODE_SHELL = new Set(['/', '/index.html', '/style.css', '/statusCount.js', '/app.js']);
+const CODE_SHELL = new Set(['/', '/index.html', '/style.css', '/statusCount.js', '/reshoveMove.js', '/app.js']);
 
 // Cache app shell on install
 self.addEventListener('install', event => {

@@ -697,6 +697,37 @@ describe('planReshove', () => {
     expect(plan.updates[3].start).toBe('2026-04-13T12:00:00.000Z');
   });
 
+  test('mover that STARTS before target but SPANS it is shoved (buffered-overlap partition)', () => {
+    // Movable job 07:30Z–08:30Z; target 08:00Z falls inside it. A raw start<to
+    // partition would wrongly treat it as fixed and leave the anchor overlapping.
+    const anchor = anchorJob('2026-04-13T14:00:00.000Z', '2026-04-13T15:00:00.000Z'); // 1h, far future
+    const movable = [job(2, '2026-04-13T07:30:00.000Z', '2026-04-13T08:30:00.000Z')];
+    const to = utc('2026-04-13T08:00:00.000Z'); // inside the movable job's run
+    const plan = planReshove(anchor, to, restr, [], movable, [], warmUp, coolDown);
+    expect(plan.needsReshove).toBe(true);
+    expect(plan.updates[0]).toMatchObject({ id: 1, start: '2026-04-13T08:00:00.000Z', end: '2026-04-13T09:00:00.000Z' });
+    // Shoved behind the anchor: anchorEnd 09:00Z + 20m = 09:20Z.
+    expect(plan.updates[1]).toMatchObject({ id: 2, start: '2026-04-13T09:20:00.000Z' });
+  });
+
+  test('activeConflict flagged when the verbatim anchor overlaps a running print', () => {
+    const anchor = anchorJob('2026-04-13T14:00:00.000Z', '2026-04-13T15:00:00.000Z');
+    const fixed = [{ id: 9, start: '2026-04-13T08:00:00.000Z', end: '2026-04-13T09:00:00.000Z', status: 'Printing' }];
+    const to = utc('2026-04-13T08:00:00.000Z'); // right on the running print
+    const plan = planReshove(anchor, to, restr, [], [], fixed, warmUp, coolDown);
+    expect(plan.activeConflict).toBe(true);
+    expect(plan.needsReshove).toBe(false); // nothing movable to reshove
+    expect(plan.updates.map(u => u.id)).toEqual([1]); // fixed job 9 never moves
+  });
+
+  test('activeConflict NOT flagged for overlap with a non-active (Done) job', () => {
+    const anchor = anchorJob('2026-04-13T14:00:00.000Z', '2026-04-13T15:00:00.000Z');
+    const fixed = [{ id: 9, start: '2026-04-13T08:00:00.000Z', end: '2026-04-13T09:00:00.000Z', status: 'Done' }];
+    const to = utc('2026-04-13T08:00:00.000Z');
+    const plan = planReshove(anchor, to, restr, [], [], fixed, warmUp, coolDown);
+    expect(plan.activeConflict).toBe(false);
+  });
+
   test('immovable (fixed) jobs are never moved, only routed around', () => {
     // Anchor pulled to 10:00; a movable job at 10:00 must shove, a Printing job at
     // 12:00–13:00 is fixed and the cascade must skip past it (never appears in updates).
