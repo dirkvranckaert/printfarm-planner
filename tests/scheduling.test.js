@@ -831,28 +831,56 @@ describe('selectFollowingChain (pull-forward block selection)', () => {
     expect(chain.map(j => j.id)).toEqual([2]);
   });
 
-  test('a locked job hard-terminates selection (it and everything after stay put)', () => {
+  test('a locked job is SKIPPED, not a terminator — the chain continues past it', () => {
     const later = [
       job(2, '2026-04-13T09:20:00.000Z', '2026-04-13T10:00:00.000Z'), // chains
-      job(3, '2026-04-13T10:20:00.000Z', '2026-04-13T11:00:00.000Z', { locked: 1 }), // locked terminator
-      job(4, '2026-04-13T11:20:00.000Z', '2026-04-13T12:00:00.000Z'), // tight, but after locked → excluded
+      job(3, '2026-04-13T10:20:00.000Z', '2026-04-13T11:00:00.000Z', { locked: 1 }), // locked → skipped
+      job(4, '2026-04-13T11:20:00.000Z', '2026-04-13T12:00:00.000Z'), // tight after locked → still selected
     ];
     const chain = selectFollowingChain(anchor, later, restr, []);
-    expect(chain.map(j => j.id)).toEqual([2]);
+    // Locked job 3 excluded from the moved block, but job 4 after it is pulled in.
+    expect(chain.map(j => j.id)).toEqual([2, 4]);
+    // The locked job's row is never handed back for movement.
+    expect(chain.some(j => j.id === 3)).toBe(false);
   });
 
-  test('an immovable (Printing/linked) job also hard-terminates selection', () => {
+  test('an immovable (Printing/linked) job is also skipped, chain continues past it', () => {
     const later = [
       job(2, '2026-04-13T09:20:00.000Z', '2026-04-13T10:00:00.000Z'),
       job(3, '2026-04-13T10:20:00.000Z', '2026-04-13T11:00:00.000Z', { status: 'Printing' }),
       job(4, '2026-04-13T11:20:00.000Z', '2026-04-13T12:00:00.000Z'),
     ];
-    expect(selectFollowingChain(anchor, later, restr, []).map(j => j.id)).toEqual([2]);
+    expect(selectFollowingChain(anchor, later, restr, []).map(j => j.id)).toEqual([2, 4]);
 
+    // A lone immovable follower (nothing movable after it) → empty chain.
     const later2 = [
       job(2, '2026-04-13T09:20:00.000Z', '2026-04-13T10:00:00.000Z', { linked_printer_id: 7 }),
     ];
     expect(selectFollowingChain(anchor, later2, restr, []).map(j => j.id)).toEqual([]);
+  });
+
+  test('multiple interspersed immovable jobs are all skipped, movers still chained', () => {
+    const later = [
+      job(2, '2026-04-13T09:20:00.000Z', '2026-04-13T10:00:00.000Z'),                       // movable
+      job(3, '2026-04-13T10:20:00.000Z', '2026-04-13T11:00:00.000Z', { locked: 1 }),        // skip
+      job(4, '2026-04-13T11:20:00.000Z', '2026-04-13T12:00:00.000Z', { status: 'Printing' }), // skip
+      job(5, '2026-04-13T12:20:00.000Z', '2026-04-13T13:00:00.000Z'),                       // movable
+      job(6, '2026-04-13T13:20:00.000Z', '2026-04-13T14:00:00.000Z', { linked_printer_id: 9 }), // skip
+      job(7, '2026-04-13T14:20:00.000Z', '2026-04-13T15:00:00.000Z'),                       // movable
+    ];
+    // All three immovable jobs (3,4,6) skipped; the three movers (2,5,7) survive since
+    // every consecutive gap (including across the immovable ones) stays <= 30 min.
+    expect(selectFollowingChain(anchor, later, restr, []).map(j => j.id)).toEqual([2, 5, 7]);
+  });
+
+  test('a real > 30 min gap still breaks the chain even when a locked job precedes it', () => {
+    const later = [
+      job(2, '2026-04-13T09:20:00.000Z', '2026-04-13T10:00:00.000Z'),                 // chains
+      job(3, '2026-04-13T10:20:00.000Z', '2026-04-13T11:00:00.000Z', { locked: 1 }),  // skip, ends 11:00
+      job(4, '2026-04-13T11:45:00.000Z', '2026-04-13T12:30:00.000Z'),                 // 45 min after locked end → breaks
+      job(5, '2026-04-13T12:50:00.000Z', '2026-04-13T13:30:00.000Z'),                 // after the break → excluded
+    ];
+    expect(selectFollowingChain(anchor, later, restr, []).map(j => j.id)).toEqual([2]);
   });
 
   test('empty result when the very first follower is already too far', () => {
@@ -921,6 +949,41 @@ describe('planReshove — pull-forward block (chainFollowers)', () => {
     // Follower candidate 21:50 Brussels → silent → next-day 06:30.
     const f = getZoneParts(new Date(plan.updates[1].start), TZ);
     expect(f).toMatchObject({ day: 14, hour: 6, minute: 30 });
+  });
+
+  test('block routes AROUND a locked job in the tail — locked stays put, no overlap', () => {
+    // Concrete "route around locked" scenario. Anchor A + movable followers B, D form
+    // the block; a LOCKED job C sits in the `fixed` bucket wedged between B and D. Pull
+    // the block to 08:00Z. B packs behind A; D's tight slot would land on C, so it must
+    // route around C — C never moves, D never overlaps it.
+    const anchor = anchorJob('2026-04-13T10:00:00.000Z', '2026-04-13T11:00:00.000Z');
+    const B = job(2, '2026-04-13T12:00:00.000Z', '2026-04-13T13:00:00.000Z');
+    const D = job(4, '2026-04-13T16:00:00.000Z', '2026-04-13T17:00:00.000Z');
+    const lockedC = { id: 9, start: '2026-04-13T10:40:00.000Z', end: '2026-04-13T11:40:00.000Z', status: 'Planned', locked: 1 };
+    const to = utc('2026-04-13T08:00:00.000Z');
+    // followers = the movable chain [B, D]; lockedC lives in the `fixed` obstacle bucket.
+    const plan = planReshove(anchor, to, restr, [], [B, D], [lockedC], warmUp, coolDown, [B, D]);
+
+    // The locked job is never moved.
+    expect(plan.updates.map(u => u.id)).not.toContain(9);
+    // Only the movable block is emitted: A, B, D.
+    expect(plan.updates.map(u => u.id)).toEqual([1, 2, 4]);
+    // No non-chain MOVABLE job had to yield → no surprise reshuffle.
+    expect(plan.needsReshove).toBe(false);
+
+    // A verbatim 08:00–09:00; B packs 20 min behind → 09:20–10:20 (clears C at 10:40).
+    expect(plan.updates[0]).toMatchObject({ id: 1, start: '2026-04-13T08:00:00.000Z' });
+    expect(plan.updates[1]).toMatchObject({ id: 2, start: '2026-04-13T09:20:00.000Z', end: '2026-04-13T10:20:00.000Z' });
+    // D's tight slot (10:40) collides with locked C 10:40–11:40 → routes to
+    // C end 11:40 + cool15 + warm5 = 12:00.
+    expect(plan.updates[2]).toMatchObject({ id: 4, start: '2026-04-13T12:00:00.000Z', end: '2026-04-13T13:00:00.000Z' });
+
+    // Explicit no-overlap guard: every moved job's interval is disjoint from locked C.
+    const cStart = Date.parse(lockedC.start), cEnd = Date.parse(lockedC.end);
+    for (const u of plan.updates) {
+      const s = Date.parse(u.start), e = Date.parse(u.end);
+      expect(s < cEnd && cStart < e).toBe(false);
+    }
   });
 
   test('empty chainFollowers reproduces the classic single-anchor reshove', () => {
