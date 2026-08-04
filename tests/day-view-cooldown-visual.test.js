@@ -21,6 +21,7 @@ const path = require('path');
 
 const HTML = fs.readFileSync(path.join(__dirname, '..', 'public', 'index.html'), 'utf8');
 const APP = fs.readFileSync(path.join(__dirname, '..', 'public', 'app.js'), 'utf8');
+const RESHOVE = fs.readFileSync(path.join(__dirname, '..', 'public', 'reshoveMove.js'), 'utf8');
 
 const NAV = new Date(); NAV.setHours(0, 0, 0, 0);
 
@@ -62,7 +63,7 @@ function boot() {
   window.requestAnimationFrame = cb => setTimeout(cb, 0);
   window.EventSource = class { close() {} addEventListener() {} };
 
-  window.eval(APP + `
+  window.eval(RESHOVE + ';' + APP + `
     ;window.__T__ = {
       renderDay,
       minToPx,
@@ -164,9 +165,11 @@ describe('detectConflicts fires per-job: the ⚠ warning uses each job\'s own co
   });
 });
 
-describe('resolveConflictMoveAfter writes a slot from the finishing job\'s own cool-down', () => {
+describe('resolveConflictMoveAfter targets a slot from the finishing job\'s own cool-down', () => {
   // Obstacle A 05:00–06:00 (own cool-down 60); moving job M 05:30–06:30 (dur 60)
   // overlaps A. New start must clear A.end + A.cool(60) = 07:00, not printer(10).
+  // B2: the move now funnels through the push-back pipeline (same fit -> confirm
+  // -> cascade), so it POSTs /push-back with `to` = that computed slot.
   const aStart = new Date(NAV); aStart.setHours(5, 0, 0, 0);
   const aEnd   = new Date(NAV); aEnd.setHours(6, 0, 0, 0);
   const mStart = new Date(NAV); mStart.setHours(5, 30, 0, 0);
@@ -175,7 +178,7 @@ describe('resolveConflictMoveAfter writes a slot from the finishing job\'s own c
     1: { id: 1, printerId: 5, queued: 0, start: aStart.toISOString(), end: aEnd.toISOString(), cool_down_mins: 60 },
     2: { id: 2, printerId: 5, queued: 0, start: mStart.toISOString(), end: mEnd.toISOString(), cool_down_mins: 30 },
   };
-  let T, patch;
+  let T, body;
   beforeAll(async () => {
     T = boot();
     T.setEnv({
@@ -184,17 +187,15 @@ describe('resolveConflictMoveAfter writes a slot from the finishing job\'s own c
       jobsCache: CACHE,
     });
     await T.resolveConflictMoveAfter(2);
-    const call = window.__CALLS__.find(c => c.method === 'PATCH' && /\/api\/jobs\/2$/.test(c.url));
-    patch = call ? JSON.parse(call.body) : null;
+    const call = window.__CALLS__.find(c => c.method === 'POST' && /\/api\/jobs\/2\/push-back$/.test(c.url));
+    body = call ? JSON.parse(call.body) : null;
   });
 
-  test('PATCHes the moved job to A.end + A.cool_down_mins(60), not printer scalar(10)', () => {
-    expect(patch).not.toBeNull();
+  test('POSTs push-back with to = A.end + A.cool_down_mins(60), not printer scalar(10)', () => {
+    expect(body).not.toBeNull();
     const expectedStart = new Date(aEnd.getTime() + 60 * 60000);           // 07:00
-    const expectedEnd   = new Date(expectedStart.getTime() + 60 * 60000);  // 08:00
-    expect(patch.start).toBe(expectedStart.toISOString());
-    expect(patch.end).toBe(expectedEnd.toISOString());
+    expect(body.to).toBe(expectedStart.toISOString());
     // printer-scalar code would have written A.end + 10 = 06:10
-    expect(patch.start).not.toBe(new Date(aEnd.getTime() + 10 * 60000).toISOString());
+    expect(body.to).not.toBe(new Date(aEnd.getTime() + 10 * 60000).toISOString());
   });
 });

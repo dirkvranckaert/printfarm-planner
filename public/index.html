@@ -590,17 +590,42 @@
     <div class="modal pushback-modal-content">
       <h3 style="margin:0 0 12px;font-size:16px;font-weight:700">Pull forward to…</h3>
       <p style="font-size:12px;color:var(--text-muted);margin:0 0 12px">
-        Tight-packs this job and every subsequent Planned job on the same printer
-        within the window below. Silent hours, closed days and pre/post-processing
-        times are respected. Jobs outside the window stay put.
+        By default the job is forced to the exact start time you pick, and every
+        job after it is reshuffled to make room (you'll be asked to confirm).
+        Enable an end time to instead fit the job into a gap within a window.
       </p>
       <label style="display:block;font-size:12px;color:var(--text-muted);margin-bottom:4px">New start time</label>
       <input type="datetime-local" id="pullforward-datetime" style="width:100%;padding:6px 8px;font-size:14px">
-      <label style="display:block;font-size:12px;color:var(--text-muted);margin:10px 0 4px">Window end (affects jobs starting before this moment)</label>
-      <input type="datetime-local" id="pullforward-window-end" style="width:100%;padding:6px 8px;font-size:14px">
+      <label style="display:flex;align-items:center;gap:6px;font-size:12px;color:var(--text-muted);margin:12px 0 0">
+        <input type="checkbox" id="pullforward-window-toggle"> Use an end time (fit into a window instead of forcing the time)
+      </label>
+      <div id="pullforward-window-row" class="hidden">
+        <label style="display:block;font-size:12px;color:var(--text-muted);margin:10px 0 4px">Window end</label>
+        <input type="datetime-local" id="pullforward-window-end" style="width:100%;padding:6px 8px;font-size:14px">
+      </div>
       <div style="display:flex;gap:8px;justify-content:flex-end;margin-top:16px">
         <button type="button" id="pullforward-cancel" class="btn btn-secondary">Cancel</button>
         <button type="button" id="pullforward-confirm" class="btn btn-primary">Pull forward</button>
+      </div>
+    </div>
+  </div>
+
+  <!-- Reshove confirm modal — shown when a timed move can't fit without reshuffling -->
+  <div id="reshove-modal" class="modal-overlay hidden">
+    <div class="modal pushback-modal-content">
+      <h3 style="margin:0 0 12px;font-size:16px;font-weight:700">Reshuffle the schedule?</h3>
+      <p style="font-size:13px;color:var(--text);margin:0 0 12px">
+        This slot is already taken. The job can only move here if every other job on
+        this printer is shoved back to make room.
+      </p>
+      <p style="font-size:12px;color:var(--text-muted);margin:0 0 12px">
+        The moved job lands exactly at the time you picked; every following job is
+        re-packed one after another, skipping silent hours and closed days. This can
+        push jobs a long way back.
+      </p>
+      <div style="display:flex;gap:8px;justify-content:flex-end;margin-top:16px">
+        <button type="button" id="reshove-cancel" class="btn btn-secondary">Cancel</button>
+        <button type="button" id="reshove-confirm" class="btn btn-primary">Reshuffle schedule</button>
       </div>
     </div>
   </div>
@@ -669,6 +694,7 @@
 
   <script src="ntc.js"></script>
   <script src="statusCount.js"></script>
+  <script src="reshoveMove.js"></script>
   <script src="app.js"></script>
 </body>
 </html>

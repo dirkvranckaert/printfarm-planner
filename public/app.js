@@ -946,7 +946,6 @@ async function resolveConflictMoveAfter(jobId) {
   // printer scalar, then the code default.
   const warmUp = job.warm_up_mins ?? printer?.warm_up_mins ?? 5;
   const myCoolDown = job.cool_down_mins ?? printer?.cool_down_mins ?? 15;
-  const durationMs = new Date(job.end).getTime() - new Date(job.start).getTime();
 
   // Find the conflicting job(s) on the same printer that overlap
   const allJobs = Object.values(jobsCache).filter(j =>
@@ -970,11 +969,13 @@ async function resolveConflictMoveAfter(jobId) {
   }
   if (!latestEnd) return;
 
-  // New start = latest conflicting end + that job's cool-down + warm-up
+  // New start = latest conflicting end + that job's cool-down + warm-up. Route
+  // the move through the push-back pipeline so it runs the SAME fit -> confirm ->
+  // cascade: the clicked job lands after the conflict and every job after it is
+  // reshoved to keep the schedule packed (with a confirm dialog if a reshuffle
+  // is needed). pushBackJob handles render + notices.
   const newStart = new Date(latestEnd + (latestCoolDown + warmUp) * 60000);
-  const newEnd = new Date(newStart.getTime() + durationMs);
-  await api('PATCH', `/api/jobs/${jobId}`, { start: newStart.toISOString(), end: newEnd.toISOString() });
-  await renderCalendar();
+  await pushBackJob(jobId, newStart.toISOString());
 }
 
 async function resolveConflictNextDay(jobId) {
@@ -2747,9 +2748,12 @@ function getJobStatus() {
 // pre/post-processing buffers are honored server-side.
 async function pushBackJob(jobId, to) {
   try {
-    const res = await api('POST', `/api/jobs/${jobId}/push-back`, to ? { to } : {});
+    const body = to ? { to } : {};
+    const res = await performTimedMove({ api, path: `/api/jobs/${jobId}/push-back`, body, confirmReshove });
+    if (res.cancelled) return;
     await renderCalendar();
-    if (res && res.updatedCount === 0) {
+    notifyActiveConflict(res);
+    if (res && res.updatedCount === 0 && !res.reshoved) {
       // Nothing moved — likely because the requested time is earlier than the current start.
       alert('Nothing to push: the selected time is earlier than the job\u2019s current start.');
     }
@@ -2785,9 +2789,11 @@ async function pullForwardJob(jobId, to, windowEnd) {
     const body = {};
     if (to) body.to = to;
     if (windowEnd) body.windowEnd = windowEnd;
-    const res = await api('POST', `/api/jobs/${jobId}/pull-forward`, body);
+    const res = await performTimedMove({ api, path: `/api/jobs/${jobId}/pull-forward`, body, confirmReshove });
+    if (res.cancelled) return;
     await renderCalendar();
-    if (res && res.updatedCount === 0) {
+    notifyActiveConflict(res);
+    if (res && res.updatedCount === 0 && !res.reshoved) {
       alert('Nothing to pull forward: the selected time isn\u2019t earlier than the job\u2019s current start, or nothing can move any earlier.');
     }
   } catch (e) {
@@ -2800,10 +2806,15 @@ function openPullForwardModal(jobId) {
   _pullForwardJobId = jobId;
   const startInput = document.getElementById('pullforward-datetime');
   const endInput   = document.getElementById('pullforward-window-end');
+  const toggle     = document.getElementById('pullforward-window-toggle');
+  const windowRow  = document.getElementById('pullforward-window-row');
   // Default start = now. The user's most common intent is "tighten toward now".
   const now = new Date();
   startInput.value = toDatetimeLocal(now);
-  // Default window end = now + 24h (matches server-side default).
+  // Default = NO end time (force the exact start + reshuffle). The toggle reveals
+  // the window-end field for the fit-into-a-gap mode.
+  toggle.checked = false;
+  windowRow.classList.add('hidden');
   endInput.value = toDatetimeLocal(new Date(now.getTime() + 24 * 60 * 60 * 1000));
   document.getElementById('pullforward-modal').classList.remove('hidden');
   setTimeout(() => startInput.focus(), 50);
@@ -2812,6 +2823,31 @@ function openPullForwardModal(jobId) {
 function closePullForwardModal() {
   document.getElementById('pullforward-modal').classList.add('hidden');
   _pullForwardJobId = null;
+}
+
+// Custom confirm dialog shown when a timed move can't land at the requested slot
+// without reshuffling. Resolves true if the user opts to re-shove the schedule.
+let _reshoveResolve = null;
+function confirmReshove() {
+  return new Promise((resolve) => {
+    _reshoveResolve = resolve;
+    document.getElementById('reshove-modal').classList.remove('hidden');
+  });
+}
+function closeReshoveModal(confirmed) {
+  document.getElementById('reshove-modal').classList.add('hidden');
+  const resolve = _reshoveResolve;
+  _reshoveResolve = null;
+  if (resolve) resolve(!!confirmed);
+}
+
+// After a start-time move is applied, warn if the moved job now overlaps a
+// running / immovable print. The immovable job is never moved; this is a notice
+// only, so Dirk can decide what to do about the conflict.
+function notifyActiveConflict(res) {
+  if (res && res.activeConflict) {
+    alert('Heads up: this job now overlaps a running print on the same printer. The running job was left in place — resolve the conflict manually if needed.');
+  }
 }
 
 async function duplicateJob(jobId) {
@@ -4058,14 +4094,23 @@ function setupListeners() {
 
   // Pull-forward modal
   document.getElementById('pullforward-cancel').addEventListener('click', closePullForwardModal);
+  document.getElementById('pullforward-window-toggle').addEventListener('change', (e) => {
+    document.getElementById('pullforward-window-row').classList.toggle('hidden', !e.target.checked);
+  });
   document.getElementById('pullforward-confirm').addEventListener('click', async () => {
     const startVal = document.getElementById('pullforward-datetime').value;
-    const endVal   = document.getElementById('pullforward-window-end').value;
+    const useWindow = document.getElementById('pullforward-window-toggle').checked;
+    const endVal   = useWindow ? document.getElementById('pullforward-window-end').value : null;
     const id = _pullForwardJobId;
     if (!startVal || id == null) return closePullForwardModal();
     closePullForwardModal();
+    // No end time → force the exact start (verbatim + reshuffle). End time → window fit.
     await pullForwardJob(id, startVal, endVal || null);
   });
+
+  // Reshove confirm modal
+  document.getElementById('reshove-cancel').addEventListener('click', () => closeReshoveModal(false));
+  document.getElementById('reshove-confirm').addEventListener('click', () => closeReshoveModal(true));
 
   // Conflict resolution
   document.getElementById('ctx-move-after').addEventListener('click', async () => {
@@ -4246,7 +4291,14 @@ function setupListeners() {
   );
   // Click overlay to close
   document.querySelectorAll('.modal-overlay').forEach(overlay =>
-    overlay.addEventListener('click', e => { if (e.target === overlay) closeModal(overlay.id); })
+    overlay.addEventListener('click', e => {
+      if (e.target !== overlay) return;
+      // The reshove confirm modal backs a pending Promise — route its dismissal
+      // through closeReshoveModal so the Promise resolves (false) instead of
+      // hanging forever.
+      if (overlay.id === 'reshove-modal') closeReshoveModal(false);
+      else closeModal(overlay.id);
+    })
   );
 
   // Escape closes any open modal or context menu
@@ -4255,6 +4307,7 @@ function setupListeners() {
     hideCtxMenu();
     if (!document.getElementById('pushback-modal').classList.contains('hidden')) closePushBackModal();
     if (!document.getElementById('pullforward-modal').classList.contains('hidden')) closePullForwardModal();
+    if (!document.getElementById('reshove-modal').classList.contains('hidden')) closeReshoveModal(false);
     ['job-modal', 'printers-modal', 'printer-dialog', 'closures-modal', 'settings-modal', 'status-overview-modal'].forEach(id => {
       if (!document.getElementById(id).classList.contains('hidden')) closeModal(id);
     });

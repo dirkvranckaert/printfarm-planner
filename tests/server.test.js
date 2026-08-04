@@ -416,6 +416,246 @@ describe('3MF schedule import — array-order is the contract', () => {
 // against the app's real DB layer (pointed at a temp file). This catches
 // route-level regressions a raw SQL UPDATE cannot — e.g. 'status' being dropped
 // from the route's allowed-fields whitelist.
+
+// Cascade-reshove on an occupied move target. Covers all FOUR menu entry points:
+// push-back-to (custom), pull-forward-to (custom), push-back-to-now, pull-forward-to-now.
+// Each must funnel through the same fit -> needsReshove -> confirm -> cascade flow.
+describe('timed moves — reshove on occupied slot (all four entry points)', () => {
+  const request = require('supertest');
+  let app, appDb, printerId;
+  const SESSION_TOKEN = 'reshove-session-token';
+  const authCookie = `pf_session=${SESSION_TOKEN}`;
+  const iso = (d) => new Date(d).toISOString();
+
+  beforeAll(() => {
+    appDb = require('../db');
+    app   = require('../server');
+    appDb.prepare('INSERT OR REPLACE INTO sessions (token, expires_at) VALUES (?,?)')
+      .run(SESSION_TOKEN, Date.now() + 3_600_000);
+  });
+
+  beforeEach(() => {
+    appDb.exec('DELETE FROM jobs; DELETE FROM printers; DELETE FROM closures;');
+    // Benign 1-minute silent window at 04:00 Brussels so it never interferes with
+    // the test times (silent-hours math itself is covered in scheduling.test.js).
+    appDb.prepare('INSERT OR REPLACE INTO settings (key,value) VALUES (?,?)')
+      .run('schedulingRestrictions', JSON.stringify({
+        enabled: true, silentStart: '04:00', silentEnd: '04:01', closedDays: [], timezone: 'Europe/Brussels',
+      }));
+    const r = appDb.prepare('INSERT INTO printers (name, color, warm_up_mins, cool_down_mins) VALUES (?,?,?,?)')
+      .run('P1', '#f00', 5, 15);
+    printerId = r.lastInsertRowid;
+  });
+
+  afterAll(() => {
+    try { appDb.exec('DELETE FROM jobs; DELETE FROM printers;'); } catch { /* ignore */ }
+  });
+
+  const addJob = (start, end, status = 'Planned') =>
+    appDb.prepare('INSERT INTO jobs (printerId, name, start, end, status) VALUES (?,?,?,?,?)')
+      .run(printerId, 'J', iso(start), iso(end), status).lastInsertRowid;
+
+  // --- Entry 1: push-back to a custom time, target occupied ---
+  test('push-back-to (custom): occupied slot returns needsReshove, then cascades on confirm', async () => {
+    const anchor = addJob('2026-04-13T06:00:00Z', '2026-04-13T07:00:00Z');            // 08:00–09:00 Brussels
+    const blocker = addJob('2026-04-13T12:00:00Z', '2026-04-13T13:00:00Z');           // 14:00–15:00 Brussels
+    const to = '2026-04-13T12:00:00Z'; // push anchor right onto the blocker
+
+    const r1 = await request(app).post(`/api/jobs/${anchor}/push-back`).set('Cookie', authCookie).send({ to });
+    expect(r1.status).toBe(200);
+    expect(r1.body.needsReshove).toBe(true);
+    // Nothing written yet.
+    expect(appDb.prepare('SELECT start FROM jobs WHERE id=?').get(anchor).start).toBe(iso('2026-04-13T06:00:00Z'));
+
+    const r2 = await request(app).post(`/api/jobs/${anchor}/push-back`).set('Cookie', authCookie).send({ to, reshove: true });
+    expect(r2.status).toBe(200);
+    expect(r2.body.reshoved).toBe(true);
+    // Anchor verbatim at target; blocker shoved to anchorEnd 13:00Z + 20m = 13:20Z.
+    expect(appDb.prepare('SELECT start FROM jobs WHERE id=?').get(anchor).start).toBe(iso('2026-04-13T12:00:00Z'));
+    expect(appDb.prepare('SELECT start FROM jobs WHERE id=?').get(blocker).start).toBe(iso('2026-04-13T13:20:00Z'));
+  });
+
+  // --- Entry 2: pull-forward to a custom time, target occupied ---
+  test('pull-forward-to (custom): occupied earlier slot returns needsReshove, then cascades', async () => {
+    const anchor = addJob('2026-04-13T14:00:00Z', '2026-04-13T15:00:00Z');            // future
+    const blocker = addJob('2026-04-13T08:00:00Z', '2026-04-13T09:00:00Z');           // 10:00–11:00 Brussels
+    const to = '2026-04-13T08:00:00Z'; // pull anchor onto the earlier blocker
+
+    const r1 = await request(app).post(`/api/jobs/${anchor}/pull-forward`).set('Cookie', authCookie).send({ to });
+    expect(r1.body.needsReshove).toBe(true);
+    expect(appDb.prepare('SELECT start FROM jobs WHERE id=?').get(anchor).start).toBe(iso('2026-04-13T14:00:00Z'));
+
+    const r2 = await request(app).post(`/api/jobs/${anchor}/pull-forward`).set('Cookie', authCookie).send({ to, reshove: true });
+    expect(r2.body.reshoved).toBe(true);
+    expect(appDb.prepare('SELECT start FROM jobs WHERE id=?').get(anchor).start).toBe(iso('2026-04-13T08:00:00Z'));
+    expect(appDb.prepare('SELECT start FROM jobs WHERE id=?').get(blocker).start).toBe(iso('2026-04-13T09:20:00Z'));
+  });
+
+  // --- Entry 3: push-back to NOW (no `to`), target occupied ---
+  test('push-back-to-now: occupied now-slot returns needsReshove, then cascades', async () => {
+    const now = Date.now();
+    const anchor = addJob(now - 3 * 3600_000, now - 2 * 3600_000); // past job (push-back = past-only)
+    const blocker = addJob(now + 60_000, now + 60_000 + 3 * 3600_000); // starts just after now, spans it
+    // Omit `to` → server uses new Date().
+    const r1 = await request(app).post(`/api/jobs/${anchor}/push-back`).set('Cookie', authCookie).send({});
+    expect(r1.body.needsReshove).toBe(true);
+
+    const r2 = await request(app).post(`/api/jobs/${anchor}/push-back`).set('Cookie', authCookie).send({ reshove: true });
+    expect(r2.body.reshoved).toBe(true);
+    // Anchor now sits at ~now (verbatim); blocker was shoved later than its original start.
+    const anchorStart = new Date(appDb.prepare('SELECT start FROM jobs WHERE id=?').get(anchor).start).getTime();
+    expect(Math.abs(anchorStart - now)).toBeLessThan(5000);
+    const blockerStart = new Date(appDb.prepare('SELECT start FROM jobs WHERE id=?').get(blocker).start).getTime();
+    expect(blockerStart).toBeGreaterThan(now + 60_000);
+  });
+
+  // --- Entry 4: pull-forward to NOW (no `to`), target occupied ---
+  test('pull-forward-to-now: occupied now-slot returns needsReshove, then cascades', async () => {
+    const now = Date.now();
+    const anchor = addJob(now + 3 * 3600_000, now + 4 * 3600_000); // future job (pull-forward = future-only)
+    const blocker = addJob(now + 60_000, now + 60_000 + 3 * 3600_000);
+    const r1 = await request(app).post(`/api/jobs/${anchor}/pull-forward`).set('Cookie', authCookie).send({});
+    expect(r1.body.needsReshove).toBe(true);
+
+    const r2 = await request(app).post(`/api/jobs/${anchor}/pull-forward`).set('Cookie', authCookie).send({ reshove: true });
+    expect(r2.body.reshoved).toBe(true);
+    const anchorStart = new Date(appDb.prepare('SELECT start FROM jobs WHERE id=?').get(anchor).start).getTime();
+    expect(Math.abs(anchorStart - now)).toBeLessThan(5000);
+  });
+
+  // --- No reshuffle needed: free slot moves without a dialog ---
+  test('no-reshuffle: free later slot moves the anchor verbatim, no needsReshove', async () => {
+    const anchor = addJob('2026-04-13T06:00:00Z', '2026-04-13T07:00:00Z'); // 08:00–09:00 Brussels
+    addJob('2026-04-13T18:00:00Z', '2026-04-13T19:00:00Z');                 // far-away movable job
+    const to = '2026-04-13T10:00:00Z'; // free slot
+
+    const r = await request(app).post(`/api/jobs/${anchor}/push-back`).set('Cookie', authCookie).send({ to });
+    expect(r.status).toBe(200);
+    expect(r.body.needsReshove).toBeUndefined();
+    expect(r.body.updatedCount).toBeGreaterThanOrEqual(1);
+    // Anchor landed verbatim at the requested slot.
+    expect(appDb.prepare('SELECT start FROM jobs WHERE id=?').get(anchor).start).toBe(iso('2026-04-13T10:00:00Z'));
+  });
+
+  // --- Gating direction (836f660) stays permissive server-side: wrong direction no-ops ---
+  test('wrong-direction custom push-back (to earlier) is a no-op, never a reshuffle', async () => {
+    const anchor = addJob('2026-04-13T10:00:00Z', '2026-04-13T11:00:00Z');
+    const to = '2026-04-13T08:00:00Z'; // earlier than current start → wrong direction for push-back
+    const r = await request(app).post(`/api/jobs/${anchor}/push-back`).set('Cookie', authCookie).send({ to });
+    expect(r.status).toBe(200);
+    expect(r.body.needsReshove).toBeUndefined();
+    expect(r.body.updatedCount).toBe(0);
+    // Anchor unchanged.
+    expect(appDb.prepare('SELECT start FROM jobs WHERE id=?').get(anchor).start).toBe(iso('2026-04-13T10:00:00Z'));
+  });
+
+  const snapshotAll = () =>
+    appDb.prepare('SELECT id, start, end FROM jobs ORDER BY id').all();
+
+  // --- Fix 9: occupied-target WRONG-DIRECTION must gate BEFORE planning ---
+  test('occupied wrong-direction push-back (explicit earlier `to`) no-ops even with reshove:true', async () => {
+    const anchor = addJob('2026-04-13T12:00:00Z', '2026-04-13T13:00:00Z');
+    addJob('2026-04-13T08:00:00Z', '2026-04-13T09:00:00Z'); // occupies the earlier target
+    const before = snapshotAll();
+    const to = '2026-04-13T08:00:00Z'; // earlier than anchor start → wrong direction
+    const r = await request(app).post(`/api/jobs/${anchor}/push-back`).set('Cookie', authCookie).send({ to, reshove: true });
+    expect(r.body.needsReshove).toBeUndefined();
+    expect(r.body.updatedCount).toBe(0);
+    expect(snapshotAll()).toEqual(before); // nothing moved
+  });
+
+  test('occupied wrong-direction pull-forward (explicit later `to`) no-ops even with reshove:true', async () => {
+    const anchor = addJob('2026-04-13T08:00:00Z', '2026-04-13T09:00:00Z');
+    addJob('2026-04-13T12:00:00Z', '2026-04-13T13:00:00Z'); // occupies the later target
+    const before = snapshotAll();
+    const to = '2026-04-13T12:00:00Z'; // later than anchor start → wrong direction for pull
+    const r = await request(app).post(`/api/jobs/${anchor}/pull-forward`).set('Cookie', authCookie).send({ to, reshove: true });
+    expect(r.body.needsReshove).toBeUndefined();
+    expect(r.body.updatedCount).toBe(0);
+    expect(snapshotAll()).toEqual(before);
+  });
+
+  // --- Fix 11: the initial needsReshove response writes NOTHING (all rows) ---
+  test('initial needsReshove writes no rows at all (to-now flow snapshot)', async () => {
+    const now = Date.now();
+    const anchor = addJob(now - 3 * 3600_000, now - 2 * 3600_000);
+    addJob(now + 60_000, now + 60_000 + 3 * 3600_000);
+    addJob(now + 5 * 3600_000, now + 6 * 3600_000); // a third downstream job
+    const before = snapshotAll();
+    const r = await request(app).post(`/api/jobs/${anchor}/push-back`).set('Cookie', authCookie).send({});
+    expect(r.body.needsReshove).toBe(true);
+    expect(snapshotAll()).toEqual(before); // every row byte-unchanged
+  });
+
+  // --- Fix 10 + B1: immovable rows (Printing / Awaiting Printer / linked) never move ---
+  test('reshove leaves Printing / Awaiting Printer / linked rows byte-unchanged + flags activeConflict', async () => {
+    // Pull a future anchor onto a running print (correct pull-forward direction).
+    const anchor = addJob('2026-04-13T14:00:00Z', '2026-04-13T15:00:00Z');
+    const printing = addJob('2026-04-13T08:00:00Z', '2026-04-13T09:00:00Z', 'Printing'); // anchor lands on it
+    const movable = addJob('2026-04-13T08:30:00Z', '2026-04-13T09:30:00Z'); // overlaps anchor → must shove
+    // Immovable jobs parked well clear so they neither move nor absorb the cascade.
+    const awaiting = addJob('2026-04-13T20:00:00Z', '2026-04-13T21:00:00Z', 'Awaiting Printer');
+    // A linked Planned job — immovable despite its cascadable status.
+    const linked = appDb.prepare("INSERT INTO jobs (printerId, name, start, end, status, linked_printer_id) VALUES (?,?,?,?,?,?)")
+      .run(printerId, 'L', iso('2026-04-13T22:00:00Z'), iso('2026-04-13T23:00:00Z'), 'Planned', printerId).lastInsertRowid;
+
+    const beforeImmovable = {
+      printing: appDb.prepare('SELECT start,end FROM jobs WHERE id=?').get(printing),
+      awaiting: appDb.prepare('SELECT start,end FROM jobs WHERE id=?').get(awaiting),
+      linked:   appDb.prepare('SELECT start,end FROM jobs WHERE id=?').get(linked),
+    };
+    // No windowEnd → forced verbatim path. to (08:00) < anchor start (14:00) = correct pull direction.
+    const to = '2026-04-13T08:00:00Z';
+    const r = await request(app).post(`/api/jobs/${anchor}/pull-forward`).set('Cookie', authCookie).send({ to, reshove: true });
+    expect(r.body.reshoved).toBe(true);
+    expect(r.body.activeConflict).toBe(true); // anchor overlaps the running print
+    // Immovable rows untouched.
+    expect(appDb.prepare('SELECT start,end FROM jobs WHERE id=?').get(printing)).toEqual(beforeImmovable.printing);
+    expect(appDb.prepare('SELECT start,end FROM jobs WHERE id=?').get(awaiting)).toEqual(beforeImmovable.awaiting);
+    expect(appDb.prepare('SELECT start,end FROM jobs WHERE id=?').get(linked)).toEqual(beforeImmovable.linked);
+    // The genuinely-movable job did move.
+    expect(appDb.prepare('SELECT start FROM jobs WHERE id=?').get(movable).start).not.toBe(iso('2026-04-13T08:30:00Z'));
+  });
+
+  // --- B3: pull-forward end-time optional (window mode vs forced verbatim) ---
+  test('pull-forward NO windowEnd forces the exact start + cascades (occupied)', async () => {
+    const anchor = addJob('2026-04-13T14:00:00Z', '2026-04-13T15:00:00Z');
+    addJob('2026-04-13T08:00:00Z', '2026-04-13T09:00:00Z'); // occupies target
+    const r1 = await request(app).post(`/api/jobs/${anchor}/pull-forward`).set('Cookie', authCookie).send({ to: '2026-04-13T08:00:00Z' });
+    expect(r1.body.needsReshove).toBe(true);
+    const r2 = await request(app).post(`/api/jobs/${anchor}/pull-forward`).set('Cookie', authCookie).send({ to: '2026-04-13T08:00:00Z', reshove: true });
+    expect(r2.body.reshoved).toBe(true);
+    expect(appDb.prepare('SELECT start FROM jobs WHERE id=?').get(anchor).start).toBe(iso('2026-04-13T08:00:00Z')); // verbatim
+  });
+
+  test('pull-forward WITH windowEnd fits into a clean gap — no cascade, no dialog', async () => {
+    const anchor = addJob('2026-04-13T14:00:00Z', '2026-04-13T15:00:00Z'); // future
+    // Target 08:00 is free; window generous. Should place cleanly, no reshuffle.
+    const r = await request(app).post(`/api/jobs/${anchor}/pull-forward`)
+      .set('Cookie', authCookie)
+      .send({ to: '2026-04-13T08:00:00Z', windowEnd: '2026-04-13T20:00:00Z' });
+    expect(r.status).toBe(200);
+    expect(r.body.needsReshove).toBeUndefined();
+    expect(appDb.prepare('SELECT start FROM jobs WHERE id=?').get(anchor).start).toBe(iso('2026-04-13T08:00:00Z'));
+  });
+
+  test('pull-forward WITH windowEnd but no gap in window → fallback to window start + reshove', async () => {
+    const anchor = addJob('2026-04-13T14:00:00Z', '2026-04-13T15:00:00Z');
+    // Fill the whole [08:00, 09:30] window with a movable job so no gap fits.
+    addJob('2026-04-13T08:00:00Z', '2026-04-13T09:30:00Z');
+    const r1 = await request(app).post(`/api/jobs/${anchor}/pull-forward`)
+      .set('Cookie', authCookie)
+      .send({ to: '2026-04-13T08:00:00Z', windowEnd: '2026-04-13T09:30:00Z' });
+    expect(r1.body.needsReshove).toBe(true); // no gap → forced path asks to reshuffle
+    const r2 = await request(app).post(`/api/jobs/${anchor}/pull-forward`)
+      .set('Cookie', authCookie)
+      .send({ to: '2026-04-13T08:00:00Z', windowEnd: '2026-04-13T09:30:00Z', reshove: true });
+    expect(r2.body.reshoved).toBe(true);
+    expect(appDb.prepare('SELECT start FROM jobs WHERE id=?').get(anchor).start).toBe(iso('2026-04-13T08:00:00Z')); // window start, verbatim
+  });
+});
+
+
 describe('PATCH /api/jobs/:id — status persistence (real route via supertest)', () => {
   const request = require('supertest');
   let app, appDb, printerId;

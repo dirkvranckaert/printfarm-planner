@@ -308,6 +308,120 @@ function pullForwardChain(chain, to, restr, closures, otherJobs, warmUpMs, coolD
   return updates;
 }
 
+/**
+ * Plan a "reshove" move: place the anchor VERBATIM at `to` and push every movable
+ * job from that slot onward back one-by-one so the schedule stays tightly packed.
+ * Used when a timed move (push-back-to / push-forward-to / to-now) can't land at
+ * the requested slot because a movable job already occupies it — the caller first
+ * checks `needsReshove` to decide whether to prompt the user, then applies
+ * `updates` only after they confirm.
+ *
+ * The anchor is the user's explicit manual override, so it lands EXACTLY at `to`
+ * with NO availability check — even inside silent hours or on a closed day. That
+ * is the whole point of the override. Only the CASCADED jobs are availability
+ * aware: each is placed through `findNextValidStart`, so they skip forward over
+ * silent hours, closed days and closures (which is what can make the cascade run
+ * far past the anchor's original position). The anchor never yields to a movable
+ * job (those get pushed out of the way); movable jobs still route around immovable
+ * jobs (a running or printer-linked print can't be shoved) via the `fixed` set.
+ *
+ * @param {object} anchor      The moved job: { id, start, end, coolDownMs?, warmUpMs? }.
+ * @param {Date}   to          Requested new start for the anchor (placed verbatim).
+ * @param {object} restr       Scheduling restrictions { silentStart, silentEnd, closedDays, timezone }.
+ * @param {Array}  closures    Closure ranges [{ startDate, endDate }].
+ * @param {Array}  movable     Cascadable jobs on the printer EXCLUDING the anchor
+ *                             (Planned/Awaiting, not printer-linked). Each
+ *                             { id, start, end, coolDownMs?, warmUpMs? }.
+ * @param {Array}  fixed       Immovable jobs on the printer (Printing / Awaiting
+ *                             Printer / linked / Done / Paused). Obstacles the
+ *                             cascade routes around but never moves.
+ * @param {number} warmUpMs    Anchor warm-up fallback (ms).
+ * @param {number} coolDownMs  Anchor cool-down fallback (ms).
+ * @returns {{ needsReshove: boolean, anchorStart: string, updates: Array<{id,start,end}> }}
+ *          `updates[0]` is always the anchor at its verbatim slot; the rest are the
+ *          cascaded jobs in order. `needsReshove` is true iff placing the anchor
+ *          verbatim forces at least one movable job to move — i.e. the slot was
+ *          occupied and a reshuffle is required.
+ */
+function planReshove(anchor, to, restr, closures, movable, fixed, warmUpMs, coolDownMs) {
+  const tz = restr?.timezone || DEFAULT_TZ;
+  const aWarmMs = anchor.warmUpMs != null ? anchor.warmUpMs : warmUpMs;
+  const aCoolMs = anchor.coolDownMs != null ? anchor.coolDownMs : coolDownMs;
+  const aStartMs = parseJobTime(anchor.start, tz).getTime();
+  const aEndMs = parseJobTime(anchor.end, tz).getTime();
+  const aDurMs = aEndMs - aStartMs;
+
+  const toMs = to.getTime();
+  const startMs = (j) => parseJobTime(j.start, tz).getTime();
+
+  // The anchor's own buffered footprint at the requested slot.
+  const aBufStart = toMs - aWarmMs;
+  const aBufEnd = toMs + aDurMs + aCoolMs;
+  // A job's buffered interval [start - warmUp, end + coolDown].
+  const bufInterval = (j) => {
+    const s = startMs(j) - (j.warmUpMs != null ? j.warmUpMs : warmUpMs);
+    const e = parseJobTime(j.end, tz).getTime() + (j.coolDownMs != null ? j.coolDownMs : coolDownMs);
+    return [s, e];
+  };
+  const overlapsAnchor = (j) => {
+    const [s, e] = bufInterval(j);
+    return aBufStart < e && aBufEnd > s;
+  };
+
+  // Partition movable jobs into MOVERS (must reshove) and OBSTACLES (stay put).
+  // A movable job moves if it starts at/after the target OR its buffered print
+  // interval intersects the anchor's buffered slot — a job that starts before
+  // `to` but spans it is in the way and must be shoved, not treated as fixed.
+  const movers = [];
+  const obstacles = [...(fixed || [])];
+  for (const j of (movable || [])) {
+    if (!j.start) { obstacles.push(j); continue; }
+    if (startMs(j) >= toMs || overlapsAnchor(j)) movers.push(j);
+    else obstacles.push(j);
+  }
+  movers.sort((a, b) => startMs(a) - startMs(b));
+
+  // Anchor: verbatim at the requested slot. No availability snap — manual override.
+  const anchorStart = new Date(toMs);
+  const anchorEnd = new Date(toMs + aDurMs);
+  const updates = [{ id: anchor.id, start: anchorStart.toISOString(), end: anchorEnd.toISOString() }];
+
+  // Cascade: pack each mover right behind the previous one, starting with the
+  // anchor. Each placement is availability-aware. Stop once a job's tight-packed
+  // slot lands at or before its current start — the gap absorbed the shove and
+  // nothing further needs to move.
+  let prevEndMs = anchorEnd.getTime();
+  let prevCoolMs = aCoolMs;
+  for (const job of movers) {
+    const myCoolMs = job.coolDownMs != null ? job.coolDownMs : coolDownMs;
+    const myWarmMs = job.warmUpMs != null ? job.warmUpMs : warmUpMs;
+    const jStartMs = startMs(job);
+    const jEndMs = parseJobTime(job.end, tz).getTime();
+    const durMs = jEndMs - jStartMs;
+    const durMins = Math.round(durMs / 60000);
+
+    const candidate = new Date(prevEndMs + prevCoolMs + myWarmMs);
+    const newStart = findNextValidStart(candidate, durMins, restr, closures, obstacles, myWarmMs, myCoolMs);
+    if (newStart.getTime() <= jStartMs) break;
+
+    const newEnd = new Date(newStart.getTime() + durMs);
+    updates.push({ id: job.id, start: newStart.toISOString(), end: newEnd.toISOString() });
+    prevEndMs = newEnd.getTime();
+    prevCoolMs = myCoolMs;
+  }
+
+  // A reshuffle was needed exactly when placing the anchor verbatim shoved at
+  // least one movable job.
+  const needsReshove = updates.length > 1;
+  // The verbatim anchor may overlap an ACTIVE/immovable job (a running or
+  // printer-linked print). That job is never moved; flag it so the caller can
+  // surface a conflict notice.
+  const activeConflict = (fixed || []).some(j =>
+    j.start && (j.status === 'Printing' || j.status === 'Awaiting Printer' || j.linked_printer_id != null) && overlapsAnchor(j)
+  );
+  return { needsReshove, anchorStart: anchorStart.toISOString(), updates, activeConflict };
+}
+
 module.exports = {
   DEFAULT_TZ,
   MAX_COPIES,
@@ -322,4 +436,5 @@ module.exports = {
   findNextValidStart,
   pushBackChain,
   pullForwardChain,
+  planReshove,
 };
