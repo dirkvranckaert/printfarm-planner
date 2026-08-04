@@ -542,6 +542,11 @@ body {
   border-collapse: collapse;
   min-width: 480px;
 }
+/* Divide the calendar height EQUALLY among the printer rows — each printer gets
+   an equal-height horizontal band regardless of how many jobs it has. The row
+   count is passed from renderWeek as --week-rows so every body row is an exact
+   1/N slice (deterministic; height:100% on every row let a busy row dominate). */
+.week-table tbody tr { height: calc(100% / var(--week-rows, 1)); }
 .week-table th {
   padding: 8px 10px;
   border: 1px solid var(--border);

@@ -1976,7 +1976,7 @@ async function renderWeek() {
 
   const DAY_NAMES = ['Sun','Mon','Tue','Wed','Thu','Fri','Sat'];
 
-  let h = '<div class="week-view"><table class="week-table"><thead><tr>';
+  let h = `<div class="week-view"><table class="week-table" style="--week-rows:${printers.length}"><thead><tr>`;
   h += '<th></th>';
   days.forEach(d => {
     const closed = isDayClosed(d);
