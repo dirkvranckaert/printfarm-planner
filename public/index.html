@@ -605,6 +605,26 @@
     </div>
   </div>
 
+  <!-- Reshove confirm modal — shown when a timed move can't fit without reshuffling -->
+  <div id="reshove-modal" class="modal-overlay hidden">
+    <div class="modal pushback-modal-content">
+      <h3 style="margin:0 0 12px;font-size:16px;font-weight:700">Reshuffle the schedule?</h3>
+      <p style="font-size:13px;color:var(--text);margin:0 0 12px">
+        This slot is already taken. The job can only move here if every other job on
+        this printer is shoved back to make room.
+      </p>
+      <p style="font-size:12px;color:var(--text-muted);margin:0 0 12px">
+        The moved job lands exactly at the time you picked; every following job is
+        re-packed one after another, skipping silent hours and closed days. This can
+        push jobs a long way back.
+      </p>
+      <div style="display:flex;gap:8px;justify-content:flex-end;margin-top:16px">
+        <button type="button" id="reshove-cancel" class="btn btn-secondary">Cancel</button>
+        <button type="button" id="reshove-confirm" class="btn btn-primary">Reshuffle schedule</button>
+      </div>
+    </div>
+  </div>
+
   <!-- Bottom sheet (mobile context menu) -->
   <div id="bottom-sheet-overlay" class="bottom-sheet-overlay"></div>
   <div id="bottom-sheet" class="bottom-sheet">

@@ -2747,9 +2747,16 @@ function getJobStatus() {
 // pre/post-processing buffers are honored server-side.
 async function pushBackJob(jobId, to) {
   try {
-    const res = await api('POST', `/api/jobs/${jobId}/push-back`, to ? { to } : {});
+    const body = to ? { to } : {};
+    let res = await api('POST', `/api/jobs/${jobId}/push-back`, body);
+    // Target slot occupied by a movable job: ask before reshuffling the schedule.
+    if (res && res.needsReshove) {
+      const ok = await confirmReshove();
+      if (!ok) return;
+      res = await api('POST', `/api/jobs/${jobId}/push-back`, { ...body, reshove: true });
+    }
     await renderCalendar();
-    if (res && res.updatedCount === 0) {
+    if (res && res.updatedCount === 0 && !res.reshoved) {
       // Nothing moved — likely because the requested time is earlier than the current start.
       alert('Nothing to push: the selected time is earlier than the job\u2019s current start.');
     }
@@ -2785,9 +2792,15 @@ async function pullForwardJob(jobId, to, windowEnd) {
     const body = {};
     if (to) body.to = to;
     if (windowEnd) body.windowEnd = windowEnd;
-    const res = await api('POST', `/api/jobs/${jobId}/pull-forward`, body);
+    let res = await api('POST', `/api/jobs/${jobId}/pull-forward`, body);
+    // Target slot occupied by a movable job: ask before reshuffling the schedule.
+    if (res && res.needsReshove) {
+      const ok = await confirmReshove();
+      if (!ok) return;
+      res = await api('POST', `/api/jobs/${jobId}/pull-forward`, { ...body, reshove: true });
+    }
     await renderCalendar();
-    if (res && res.updatedCount === 0) {
+    if (res && res.updatedCount === 0 && !res.reshoved) {
       alert('Nothing to pull forward: the selected time isn\u2019t earlier than the job\u2019s current start, or nothing can move any earlier.');
     }
   } catch (e) {
@@ -2812,6 +2825,22 @@ function openPullForwardModal(jobId) {
 function closePullForwardModal() {
   document.getElementById('pullforward-modal').classList.add('hidden');
   _pullForwardJobId = null;
+}
+
+// Custom confirm dialog shown when a timed move can't land at the requested slot
+// without reshuffling. Resolves true if the user opts to re-shove the schedule.
+let _reshoveResolve = null;
+function confirmReshove() {
+  return new Promise((resolve) => {
+    _reshoveResolve = resolve;
+    document.getElementById('reshove-modal').classList.remove('hidden');
+  });
+}
+function closeReshoveModal(confirmed) {
+  document.getElementById('reshove-modal').classList.add('hidden');
+  const resolve = _reshoveResolve;
+  _reshoveResolve = null;
+  if (resolve) resolve(!!confirmed);
 }
 
 async function duplicateJob(jobId) {
@@ -4067,6 +4096,10 @@ function setupListeners() {
     await pullForwardJob(id, startVal, endVal || null);
   });
 
+  // Reshove confirm modal
+  document.getElementById('reshove-cancel').addEventListener('click', () => closeReshoveModal(false));
+  document.getElementById('reshove-confirm').addEventListener('click', () => closeReshoveModal(true));
+
   // Conflict resolution
   document.getElementById('ctx-move-after').addEventListener('click', async () => {
     const id = ctxJobId;
@@ -4255,6 +4288,7 @@ function setupListeners() {
     hideCtxMenu();
     if (!document.getElementById('pushback-modal').classList.contains('hidden')) closePushBackModal();
     if (!document.getElementById('pullforward-modal').classList.contains('hidden')) closePullForwardModal();
+    if (!document.getElementById('reshove-modal').classList.contains('hidden')) closeReshoveModal(false);
     ['job-modal', 'printers-modal', 'printer-dialog', 'closures-modal', 'settings-modal', 'status-overview-modal'].forEach(id => {
       if (!document.getElementById(id).classList.contains('hidden')) closeModal(id);
     });
