@@ -306,6 +306,18 @@ body {
 .btn-danger:hover { background: var(--danger); color: #fff; }
 .btn-nav      { background: var(--surface); color: var(--text); border-color: var(--border); padding: 6px 11px; font-size: 17px; line-height: 1; }
 .btn-nav:hover { background: var(--bg); }
+/* Today button: default surface state = "not showing today", clickable → jumps
+   to today. The .is-today state marks today already in view: a filled accent
+   look, not clickable (also disabled). opacity/cursor override the browser's
+   default disabled dimming so it reads as "active", not "greyed out". */
+#btn-today.is-today {
+  background: var(--primary);
+  color: #fff;
+  border-color: var(--primary);
+  cursor: default;
+  opacity: 1;
+}
+#btn-today.is-today:hover { background: var(--primary); }
 .btn-view     { background: var(--surface); color: var(--text-muted); border-color: var(--border); padding: 5px 12px; }
 .btn-view:hover { color: var(--text); background: var(--bg); }
 .btn-view.active { background: var(--primary); color: #fff; border-color: var(--primary); }
@@ -488,28 +500,14 @@ body {
   position: absolute;
   left: 3px;
   right: 3px;
+  /* Dashed left border + background are set inline per job in renderDay() as a
+     washed-out tint of that job's own colour (was a grey hatch — replaced so a
+     buffer reads as belonging to its job, esp. when jobs sit side-by-side). */
   border-left: 3px dashed #94a3b8;
   border-radius: 3px;
   overflow: hidden;
   pointer-events: none;
   z-index: 0;
-  background:
-    repeating-linear-gradient( 45deg, rgba(71,85,105,.45) 0, rgba(71,85,105,.45) 1.5px, transparent 1.5px, transparent 8px),
-    repeating-linear-gradient(-45deg, rgba(71,85,105,.45) 0, rgba(71,85,105,.45) 1.5px, transparent 1.5px, transparent 8px);
-}
-[data-theme="dark"] .buffer-block {
-  border-left-color: #64748b;
-  background:
-    repeating-linear-gradient( 45deg, rgba(148,163,184,.5) 0, rgba(148,163,184,.5) 1.5px, transparent 1.5px, transparent 8px),
-    repeating-linear-gradient(-45deg, rgba(148,163,184,.5) 0, rgba(148,163,184,.5) 1.5px, transparent 1.5px, transparent 8px);
-}
-@media (prefers-color-scheme: dark) {
-  :root:not([data-theme="light"]):not([data-theme="dark"]) .buffer-block {
-    border-left-color: #64748b;
-    background:
-      repeating-linear-gradient( 45deg, rgba(148,163,184,.5) 0, rgba(148,163,184,.5) 1.5px, transparent 1.5px, transparent 8px),
-      repeating-linear-gradient(-45deg, rgba(148,163,184,.5) 0, rgba(148,163,184,.5) 1.5px, transparent 1.5px, transparent 8px);
-  }
 }
 .buffer-label {
   display: block;
@@ -550,9 +548,17 @@ body {
 }
 .week-table {
   width: 100%;
+  /* Fill the calendar height so per-printer rows grow to use the full screen
+     instead of clumping at the top (min-height on td is just a floor). */
+  height: 100%;
   border-collapse: collapse;
   min-width: 480px;
 }
+/* Divide the calendar height EQUALLY among the printer rows — each printer gets
+   an equal-height horizontal band regardless of how many jobs it has. The row
+   count is passed from renderWeek as --week-rows so every body row is an exact
+   1/N slice (deterministic; height:100% on every row let a busy row dominate). */
+.week-table tbody tr { height: calc(100% / var(--week-rows, 1)); }
 .week-table th {
   padding: 8px 10px;
   border: 1px solid var(--border);
@@ -608,10 +614,21 @@ body {
   flex: 1;
   overflow: auto;
   background: var(--surface);
+  /* Column flex so the grid can flex:1 and fill the full calendar height. */
+  display: flex;
+  flex-direction: column;
 }
 .month-grid {
   display: grid;
   grid-template-columns: repeat(7, minmax(0, 1fr));
+  /* Fill all available space: full width via the 1fr columns, full height via
+     flex:1 + 1fr week rows (header row stays compact). Previously the rows were
+     content-sized (~90px), clumping at the top and leaving the lower half of a
+     large screen empty. */
+  flex: 1;
+  grid-template-rows: auto;
+  grid-auto-rows: 1fr;
+  width: 100%;
   border-top: 1px solid var(--border);
   border-left: 1px solid var(--border);
 }

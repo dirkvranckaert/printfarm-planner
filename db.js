@@ -130,6 +130,23 @@ db.exec(`UPDATE jobs SET cool_down_mins =
   COALESCE((SELECT p.cool_down_mins FROM printers p WHERE p.id = jobs.printerId), 15)
   WHERE cool_down_mins IS NULL`);
 
+// Per-job warm-up snapshot. Symmetric with cool_down_mins above: warm-up used to
+// come live from the printer's warm_up_mins, so changing that setting reshuffled
+// every existing job. Each job now carries its own warm_up_mins, snapshotted from
+// its printer at creation. Backfill existing rows with their printer's CURRENT
+// warm_up_mins (or the 5-min code default when the printer is missing/NULL — the
+// same fallback scheduling used before), so the recomputed schedule is
+// byte-identical to before this migration. Idempotent: added + backfilled once.
+const jobColsWarm = db.pragma('table_info(jobs)');
+if (!jobColsWarm.some(c => c.name === 'warm_up_mins')) {
+  db.exec('ALTER TABLE jobs ADD COLUMN warm_up_mins INTEGER');
+}
+// Backfill runs OUTSIDE the column guard so it self-heals on every boot (see the
+// cool_down_mins note above). Idempotent — once filled, the WHERE matches nothing.
+db.exec(`UPDATE jobs SET warm_up_mins =
+  COALESCE((SELECT p.warm_up_mins FROM printers p WHERE p.id = jobs.printerId), 5)
+  WHERE warm_up_mins IS NULL`);
+
 // One-time migration: if the favourite column was previously added with DEFAULT 0
 // (all printers show favourite=0), set them all to 1 so they appear in day view.
 const favMigrated = db.prepare("SELECT value FROM settings WHERE key='favouriteMigrated'").get();

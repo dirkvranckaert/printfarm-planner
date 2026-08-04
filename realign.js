@@ -88,10 +88,11 @@ function realignLinkedJob({ db, printer, job, remainingMins, now, restr, snapSta
   if (deltaMs > 0) {
     const closures = db.prepare('SELECT startDate, endDate FROM closures').all();
     const allSamePrinter = db.prepare(
-      "SELECT id, name, status, start, end, cool_down_mins FROM jobs WHERE printerId=? AND queued=0 AND start!='' AND id!=?"
+      "SELECT id, name, status, start, end, cool_down_mins, warm_up_mins FROM jobs WHERE printerId=? AND queued=0 AND start!='' AND id!=?"
     ).all(printer.id, job.id).map(j => ({
       ...j,
       coolDownMs: (j.cool_down_mins ?? printer.cool_down_mins ?? 15) * 60000,
+      warmUpMs: (j.warm_up_mins ?? printer.warm_up_mins ?? 5) * 60000,
     }));
 
     // Downstream chain = jobs on this printer whose current start is at or after
@@ -111,8 +112,9 @@ function realignLinkedJob({ db, printer, job, remainingMins, now, restr, snapSta
       const chainIds = new Set(chain.map(j => j.id));
       const otherJobs = allSamePrinter.filter(j => !chainIds.has(j.id));
 
-      // Anchor for the first chained job: current job's new end + cool + warm.
-      const cascadeAnchor = new Date(predictedEndMs + coolDownMs + warmUpMs);
+      // Anchor for the first chained job: current job's new end + the finishing
+      // job's cool-down + the FIRST chained job's own warm-up (per-job snapshot).
+      const cascadeAnchor = new Date(predictedEndMs + coolDownMs + chain[0].warmUpMs);
       const pushUpdates = scheduling.pushBackChain(
         chain, cascadeAnchor, restr, closures, otherJobs, warmUpMs, coolDownMs
       );

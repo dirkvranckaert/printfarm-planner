@@ -497,7 +497,7 @@ async function init() {
   }
   renderTopbarStatus();
   setupListeners();
-  setInterval(() => { updateNowLine(); renderTopbarStatus(); }, 60_000);
+  setInterval(() => { updateNowLine(); renderTopbarStatus(); updateTodayButton(); }, 60_000);
   if (printers.length === 0) openPrintersModal();
 }
 
@@ -869,9 +869,12 @@ function detectConflicts(jobs, printerMap) {
       // so the warning fires iff there's a real per-job overlap.
       const iCd = jobs[i].cool_down_mins ?? pi?.cool_down_mins ?? 15;
       const jCd = jobs[j].cool_down_mins ?? pj?.cool_down_mins ?? 15;
-      const iStart = new Date(jobs[i].start).getTime() - (pi?.warm_up_mins  ?? 0) * 60_000;
+      // Warm-up is per-job (snapshotted), same fallback chain as cool-down.
+      const iWu = jobs[i].warm_up_mins ?? pi?.warm_up_mins ?? 0;
+      const jWu = jobs[j].warm_up_mins ?? pj?.warm_up_mins ?? 0;
+      const iStart = new Date(jobs[i].start).getTime() - iWu * 60_000;
       const iEnd   = new Date(jobs[i].end).getTime()   + iCd * 60_000;
-      const jStart = new Date(jobs[j].start).getTime() - (pj?.warm_up_mins  ?? 0) * 60_000;
+      const jStart = new Date(jobs[j].start).getTime() - jWu * 60_000;
       const jEnd   = new Date(jobs[j].end).getTime()   + jCd * 60_000;
       if (iStart < jEnd && iEnd > jStart) {
         ids.add(jobs[i].id);
@@ -882,6 +885,56 @@ function detectConflicts(jobs, printerMap) {
   return ids;
 }
 
+// Column-packing for time-overlapping jobs within a single printer column.
+// Classic interval-graph packing (same approach Google/Apple Calendar use):
+// jobs that transitively overlap in time form a cluster; each job gets a
+// sub-column index `col` and the cluster's total column count `nCols`, so the
+// renderer can size it to width = colWidth/nCols at left = col*(colWidth/nCols).
+// Overlap is decided on each job's BUFFER-INCLUSIVE interval
+// [start - warmUp, end + coolDown] — two jobs whose print windows don't touch
+// still share a column (render side-by-side) when job A's cool-down overlaps
+// job B's warm-up. The caller passes those already-buffered intervals, matching
+// the ⚠ conflict notion in detectConflicts (if ⚠ fires, they render side-by-side).
+//
+// Input:  intervals = [{ id, start, end }] numeric ms/min, buffers already applied.
+// Output: Map<id, { col, nCols }>. Non-overlapping (lone) jobs get nCols = 1.
+function computeColumnLayout(intervals) {
+  const layout = new Map();
+  const sorted = [...intervals].sort((a, b) => (a.start - b.start) || (a.end - b.end));
+
+  let cluster   = [];          // jobs in the current overlap cluster
+  let columns   = [];          // columns[k] = end time of last job placed in column k
+  let clusterEnd = -Infinity;  // max end across the current cluster
+
+  const flush = () => {
+    const nCols = columns.length;
+    for (const ev of cluster) layout.set(ev.id, { col: ev._col, nCols });
+    cluster = [];
+    columns = [];
+  };
+
+  for (const ev of sorted) {
+    // A gap (this job starts at/after every current-cluster job has ended)
+    // closes the cluster: the connected component of the overlap graph ends.
+    if (cluster.length && ev.start >= clusterEnd) flush();
+
+    // Place in the first column whose last job has already ended; else new column.
+    let col = -1;
+    for (let k = 0; k < columns.length; k++) {
+      if (columns[k] <= ev.start) { col = k; break; }
+    }
+    if (col === -1) { col = columns.length; columns.push(ev.end); }
+    else            { columns[col] = ev.end; }
+
+    ev._col = col;
+    cluster.push(ev);
+    clusterEnd = Math.max(clusterEnd, ev.end);
+  }
+  if (cluster.length) flush();
+
+  return layout;
+}
+
 // =============================================================================
 // Conflict resolution
 // =============================================================================
@@ -889,8 +942,9 @@ async function resolveConflictMoveAfter(jobId) {
   const job = jobsCache[jobId];
   if (!job) return;
   const printer = printers.find(p => p.id === job.printerId);
-  const warmUp = printer?.warm_up_mins ?? 5;
-  // Cool-down is per-job (snapshotted); fall back to printer scalar, then 15.
+  // Warm-up and cool-down are both per-job (snapshotted); fall back to the
+  // printer scalar, then the code default.
+  const warmUp = job.warm_up_mins ?? printer?.warm_up_mins ?? 5;
   const myCoolDown = job.cool_down_mins ?? printer?.cool_down_mins ?? 15;
   const durationMs = new Date(job.end).getTime() - new Date(job.start).getTime();
 
@@ -906,7 +960,8 @@ async function resolveConflictMoveAfter(jobId) {
   const jobEnd = new Date(job.end).getTime() + myCoolDown * 60000;
   for (const j of allJobs) {
     const jCoolDown = j.cool_down_mins ?? printer?.cool_down_mins ?? 15;
-    const jStart = new Date(j.start).getTime() - warmUp * 60000;
+    const jWarmUp = j.warm_up_mins ?? printer?.warm_up_mins ?? 5;
+    const jStart = new Date(j.start).getTime() - jWarmUp * 60000;
     const jEnd = new Date(j.end).getTime() + jCoolDown * 60000;
     if (jStart < jobEnd && jEnd > jobStart) {
       const realEnd = new Date(j.end).getTime();
@@ -1006,6 +1061,29 @@ function updateHeader() {
     const btn = document.getElementById(`btn-${v}`);
     if (btn) btn.classList.toggle('active', view === v);
   });
+  updateTodayButton();
+}
+
+// Is "today" currently visible in the active view?
+function isTodayInView() {
+  const today = todayMidnight();
+  if (view === 'day')   return sameDay(navDate, today);
+  if (view === 'week')  { const ws = weekStart(navDate); return today >= ws && today < addDays(ws, 7); }
+  if (view === 'month') return navDate.getFullYear() === today.getFullYear() && navDate.getMonth() === today.getMonth();
+  return true; // upcoming is always anchored at today
+}
+
+// Reflect today-in-view on the Today button: when today is already shown the
+// button reads "active" and is disabled (nothing to jump to); otherwise it's the
+// default clickable state that jumps to today. Re-evaluated on every render AND
+// on the 1-min tick, so leaving the view open across midnight re-enables it.
+function updateTodayButton() {
+  const btn = document.getElementById('btn-today');
+  if (!btn) return;
+  const showingToday = isTodayInView();
+  btn.classList.toggle('is-today', showingToday);
+  btn.disabled = showingToday;
+  btn.title = showingToday ? 'Today is shown' : 'Jump to today';
 }
 
 // =============================================================================
@@ -1269,7 +1347,21 @@ async function renderDay() {
     }
 
     // Job blocks
-    jobs.filter(j => j.printerId === p.id).forEach(job => {
+    const colJobs = jobs.filter(j => j.printerId === p.id);
+    // Side-by-side layout: split the column across overlapping jobs so none is
+    // hidden behind another. Overlap uses each job's BUFFER-INCLUSIVE interval
+    // [start - warmUp, end + coolDown] (per-job snapshots, printer fallback) so
+    // a cool-down/warm-up clash splits them too — matching the ⚠ conflict notion.
+    const colLayout = computeColumnLayout(colJobs.map(j => {
+      const wu = j.warm_up_mins  ?? p.warm_up_mins  ?? 0;
+      const cd = j.cool_down_mins ?? p.cool_down_mins ?? 15;
+      return {
+        id:    j.id,
+        start: new Date(j.start).getTime() - wu * 60_000,
+        end:   new Date(j.end).getTime()   + cd * 60_000,
+      };
+    }));
+    colJobs.forEach(job => {
       const start = new Date(job.start);
       const end   = new Date(job.end);
       // Clamp to day boundaries using ms arithmetic (avoids midnight roll-over bugs)
@@ -1277,6 +1369,13 @@ async function renderDay() {
       const endMins   = (end.getTime()   - dayS.getTime()) / 60_000;
       const topPx  = Math.max(0, minToPx(startMins));
       const htPx   = Math.max(minToPx(Math.min(endMins, DAY_MINS)) - topPx, 18); // 18px visual floor
+
+      // Horizontal placement: lone job (nCols 1) keeps the CSS full-column
+      // width; overlapping jobs each take colWidth/nCols at left = col*width.
+      const lay = colLayout.get(job.id) ?? { col: 0, nCols: 1 };
+      const splitStyle = lay.nCols > 1
+        ? `left:${(lay.col * 100 / lay.nCols).toFixed(4)}%; width:${(100 / lay.nCols).toFixed(4)}%; right:auto;`
+        : '';
 
       const status     = job.status ?? 'Planned';
       const isConflict = conflictIds.has(job.id);
@@ -1288,7 +1387,15 @@ async function renderDay() {
       const pausedIcon = isPaused ? '<span class="job-paused-icon" title="Printer paused">⏸</span>' : '';
 
       const bgAlpha  = isDarkMode() ? 0.5 : 0.15;
-      const warmUp   = p.warm_up_mins   ?? 0;
+      // Buffer blocks (warm-up / cool-down) render as a WASHED-OUT tint of this
+      // job's own colour (clearly lighter than the solid job block above) plus a
+      // dashed left border in the full colour — so a buffer visually belongs to
+      // its job even when overlapping jobs sit side-by-side in the column.
+      const bufBg    = hexRgba(p.color, isDarkMode() ? 0.22 : 0.07);
+      const bufStyle = `background:${bufBg};border-left-color:${p.color};`;
+      // Warm-up buffer renders from the job's own snapshotted warm_up_mins
+      // (per-job); fall back to the printer scalar, then 0, defensively.
+      const warmUp   = job.warm_up_mins ?? p.warm_up_mins ?? 0;
       // Cool-down buffer is attributed to the FINISHING job, so it renders from
       // that job's own snapshotted cool_down_mins (matching the authoritative
       // server schedule); fall back to the printer scalar, then 15, defensively.
@@ -1299,13 +1406,13 @@ async function renderDay() {
         const bTop = Math.max(0, topPx - minToPx(warmUp));
         const bHt  = topPx - bTop;
         if (bHt > 0) {
-          h += `<div class="buffer-block" data-job-id="${job.id}" data-buffer-type="warmup" style="top:${bTop}px;height:${bHt}px">${bHt >= 10 ? '<span class="buffer-label">Warm-up</span>' : ''}</div>`;
+          h += `<div class="buffer-block" data-job-id="${job.id}" data-buffer-type="warmup" style="top:${bTop}px;height:${bHt}px;${splitStyle}${bufStyle}">${bHt >= 10 ? '<span class="buffer-label">Warm-up</span>' : ''}</div>`;
         }
       }
 
       h += `<div class="job-block${conflictCls}${pausedCls}" data-job-id="${job.id}"
               data-job-start="${job.start}" data-job-end="${job.end}"
-              style="top:${topPx}px; height:${htPx}px;
+              style="top:${topPx}px; height:${htPx}px; ${splitStyle}
                      background:${hexRgba(p.color, bgAlpha)};
                      border-left-color:${isConflict ? '#e53e3e' : isPaused ? '#f59e0b' : p.color};
                      color:var(--text)">
@@ -1328,7 +1435,7 @@ async function renderDay() {
         const bTop = topPx + htPx;
         const bHt  = Math.min(minToPx(coolDown), minToPx(DAY_MINS) - bTop);
         if (bHt > 0) {
-          h += `<div class="buffer-block" data-job-id="${job.id}" data-buffer-type="cooldown" style="top:${bTop}px;height:${bHt}px">${bHt >= 10 ? '<span class="buffer-label">Cool-down</span>' : ''}</div>`;
+          h += `<div class="buffer-block" data-job-id="${job.id}" data-buffer-type="cooldown" style="top:${bTop}px;height:${bHt}px;${splitStyle}${bufStyle}">${bHt >= 10 ? '<span class="buffer-label">Cool-down</span>' : ''}</div>`;
         }
       }
     });
@@ -1394,10 +1501,10 @@ function snap15(mins) { return Math.round(mins / 15) * 15; }
 // Returns a start position (in minutes) that avoids overlapping any other job's buffer zone on the same printer column.
 function snapAvoidingJobs(proposedStart, durationMins, printerId, excludeJobId) {
   const printer = printers.find(p => p.id === printerId);
-  const myWu    = printer?.warm_up_mins  ?? 0;
-  // The dragged job's trailing cool-down is its own snapshotted value (fall back
-  // to the printer scalar, then 15) — never the printer scalar alone.
+  // The dragged job's own snapshotted warm-up and cool-down (fall back to the
+  // printer scalar, then the code default) — never the printer scalar alone.
   const movingJob = jobsCache[excludeJobId];
+  const myWu    = movingJob?.warm_up_mins  ?? printer?.warm_up_mins  ?? 0;
   const myCd    = movingJob?.cool_down_mins ?? printer?.cool_down_mins ?? 15;
 
   const dayS = new Date(navDate); dayS.setHours(0,0,0,0);
@@ -1411,7 +1518,8 @@ function snapAvoidingJobs(proposedStart, durationMins, printerId, excludeJobId) 
       const s = (new Date(j.start).getTime() - dayS.getTime()) / 60_000;
       const e = (new Date(j.end).getTime()   - dayS.getTime()) / 60_000;
       const jCd = j.cool_down_mins ?? printer?.cool_down_mins ?? 15;
-      return { start: s - myWu, end: e + jCd };
+      const jWu = j.warm_up_mins ?? printer?.warm_up_mins ?? 0;
+      return { start: s - jWu, end: e + jCd };
     });
 
   // My occupied interval
@@ -1459,6 +1567,10 @@ function expandDayBodyForDrag(bottomMins) {
 
 function onDragMove(e) {
   if (!drag) return;
+  // Snap-to-avoid-overlap is opt-in: hold CTRL (or Cmd on Mac) to snap a drop
+  // clear of other jobs' print windows. Without a modifier, drops are free —
+  // the job lands at the dropped time (still on the 15-min grid).
+  const wantSnap = !!(e && (e.ctrlKey || e.metaKey));
 
   if (drag.type === 'queue-schedule') {
     drag.moved = true;
@@ -1477,9 +1589,11 @@ function onDragMove(e) {
       const proposed = snap15(Math.max(0, Math.min(pxToMin(e.clientY - rect.top), DAY_MINS + 240 - drag.durationMins)));
       drag.printerId = parseInt(targetCol.dataset.printerId);
       // Avoid landing on top of an existing job's warm-up / cool-down buffer
-      // on the same printer column. Mirrors the "move" branch behaviour so
-      // queue-drag drops don't ignore pre/post print time.
-      const snapped = snapAvoidingJobs(proposed, drag.durationMins, drag.printerId, drag.jobId);
+      // on the same printer column (opt-in via CTRL/Cmd). Mirrors the "move"
+      // branch so queue-drag drops don't ignore pre/post print time when snapping.
+      const snapped = wantSnap
+        ? snapAvoidingJobs(proposed, drag.durationMins, drag.printerId, drag.jobId)
+        : proposed;
       const y = Math.max(0, Math.min(snapped, DAY_MINS + 240 - drag.durationMins));
       drag.currentMins = y;
 
@@ -1540,7 +1654,10 @@ function onDragMove(e) {
     const rect = drag.colEl.getBoundingClientRect();
     const y    = snap15(Math.max(0, Math.min(pxToMin(e.clientY - rect.top), DAY_MINS + 240)));
 
-    const snapped = snapAvoidingJobs(snap15(Math.max(0, Math.min(y - drag.offsetMins, DAY_MINS + 240 - drag.durationMins))), drag.durationMins, drag.printerId, drag.jobId);
+    const base    = snap15(Math.max(0, Math.min(y - drag.offsetMins, DAY_MINS + 240 - drag.durationMins)));
+    const snapped = wantSnap
+      ? snapAvoidingJobs(base, drag.durationMins, drag.printerId, drag.jobId)
+      : base;
     const newTop  = Math.max(0, Math.min(snapped, DAY_MINS + 240 - drag.durationMins));
     if (Math.abs(newTop - drag.currentTopMins) >= 1) drag.moved = true;
     drag.currentTopMins = newTop;
@@ -1708,7 +1825,7 @@ function attachDayEvents() {
         moved: false,
         warmUpEl:     colEl.querySelector(`.buffer-block[data-job-id="${jobId}"][data-buffer-type="warmup"]`),
         coolDownEl:   colEl.querySelector(`.buffer-block[data-job-id="${jobId}"][data-buffer-type="cooldown"]`),
-        warmUpMins:   printer?.warm_up_mins  ?? 0,
+        warmUpMins:   job.warm_up_mins ?? printer?.warm_up_mins ?? 0,
         coolDownMins: job.cool_down_mins ?? printer?.cool_down_mins ?? 15,
         printerId:    printer?.id ?? job.printerId,
       };
@@ -1885,7 +2002,7 @@ async function renderWeek() {
 
   const DAY_NAMES = ['Sun','Mon','Tue','Wed','Thu','Fri','Sat'];
 
-  let h = '<div class="week-view"><table class="week-table"><thead><tr>';
+  let h = `<div class="week-view"><table class="week-table" style="--week-rows:${printers.length}"><thead><tr>`;
   h += '<th></th>';
   days.forEach(d => {
     const closed = isDayClosed(d);
@@ -2717,6 +2834,7 @@ async function duplicateJob(jobId) {
     remarks:      job.remarks,
     status:       job.status,
     cool_down_mins: job.cool_down_mins,
+    warm_up_mins: job.warm_up_mins,
     queued:       false,
   });
 }
@@ -2782,6 +2900,7 @@ async function openJobModal(jobId = null, prefill = {}) {
     }
     document.getElementById('job-remarks').value   = job.remarks      ?? '';
     document.getElementById('job-cooldown').value  = job.cool_down_mins ?? '';
+    document.getElementById('job-warmup').value    = job.warm_up_mins ?? '';
     editingJobStatus = job.status ?? 'Planned';
     setQueuedMode(isQueued);
     // Populate queue duration fields
@@ -2815,8 +2934,9 @@ async function openJobModal(jobId = null, prefill = {}) {
     document.getElementById('job-printfile-display').innerHTML = '';
     document.getElementById('job-thumb-group').style.display = 'none';
     document.getElementById('job-remarks').value   = prefill.remarks      ?? '';
-    // Leave blank on create → server snapshots the printer's cool-down.
+    // Leave blank on create → server snapshots the printer's warm-up/cool-down.
     document.getElementById('job-cooldown').value  = prefill.cool_down_mins ?? '';
+    document.getElementById('job-warmup').value    = prefill.warm_up_mins ?? '';
     editingJobStatus = prefill.status ?? 'Planned';
     setQueuedMode(isQueued);
     // Populate queue duration fields from prefill
@@ -2863,6 +2983,8 @@ async function saveJob() {
   // one from the printer on create). A number is a manual per-job override.
   const cooldownRaw  = document.getElementById('job-cooldown').value.trim();
   const coolDownMins = cooldownRaw === '' ? null : (parseInt(cooldownRaw, 10) || 0);
+  const warmupRaw    = document.getElementById('job-warmup').value.trim();
+  const warmUpMins   = warmupRaw === '' ? null : (parseInt(warmupRaw, 10) || 0);
 
   if (!name)      return alert('Please enter a job name.');
   if (!printerId) return alert('Please select a printer.');
@@ -2874,6 +2996,7 @@ async function saveJob() {
     const durationMins = qh * 60 + qm;
     const data = { printerId, name, customerName, orderNr, colors, printFile, bedType, remarks, status, queued: true, durationMins };
     if (coolDownMins != null) data.cool_down_mins = coolDownMins;
+    if (warmUpMins != null) data.warm_up_mins = warmUpMins;
     if (wasEditing) await api('PUT', `/api/jobs/${editJobId}`, data);
     else            await api('POST', '/api/jobs', data);
     closeModal('job-modal');
@@ -2912,6 +3035,7 @@ async function saveJob() {
 
   const data = { printerId, name, customerName, orderNr, colors, printFile, bedType, remarks, start, end, status, queued: false };
   if (coolDownMins != null) data.cool_down_mins = coolDownMins;
+  if (warmUpMins != null) data.warm_up_mins = warmUpMins;
   if (wasEditing) await api('PUT', `/api/jobs/${editJobId}`, data);
   else            await api('POST', '/api/jobs', data);
 
