@@ -583,9 +583,75 @@ app.patch('/api/jobs/:id', (req, res) => {
   }
   res.json({ id: Number(req.params.id), ...req.body, ...Object.fromEntries(fields) });
 });
+// --- Shared helpers for the timed-move routes (push-back / pull-forward) ---
+
+// Load every scheduled (non-queued) job on a printer, with each job's own
+// warm-up/cool-down resolved to ms (falling back to the printer's, then the
+// 5/15-min defaults). `linked_printer_id` is included so the reshove classifier
+// can tell printer-anchored jobs apart.
+function loadPrinterJobs(printerId, printer) {
+  return db.prepare(
+    "SELECT id, name, status, start, end, cool_down_mins, warm_up_mins, linked_printer_id FROM jobs WHERE printerId=? AND queued=0 AND start!=''"
+  ).all(printerId).map(j => ({
+    ...j,
+    coolDownMs: (j.cool_down_mins ?? printer?.cool_down_mins ?? 15) * 60000,
+    warmUpMs: (j.warm_up_mins ?? printer?.warm_up_mins ?? 5) * 60000,
+  }));
+}
+
+// Split a printer's jobs (excluding the anchor) into the sets scheduling.planReshove
+// needs: `movable` = jobs the cascade may push back (Planned/Awaiting, not linked
+// to a printer); `fixed` = everything else (Printing, Awaiting Printer, Done,
+// Paused, or printer-linked) — obstacles the reshove routes around but never moves.
+const RESHOVE_MOVABLE_STATUSES = new Set(['Planned', 'Awaiting']);
+function classifyForReshove(allSamePrinter, anchorId) {
+  const movable = [];
+  const fixed = [];
+  for (const j of allSamePrinter) {
+    if (j.id === anchorId) continue;
+    if (RESHOVE_MOVABLE_STATUSES.has(j.status) && j.linked_printer_id == null) movable.push(j);
+    else fixed.push(j);
+  }
+  return { movable, fixed };
+}
+
+// Build the anchor descriptor planReshove expects from a full job row.
+function buildReshoveAnchor(anchor, printer) {
+  return {
+    id: anchor.id,
+    start: anchor.start,
+    end: anchor.end,
+    coolDownMs: (anchor.cool_down_mins ?? printer?.cool_down_mins ?? 15) * 60000,
+    warmUpMs: (anchor.warm_up_mins ?? printer?.warm_up_mins ?? 5) * 60000,
+  };
+}
+
+// Persist a list of { id, start, end } schedule updates in one transaction.
+function applyJobUpdates(updates) {
+  const upd = db.prepare('UPDATE jobs SET start=?, end=? WHERE id=?');
+  const tx = db.transaction((list) => { for (const u of list) upd.run(u.start, u.end, u.id); });
+  tx(updates);
+}
+
+// The moved job is a manual override: whenever the cascade actually moves it, it
+// must land VERBATIM at the requested slot — even inside silent hours or on a
+// closed day. The existing chain helpers snap the anchor to the next available
+// window; this rewrites the anchor's entry back to the exact target. When the
+// chain no-op'd on the anchor (wrong direction), it isn't in `updates` and we
+// leave that untouched so the "no-op on wrong direction" contract holds.
+function forceAnchorVerbatim(updates, anchorId, toDate, anchorDurMs) {
+  const u = updates.find(x => x.id === anchorId);
+  if (!u) return;
+  u.start = toDate.toISOString();
+  u.end = new Date(toDate.getTime() + anchorDurMs).toISOString();
+}
+
 // Push back a job (and any jobs after it on the same printer) to a later start time.
-// Body: { to?: ISO-or-datetime-local string }. If omitted, defaults to "now".
-// Cascade stops at the first downstream job whose current start is still free.
+// Body: { to?: ISO-or-datetime-local string, reshove?: boolean }. If `to` is omitted,
+// defaults to "now". When the target slot is occupied by a movable job the route
+// returns { needsReshove: true } without writing, unless `reshove` is set — then the
+// whole schedule is re-shoved to make room. Otherwise the cascade stops at the first
+// downstream job whose current start is still free.
 app.post('/api/jobs/:id/push-back', (req, res) => {
   const id = Number(req.params.id);
   const anchor = db.prepare('SELECT * FROM jobs WHERE id=?').get(id);
@@ -605,17 +671,26 @@ app.post('/api/jobs/:id/push-back', (req, res) => {
   const coolDownMs = (printer?.cool_down_mins ?? 15) * 60000;
   const closures = db.prepare('SELECT startDate, endDate FROM closures').all();
 
-  const allSamePrinter = db.prepare(
-    "SELECT id, name, status, start, end, cool_down_mins, warm_up_mins FROM jobs WHERE printerId=? AND queued=0 AND start!=''"
-  ).all(anchor.printerId).map(j => ({
-    ...j,
-    coolDownMs: (j.cool_down_mins ?? printer?.cool_down_mins ?? 15) * 60000,
-    warmUpMs: (j.warm_up_mins ?? printer?.warm_up_mins ?? 5) * 60000,
-  }));
+  const allSamePrinter = loadPrinterJobs(anchor.printerId, printer);
 
   const anchorStartMs = parseJobTime(anchor.start, tz).getTime();
   const CASCADABLE_STATUSES = new Set(['Planned', 'Awaiting']);
 
+  // Does the anchor fit at the requested slot without disturbing a movable job?
+  // If not, either report needsReshove (so the client can confirm) or, once
+  // confirmed, apply the full reshove cascade.
+  const { movable, fixed } = classifyForReshove(allSamePrinter, anchor.id);
+  const anchorObj = buildReshoveAnchor(anchor, printer);
+  const plan = scheduling.planReshove(anchorObj, toDate, restr, closures, movable, fixed, warmUpMs, coolDownMs);
+  if (plan.needsReshove) {
+    if (!req.body?.reshove) {
+      return res.json({ needsReshove: true, updatedCount: 0, updates: [], target: plan.anchorStart });
+    }
+    applyJobUpdates(plan.updates);
+    return res.json({ updatedCount: plan.updates.length, updates: plan.updates, reshoved: true });
+  }
+
+  // Anchor fits — keep the existing tight-pack cascade behaviour.
   // Chain = the anchor plus every downstream cascadable job on this printer.
   const chain = allSamePrinter
     .filter(j => {
@@ -629,10 +704,10 @@ app.post('/api/jobs/:id/push-back', (req, res) => {
   const otherJobs = allSamePrinter.filter(j => !chainIds.has(j.id));
 
   const updates = scheduling.pushBackChain(chain, toDate, restr, closures, otherJobs, warmUpMs, coolDownMs);
+  const anchorDurMs = parseJobTime(anchor.end, tz).getTime() - parseJobTime(anchor.start, tz).getTime();
+  forceAnchorVerbatim(updates, anchor.id, toDate, anchorDurMs);
 
-  const upd = db.prepare('UPDATE jobs SET start=?, end=? WHERE id=?');
-  const tx = db.transaction((list) => { for (const u of list) upd.run(u.start, u.end, u.id); });
-  tx(updates);
+  applyJobUpdates(updates);
 
   res.json({ updatedCount: updates.length, updates });
 });
@@ -671,18 +746,29 @@ app.post('/api/jobs/:id/pull-forward', (req, res) => {
   const coolDownMs = (printer?.cool_down_mins ?? 15) * 60000;
   const closures = db.prepare('SELECT startDate, endDate FROM closures').all();
 
-  const allSamePrinter = db.prepare(
-    "SELECT id, name, status, start, end, cool_down_mins, warm_up_mins FROM jobs WHERE printerId=? AND queued=0 AND start!=''"
-  ).all(anchor.printerId).map(j => ({
-    ...j,
-    coolDownMs: (j.cool_down_mins ?? printer?.cool_down_mins ?? 15) * 60000,
-    warmUpMs: (j.warm_up_mins ?? printer?.warm_up_mins ?? 5) * 60000,
-  }));
+  const allSamePrinter = loadPrinterJobs(anchor.printerId, printer);
 
   const anchorStartMs = parseJobTime(anchor.start, tz).getTime();
   const windowEndMs = windowEnd.getTime();
   const CASCADABLE_STATUSES = new Set(['Planned', 'Awaiting']);
 
+  // Does the anchor fit at the requested (earlier) slot without disturbing a
+  // movable job? If not, report needsReshove so the client can confirm, or —
+  // once confirmed — pin the anchor at the target and push everything at/after
+  // it back one-by-one. The reshove ignores the pull-forward window: reshuffling
+  // to open a slot may cascade far past it.
+  const { movable, fixed } = classifyForReshove(allSamePrinter, anchor.id);
+  const anchorObj = buildReshoveAnchor(anchor, printer);
+  const plan = scheduling.planReshove(anchorObj, toDate, restr, closures, movable, fixed, warmUpMs, coolDownMs);
+  if (plan.needsReshove) {
+    if (!req.body?.reshove) {
+      return res.json({ needsReshove: true, updatedCount: 0, updates: [], target: plan.anchorStart });
+    }
+    applyJobUpdates(plan.updates);
+    return res.json({ updatedCount: plan.updates.length, updates: plan.updates, reshoved: true });
+  }
+
+  // Anchor fits — keep the existing windowed tight-pack cascade behaviour.
   // Chain = the anchor plus every downstream cascadable job on this printer
   // whose current start is inside the window (anchorStart, windowEnd].
   const chain = allSamePrinter
@@ -698,10 +784,10 @@ app.post('/api/jobs/:id/pull-forward', (req, res) => {
   const otherJobs = allSamePrinter.filter(j => !chainIds.has(j.id));
 
   const updates = scheduling.pullForwardChain(chain, toDate, restr, closures, otherJobs, warmUpMs, coolDownMs);
+  const anchorDurMs = parseJobTime(anchor.end, tz).getTime() - parseJobTime(anchor.start, tz).getTime();
+  forceAnchorVerbatim(updates, anchor.id, toDate, anchorDurMs);
 
-  const upd = db.prepare('UPDATE jobs SET start=?, end=? WHERE id=?');
-  const tx = db.transaction((list) => { for (const u of list) upd.run(u.start, u.end, u.id); });
-  tx(updates);
+  applyJobUpdates(updates);
 
   res.json({ updatedCount: updates.length, updates });
 });
