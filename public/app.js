@@ -354,6 +354,8 @@ let topbarLimit      = 3;        // max chips shown; set from /api/config
 let topbarModeCache  = 'pinned'; // 'pinned' | 'active'; loaded on init
 let _lastTopbarIds   = null;     // comma-joined IDs of last rendered chips; null forces a rebuild
 let lastUpcomingHtml = null;     // last markup rendered by renderUpcoming; lets a no-op SSE re-render skip the DOM rebuild
+let lastWeekHtml     = null;     // ditto for renderWeek — skip no-op SSE rebuilds, preserve .week-view scroll
+let lastMonthHtml    = null;     // ditto for renderMonth — skip no-op SSE rebuilds, preserve .month-view scroll
 let bambuAccountEmail = null;    // set when BambuLab account is connected
 let pushSubscribed = false;
 
@@ -1927,7 +1929,22 @@ async function renderWeek() {
   });
 
   h += '</tbody></table></div>';
+
+  // Skip the DOM rebuild when the markup is byte-identical to what's shown — a
+  // no-op SSE re-render would otherwise destroy the .week-view scroll container
+  // and reset scrollTop to 0. The querySelector guard forces a rebuild after a
+  // view switch. Mirrors renderUpcoming/renderMonth.
+  if (h === lastWeekHtml && container.querySelector('.week-view')) return;
+  lastWeekHtml = h;
+
+  const prevScrollTop = container.querySelector('.week-view')?.scrollTop ?? 0;
+
   container.innerHTML = h;
+
+  if (prevScrollTop) {
+    const viewEl = container.querySelector('.week-view');
+    if (viewEl) viewEl.scrollTop = prevScrollTop;
+  }
 
   // Click chip → edit  |  right-click → context menu
   document.querySelectorAll('.week-job-chip').forEach(el => {
@@ -2015,7 +2032,22 @@ async function renderMonth() {
   });
 
   h += '</div></div>';
+
+  // Skip the DOM rebuild when the markup is byte-identical to what's shown — a
+  // no-op SSE re-render would otherwise destroy the .month-view scroll container
+  // and reset scrollTop to 0. The querySelector guard forces a rebuild after a
+  // view switch. Mirrors renderUpcoming/renderWeek.
+  if (h === lastMonthHtml && container.querySelector('.month-view')) return;
+  lastMonthHtml = h;
+
+  const prevScrollTop = container.querySelector('.month-view')?.scrollTop ?? 0;
+
   container.innerHTML = h;
+
+  if (prevScrollTop) {
+    const viewEl = container.querySelector('.month-view');
+    if (viewEl) viewEl.scrollTop = prevScrollTop;
+  }
 
   // Click chip → edit  |  right-click → context menu
   document.querySelectorAll('.month-job-chip').forEach(el => {

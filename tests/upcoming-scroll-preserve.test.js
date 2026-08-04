@@ -59,16 +59,18 @@ function boot() {
 
   window.eval(APP + `
     ;window.__T__ = {
-      renderUpcoming,
-      setEnv(o){ if(o.printers) printers = o.printers; if(o.closures) closures = o.closures; },
+      renderUpcoming, renderWeek, renderMonth,
+      setEnv(o){ if(o.printers) printers = o.printers; if(o.closures) closures = o.closures; if(o.navDate) navDate = o.navDate; },
       neutralize(){ init = function(){}; addLongPress = function(){}; },
     };`);
 
   const T = window.__T__;
   T.neutralize();
+  const nav = new Date(); nav.setHours(0, 0, 0, 0);
   T.setEnv({
     printers: [{ id: 5, name: 'Bambulab H2C', color: '#0088cc', brand: 'bambulab' }],
     closures: [],
+    navDate: nav,
   });
   return T;
 }
@@ -106,5 +108,80 @@ describe('Upcoming view — scroll survives background refresh', () => {
     expect(after).not.toBe(before);      // node was rebuilt (real change)
     expect(document.querySelectorAll('.upcoming-job-row').length).toBe(3); // list updated
     expect(after.scrollTop).toBe(240);   // but scroll was restored, not reset to 0
+  });
+});
+
+// Week + Month carry the identical SSE-poll scroll-reset bug (renderWeek /
+// renderMonth ended with a plain innerHTML swap). Same fix, same assertions.
+// Jobs sit on today (offset 0) so they land in the current week and month grid.
+describe('Week view — scroll survives background refresh', () => {
+  let T;
+
+  beforeEach(async () => {
+    JOBS = [job(801, 'Alpha', 0), job(802, 'Beta', 0)];
+    T = boot();
+    await T.renderWeek();
+  });
+
+  test('unchanged payload skips the DOM rebuild (same node, scrollTop kept)', async () => {
+    const before = document.querySelector('.week-view');
+    expect(before).not.toBeNull();
+    before.scrollTop = 240;
+
+    await T.renderWeek();
+
+    const after = document.querySelector('.week-view');
+    expect(after).toBe(before);
+    expect(after.scrollTop).toBe(240);
+  });
+
+  test('changed payload updates the grid AND restores scrollTop', async () => {
+    const before = document.querySelector('.week-view');
+    before.scrollTop = 240;
+    expect(document.querySelectorAll('.week-job-chip').length).toBe(2);
+
+    JOBS = [job(801, 'Alpha', 0), job(802, 'Beta', 0), job(803, 'Gamma', 0)];
+    await T.renderWeek();
+
+    const after = document.querySelector('.week-view');
+    expect(after).not.toBe(before);
+    expect(document.querySelectorAll('.week-job-chip').length).toBe(3);
+    expect(after.scrollTop).toBe(240);
+  });
+});
+
+describe('Month view — scroll survives background refresh', () => {
+  let T;
+
+  beforeEach(async () => {
+    JOBS = [job(701, 'Alpha', 0), job(702, 'Beta', 0)];
+    T = boot();
+    await T.renderMonth();
+  });
+
+  test('unchanged payload skips the DOM rebuild (same node, scrollTop kept)', async () => {
+    const before = document.querySelector('.month-view');
+    expect(before).not.toBeNull();
+    before.scrollTop = 240;
+
+    await T.renderMonth();
+
+    const after = document.querySelector('.month-view');
+    expect(after).toBe(before);
+    expect(after.scrollTop).toBe(240);
+  });
+
+  test('changed payload updates the grid AND restores scrollTop', async () => {
+    const before = document.querySelector('.month-view');
+    before.scrollTop = 240;
+    expect(document.querySelectorAll('.month-job-chip').length).toBe(2);
+
+    JOBS = [job(701, 'Alpha', 0), job(702, 'Beta', 0), job(703, 'Gamma', 0)];
+    await T.renderMonth();
+
+    const after = document.querySelector('.month-view');
+    expect(after).not.toBe(before);
+    expect(document.querySelectorAll('.month-job-chip').length).toBe(3);
+    expect(after.scrollTop).toBe(240);
   });
 });
