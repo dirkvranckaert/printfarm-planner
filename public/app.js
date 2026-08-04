@@ -353,6 +353,7 @@ let printerStatus    = {};       // keyed by "brand:serial" — live status from
 let topbarLimit      = 3;        // max chips shown; set from /api/config
 let topbarModeCache  = 'pinned'; // 'pinned' | 'active'; loaded on init
 let _lastTopbarIds   = null;     // comma-joined IDs of last rendered chips; null forces a rebuild
+let lastUpcomingHtml = null;     // last markup rendered by renderUpcoming; lets a no-op SSE re-render skip the DOM rebuild
 let bambuAccountEmail = null;    // set when BambuLab account is connected
 let pushSubscribed = false;
 
@@ -2103,7 +2104,27 @@ async function renderUpcoming() {
   }
 
   h += '</div>';
+
+  // Skip the DOM rebuild entirely when the markup is byte-identical to what's
+  // already shown. Background SSE frames (renderCalendar → renderUpcoming) fire
+  // every few seconds; when nothing changed, rebuilding innerHTML would destroy
+  // the .upcoming-view scroll container and reset scrollTop to 0, yanking the
+  // user back to the top mid-edit. The querySelector guard forces a rebuild
+  // after a view switch (container no longer holds .upcoming-view even if the
+  // cached HTML matches).
+  if (h === lastUpcomingHtml && container.querySelector('.upcoming-view')) return;
+  lastUpcomingHtml = h;
+
+  // When the data DID change, preserve scroll across the innerHTML swap so the
+  // re-render doesn't reset the user's position (mirrors renderDay's approach).
+  const prevScrollTop = container.querySelector('.upcoming-view')?.scrollTop ?? 0;
+
   container.innerHTML = h;
+
+  if (prevScrollTop) {
+    const viewEl = container.querySelector('.upcoming-view');
+    if (viewEl) viewEl.scrollTop = prevScrollTop;
+  }
 
   container.querySelectorAll('.upcoming-job-row[data-job-id]').forEach(el => {
     el.addEventListener('click', e => {
