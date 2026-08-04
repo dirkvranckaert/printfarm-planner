@@ -494,6 +494,15 @@ body {
   font-size: 11px;
 }
 [data-theme="dark"] .job-block-customer { opacity: 1; }
+.job-block-project {
+  display: block;
+  opacity: .7;
+  white-space: nowrap;
+  overflow: hidden;
+  text-overflow: ellipsis;
+  font-size: 11px;
+}
+[data-theme="dark"] .job-block-project { opacity: 1; }
 
 /* Buffer blocks (warm-up / cool-down) */
 .buffer-block {
