@@ -494,7 +494,7 @@ async function init() {
   }
   renderTopbarStatus();
   setupListeners();
-  setInterval(() => { updateNowLine(); renderTopbarStatus(); }, 60_000);
+  setInterval(() => { updateNowLine(); renderTopbarStatus(); updateTodayButton(); }, 60_000);
   if (printers.length === 0) openPrintersModal();
 }
 
@@ -1058,6 +1058,29 @@ function updateHeader() {
     const btn = document.getElementById(`btn-${v}`);
     if (btn) btn.classList.toggle('active', view === v);
   });
+  updateTodayButton();
+}
+
+// Is "today" currently visible in the active view?
+function isTodayInView() {
+  const today = todayMidnight();
+  if (view === 'day')   return sameDay(navDate, today);
+  if (view === 'week')  { const ws = weekStart(navDate); return today >= ws && today < addDays(ws, 7); }
+  if (view === 'month') return navDate.getFullYear() === today.getFullYear() && navDate.getMonth() === today.getMonth();
+  return true; // upcoming is always anchored at today
+}
+
+// Reflect today-in-view on the Today button: when today is already shown the
+// button reads "active" and is disabled (nothing to jump to); otherwise it's the
+// default clickable state that jumps to today. Re-evaluated on every render AND
+// on the 1-min tick, so leaving the view open across midnight re-enables it.
+function updateTodayButton() {
+  const btn = document.getElementById('btn-today');
+  if (!btn) return;
+  const showingToday = isTodayInView();
+  btn.classList.toggle('is-today', showingToday);
+  btn.disabled = showingToday;
+  btn.title = showingToday ? 'Today is shown' : 'Jump to today';
 }
 
 // =============================================================================

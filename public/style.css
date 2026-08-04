@@ -306,6 +306,18 @@ body {
 .btn-danger:hover { background: var(--danger); color: #fff; }
 .btn-nav      { background: var(--surface); color: var(--text); border-color: var(--border); padding: 6px 11px; font-size: 17px; line-height: 1; }
 .btn-nav:hover { background: var(--bg); }
+/* Today button: default surface state = "not showing today", clickable → jumps
+   to today. The .is-today state marks today already in view: a filled accent
+   look, not clickable (also disabled). opacity/cursor override the browser's
+   default disabled dimming so it reads as "active", not "greyed out". */
+#btn-today.is-today {
+  background: var(--primary);
+  color: #fff;
+  border-color: var(--primary);
+  cursor: default;
+  opacity: 1;
+}
+#btn-today.is-today:hover { background: var(--primary); }
 .btn-view     { background: var(--surface); color: var(--text-muted); border-color: var(--border); padding: 5px 12px; }
 .btn-view:hover { color: var(--text); background: var(--bg); }
 .btn-view.active { background: var(--primary); color: #fff; border-color: var(--primary); }
