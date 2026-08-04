@@ -7,6 +7,7 @@ const {
   findNextValidStart,
   pushBackChain,
   pullForwardChain,
+  planReshove,
 } = require('../scheduling');
 
 const TZ = 'Europe/Brussels';
@@ -580,5 +581,135 @@ describe('snapAvoidingJobs (queue-drop buffer-aware snapping)', () => {
     const jobs = { 100: { id: 100, queued: false, printerId: 1, start: m2iso(30), end: m2iso(60) } };
     const snap = makeSnapAvoidingJobs({ printers: [PRINTER], jobs, navDate });
     expect(snap(0, 60, 1, null)).toBe(0);
+  });
+});
+
+describe('planReshove', () => {
+  const restr = {
+    enabled: true,
+    silentStart: '21:00',
+    silentEnd: '06:30',
+    closedDays: [6], // Saturday
+    timezone: TZ,
+  };
+  const warmUp = 5 * 60000;
+  const coolDown = 15 * 60000;
+
+  // Movable job factory (Planned).
+  const job = (id, startISO, endISO) => ({ id, start: startISO, end: endISO, status: 'Planned' });
+  const anchorJob = (startISO, endISO) => ({ id: 1, start: startISO, end: endISO });
+
+  test('no reshuffle needed: free later slot → needsReshove false, anchor at verbatim target', () => {
+    // Anchor 08:00–09:00, one movable job far away at 18:00. Push anchor to 10:00 (free).
+    const anchor = anchorJob('2026-04-13T06:00:00.000Z', '2026-04-13T07:00:00.000Z'); // 08:00–09:00 Brussels
+    const movable = [job(2, '2026-04-13T16:00:00.000Z', '2026-04-13T17:00:00.000Z')]; // 18:00 Brussels
+    const to = utc('2026-04-13T08:00:00.000Z'); // 10:00 Brussels
+    const plan = planReshove(anchor, to, restr, [], movable, [], warmUp, coolDown);
+    expect(plan.needsReshove).toBe(false);
+    expect(plan.updates).toHaveLength(1);
+    expect(plan.updates[0]).toMatchObject({ id: 1, start: '2026-04-13T08:00:00.000Z', end: '2026-04-13T09:00:00.000Z' });
+  });
+
+  test('occupied slot: anchor lands EXACTLY at target, blocking job shoved back', () => {
+    // Anchor future at 14:00; a movable job occupies 10:00–11:00. Pull anchor to 10:00.
+    const anchor = anchorJob('2026-04-13T12:00:00.000Z', '2026-04-13T13:00:00.000Z'); // 14:00–15:00 Brussels
+    const movable = [job(2, '2026-04-13T08:00:00.000Z', '2026-04-13T09:00:00.000Z')]; // 10:00–11:00 Brussels
+    const to = utc('2026-04-13T08:00:00.000Z'); // 10:00 Brussels — right on the blocker
+    const plan = planReshove(anchor, to, restr, [], movable, [], warmUp, coolDown);
+    expect(plan.needsReshove).toBe(true);
+    // Anchor verbatim at the requested slot.
+    expect(plan.updates[0]).toMatchObject({ id: 1, start: '2026-04-13T08:00:00.000Z', end: '2026-04-13T09:00:00.000Z' });
+    // Blocker packed right after the anchor: anchorEnd 09:00Z + cool15 + warm5 = 09:20Z.
+    expect(plan.updates[1]).toMatchObject({ id: 2, start: '2026-04-13T09:20:00.000Z', end: '2026-04-13T10:20:00.000Z' });
+  });
+
+  test('anchor placed VERBATIM even inside silent hours (manual override, no snap)', () => {
+    // Push anchor to 22:00 Brussels (inside 21:00–06:30 silent window). A movable job
+    // sits at 22:00–23:00 so a reshuffle is triggered; the ANCHOR must still land at 22:00.
+    const anchor = anchorJob('2026-04-13T06:00:00.000Z', '2026-04-13T07:00:00.000Z'); // 08:00–09:00 Brussels
+    const movable = [job(2, '2026-04-13T20:00:00.000Z', '2026-04-13T21:00:00.000Z')]; // 22:00–23:00 Brussels
+    const to = utc('2026-04-13T20:00:00.000Z'); // 22:00 Brussels — inside silent hours
+    const plan = planReshove(anchor, to, restr, [], movable, [], warmUp, coolDown);
+    expect(plan.needsReshove).toBe(true);
+    // Anchor sits verbatim inside the silent window.
+    const ap = getZoneParts(new Date(plan.updates[0].start), TZ);
+    expect(ap).toMatchObject({ day: 13, hour: 22, minute: 0 });
+  });
+
+  test('CASCADE jobs respect silent hours: shoved job skips to next-day 06:30', () => {
+    // Anchor pushed to 20:30 Brussels; a movable job right behind it would land inside
+    // the silent window and must skip to the next 06:30.
+    const anchor = anchorJob('2026-04-13T06:00:00.000Z', '2026-04-13T07:00:00.000Z'); // 1h job
+    const movable = [job(2, '2026-04-13T18:40:00.000Z', '2026-04-13T20:40:00.000Z')]; // 20:40–22:40 Brussels, >= to
+    const to = utc('2026-04-13T18:30:00.000Z'); // 20:30 Brussels
+    const plan = planReshove(anchor, to, restr, [], movable, [], warmUp, coolDown);
+    expect(plan.needsReshove).toBe(true);
+    // Anchor verbatim 20:30–21:30 Brussels.
+    expect(getZoneParts(new Date(plan.updates[0].start), TZ).hour).toBe(20);
+    // Cascade job candidate = 21:30 + 20m = 21:50 Brussels → silent → next-day 06:30.
+    const j2 = getZoneParts(new Date(plan.updates[1].start), TZ);
+    expect(j2).toMatchObject({ day: 14, hour: 6, minute: 30 });
+  });
+
+  test('CASCADE jobs respect closed days: shoved job skips a Saturday closure', () => {
+    // Friday anchor late; the shoved job would land Saturday (closedDays [6]) → skip to Sunday 06:30.
+    // 2026-04-17 is a Friday, 2026-04-18 Saturday, 2026-04-19 Sunday.
+    const anchor = anchorJob('2026-04-17T17:00:00.000Z', '2026-04-17T18:30:00.000Z'); // 19:00–20:30 Brussels Fri
+    const movable = [job(2, '2026-04-17T18:40:00.000Z', '2026-04-17T19:40:00.000Z')]; // 20:40 Brussels Fri
+    const to = utc('2026-04-17T18:00:00.000Z'); // 20:00 Brussels Fri, pushes anchor to ~21:30 end
+    const plan = planReshove(anchor, to, restr, [], movable, [], warmUp, coolDown);
+    expect(plan.needsReshove).toBe(true);
+    // Cascade job pushed into Fri silent hours → next 06:30 lands Saturday (closed) → Sunday 06:30.
+    const j2 = getZoneParts(new Date(plan.updates[1].start), TZ);
+    expect(j2.weekday).not.toBe(6); // never a Saturday
+    expect(j2).toMatchObject({ day: 19, hour: 6, minute: 30 }); // Sunday 06:30
+  });
+
+  test('CASCADE respects closures range', () => {
+    const closures = [{ startDate: '2026-04-14', endDate: '2026-04-14' }];
+    // Anchor Monday 2026-04-13 pushed late so the shoved job lands 2026-04-14 (closed) → 04-15 06:30.
+    const anchor = anchorJob('2026-04-13T17:00:00.000Z', '2026-04-13T18:30:00.000Z'); // 19:00–20:30 Brussels
+    const movable = [job(2, '2026-04-13T18:40:00.000Z', '2026-04-13T19:40:00.000Z')];
+    const to = utc('2026-04-13T18:00:00.000Z');
+    const plan = planReshove(anchor, to, restr, closures, movable, [], warmUp, coolDown);
+    expect(plan.needsReshove).toBe(true);
+    const j2 = getZoneParts(new Date(plan.updates[1].start), TZ);
+    expect(j2).toMatchObject({ day: 15, hour: 6, minute: 30 }); // skipped the 04-14 closure
+  });
+
+  test('long cascade: three movable jobs all shove back one-by-one', () => {
+    // Anchor pulled onto a tight back-to-back run of three jobs; all three shove.
+    const anchor = anchorJob('2026-04-13T14:00:00.000Z', '2026-04-13T15:00:00.000Z'); // far future
+    const movable = [
+      job(2, '2026-04-13T08:00:00.000Z', '2026-04-13T09:00:00.000Z'), // 10:00–11:00 Brussels
+      job(3, '2026-04-13T09:20:00.000Z', '2026-04-13T10:20:00.000Z'), // back-to-back (20m buffer)
+      job(4, '2026-04-13T10:40:00.000Z', '2026-04-13T11:40:00.000Z'),
+    ];
+    const to = utc('2026-04-13T08:00:00.000Z'); // pull anchor onto the first job
+    const plan = planReshove(anchor, to, restr, [], movable, [], warmUp, coolDown);
+    expect(plan.needsReshove).toBe(true);
+    // anchor + all three cascaded.
+    expect(plan.updates.map(u => u.id)).toEqual([1, 2, 3, 4]);
+    // Each packs 20m (cool15+warm5) behind the previous.
+    expect(plan.updates[0]).toMatchObject({ start: '2026-04-13T08:00:00.000Z', end: '2026-04-13T09:00:00.000Z' });
+    expect(plan.updates[1].start).toBe('2026-04-13T09:20:00.000Z');
+    expect(plan.updates[2].start).toBe('2026-04-13T10:40:00.000Z');
+    expect(plan.updates[3].start).toBe('2026-04-13T12:00:00.000Z');
+  });
+
+  test('immovable (fixed) jobs are never moved, only routed around', () => {
+    // Anchor pulled to 10:00; a movable job at 10:00 must shove, a Printing job at
+    // 12:00–13:00 is fixed and the cascade must skip past it (never appears in updates).
+    const anchor = anchorJob('2026-04-13T14:00:00.000Z', '2026-04-13T15:00:00.000Z');
+    const movable = [job(2, '2026-04-13T08:00:00.000Z', '2026-04-13T09:00:00.000Z')]; // 10:00–11:00 Brussels
+    const fixed = [{ id: 9, start: '2026-04-13T10:00:00.000Z', end: '2026-04-13T11:00:00.000Z' }]; // 12:00–13:00 Brussels
+    const to = utc('2026-04-13T08:00:00.000Z');
+    const plan = planReshove(anchor, to, restr, [], movable, fixed, warmUp, coolDown);
+    expect(plan.needsReshove).toBe(true);
+    // The fixed job id 9 must not be in the updates.
+    expect(plan.updates.map(u => u.id)).not.toContain(9);
+    // Movable job would pack at 09:20Z but that overlaps the fixed 10:00Z–11:00Z (+buffers)
+    // → skips to fixed end 11:00Z + cool15 + warm5 = 11:20Z.
+    expect(plan.updates[1].start).toBe('2026-04-13T11:20:00.000Z');
   });
 });
