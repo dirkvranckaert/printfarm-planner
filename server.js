@@ -804,13 +804,14 @@ app.post('/api/jobs/:id/pull-forward', (req, res) => {
     );
     if (fitStart.getTime() <= windowEnd.getTime()) {
       // Clean fit — no reshuffle. Chain = the anchor + downstream cascadable,
-      // non-linked jobs inside the window. Linked jobs are immovable → otherJobs.
+      // non-linked, UNLOCKED jobs inside the window. Linked or locked jobs are
+      // immovable → they stay in otherJobs as obstacles, never tight-packed.
       const windowEndMs = windowEnd.getTime();
       const CASCADABLE_STATUSES = new Set(['Planned', 'Awaiting']);
       const chain = allSamePrinter
         .filter(j => {
           if (j.id === anchor.id) return true;
-          if (!CASCADABLE_STATUSES.has(j.status) || j.linked_printer_id != null) return false;
+          if (!CASCADABLE_STATUSES.has(j.status) || j.linked_printer_id != null || j.locked) return false;
           const s = parseJobTime(j.start, tz).getTime();
           return s > anchorStartMs && s <= windowEndMs;
         })

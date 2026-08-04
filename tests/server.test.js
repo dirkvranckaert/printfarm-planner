@@ -723,6 +723,22 @@ describe('lockable jobs — immovability via the real routes (supertest)', () =>
     expect(getJob(lockedBlocker).end).toBe(iso('2026-04-13T13:00:00Z'));
   });
 
+  test('pull-forward WINDOW mode never tight-packs a downstream locked job', async () => {
+    const anchor = addJob('2026-04-13T14:00:00Z', '2026-04-13T15:00:00Z');                 // future anchor
+    const lockedDownstream = addJob('2026-04-13T16:00:00Z', '2026-04-13T17:00:00Z', { locked: 1 }); // in window, downstream
+    // Window [08:00, 20:00] spans the locked job. Without the guard the window
+    // chain would pull the locked job forward to pack behind the anchor.
+    const r = await request(app).post(`/api/jobs/${anchor}/pull-forward`)
+      .set('Cookie', authCookie)
+      .send({ to: '2026-04-13T08:00:00Z', windowEnd: '2026-04-13T20:00:00Z' });
+    expect(r.status).toBe(200);
+    // Anchor moved into the window gap...
+    expect(new Date(getJob(anchor).start).getTime()).toBeLessThan(new Date('2026-04-13T14:00:00Z').getTime());
+    // ...but the locked downstream job is byte-unchanged.
+    expect(getJob(lockedDownstream).start).toBe(iso('2026-04-13T16:00:00Z'));
+    expect(getJob(lockedDownstream).end).toBe(iso('2026-04-13T17:00:00Z'));
+  });
+
   test('lock toggle blocked while Printing (409)', async () => {
     const id = addJob('2026-04-13T06:00:00Z', '2026-04-13T07:00:00Z', { status: 'Printing' });
     const r = await request(app).patch(`/api/jobs/${id}`).set('Cookie', authCookie).send({ locked: 1 });

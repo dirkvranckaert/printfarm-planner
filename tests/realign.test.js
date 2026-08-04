@@ -427,4 +427,68 @@ describe('realignLinkedJob — Part 3 delay-conflict with a locked job', () => {
     // Marked as already-notified so it never fires for this pre-existing overlap.
     expect(getJob(db, current.id).conflict_notified).toBe(1);
   });
+
+  // The notify logic is decoupled from the 2-min realign MOVE threshold: a delay
+  // that only pushes the end a little (<2min) still creates a real conflict.
+  // Current 08:00–09:00, locked right behind at 09:01–10:00 (1-min gap).
+  function setupTight(db) {
+    const printer = addPrinter(db);
+    const current = addJob(db, printer.id, {
+      name: 'Current', status: 'Printing',
+      start: '2026-04-13T08:00:00.000Z', end: '2026-04-13T09:00:00.000Z',
+      linked_printer_id: printer.id,
+    });
+    const locked = addJob(db, printer.id, {
+      name: 'Locked', status: 'Planned',
+      start: '2026-04-13T09:01:00.000Z', end: '2026-04-13T10:00:00.000Z',
+      locked: 1,
+    });
+    return { printer, current, locked };
+  }
+
+  test('sub-threshold delay that crosses into a locked job still notifies once', () => {
+    const db = makeDb();
+    const { printer, current } = setupTight(db);
+
+    // 1.5-min remaining at 09:00 → predicted end 09:01:30, +1.5min late (< 2min
+    // threshold). The block does NOT move, but the predicted end crosses the
+    // locked start (09:01) → notify.
+    const res = realignLinkedJob({
+      db, printer, job: getJob(db, current.id), remainingMins: 1.5,
+      now: new Date('2026-04-13T09:00:00.000Z'), restr: RESTR,
+    });
+    expect(res.changed).toBe(false);          // sub-threshold: block not moved
+    expect(res.notifyLockedConflict).toBe(true);
+    expect(getJob(db, current.id).conflict_notified).toBe(1);
+    // Block left in place.
+    expect(getJob(db, current.id).end).toBe('2026-04-13T09:00:00.000Z');
+
+    // Next sub-threshold tick, still overlapping → no repeat.
+    const res2 = realignLinkedJob({
+      db, printer, job: getJob(db, current.id), remainingMins: 1.5,
+      now: new Date('2026-04-13T09:00:00.000Z'), restr: RESTR,
+    });
+    expect(res2.notifyLockedConflict).toBe(false);
+  });
+
+  test('overlap cleared by a sub-threshold move re-arms → later re-delay notifies', () => {
+    const db = makeDb();
+    const { printer, current } = setupTight(db);
+    const now = new Date('2026-04-13T09:00:00.000Z');
+
+    // Overlap + notify (sub-threshold).
+    realignLinkedJob({ db, printer, job: getJob(db, current.id), remainingMins: 1.5, now, restr: RESTR });
+    expect(getJob(db, current.id).conflict_notified).toBe(1);
+
+    // 0.5-min remaining → predicted end 09:00:30, below the locked start (09:01)
+    // and a <2min move → block stays put, but the overlap is gone → re-arm.
+    const rClear = realignLinkedJob({ db, printer, job: getJob(db, current.id), remainingMins: 0.5, now, restr: RESTR });
+    expect(rClear.changed).toBe(false);
+    expect(rClear.notifyLockedConflict).toBe(false);
+    expect(getJob(db, current.id).conflict_notified).toBe(0);
+
+    // Re-delayed → overlaps again → notifies again.
+    const rAgain = realignLinkedJob({ db, printer, job: getJob(db, current.id), remainingMins: 1.5, now, restr: RESTR });
+    expect(rAgain.notifyLockedConflict).toBe(true);
+  });
 });
