@@ -308,6 +308,119 @@ function pullForwardChain(chain, to, restr, closures, otherJobs, warmUpMs, coolD
   return updates;
 }
 
+// Statuses/flags that make a job movable by the reshove / pull-forward planner.
+// Mirrors server.js classifyForReshove: a Planned/Awaiting job that is neither
+// printer-linked nor locked can be shoved; everything else is immovable.
+const MOVABLE_STATUSES = new Set(['Planned', 'Awaiting']);
+function isImmovableJob(j) {
+  return !(MOVABLE_STATUSES.has(j.status) && j.linked_printer_id == null && !j.locked);
+}
+
+/**
+ * First UNAVAILABLE instant strictly after `from` (which must itself be an
+ * available/working instant). Availability is exactly what findNextValidStart
+ * gates on — silent hours, closed weekdays and closure ranges — so this is the
+ * soonest of: the next silent-window start, the next closed-day midnight, and the
+ * next closure start. Returns a far-future instant when nothing is configured.
+ * Companion to findNextValidStart (which finds the next AVAILABLE instant); the
+ * two together let availableMsBetween walk working time without re-deriving the
+ * timezone / silent-hours math.
+ */
+function nextUnavailableStart(from, restr, closures) {
+  const tz = restr?.timezone || DEFAULT_TZ;
+  const fromMs = from.getTime();
+  const cands = [];
+  if (restr?.silentStart && restr?.silentEnd) {
+    const [sh, sm] = restr.silentStart.split(':').map(Number);
+    const p = getZoneParts(from, tz);
+    let s = zonedTimeToDate(p.year, p.month, p.day, sh, sm || 0, tz);
+    if (s.getTime() <= fromMs) s = zonedTimeToDate(p.year, p.month, p.day + 1, sh, sm || 0, tz);
+    cands.push(s.getTime());
+  }
+  if (restr?.closedDays?.length) {
+    for (let d = 0; d <= 8; d++) {
+      const probe = new Date(fromMs + d * 86400000);
+      const pp = getZoneParts(probe, tz);
+      if (restr.closedDays.includes(pp.weekday)) {
+        const midnight = zonedTimeToDate(pp.year, pp.month, pp.day, 0, 0, tz);
+        if (midnight.getTime() > fromMs) { cands.push(midnight.getTime()); break; }
+      }
+    }
+  }
+  for (const cl of closures || []) {
+    const [sy, sm2, sd] = cl.startDate.split('-').map(Number);
+    const clStart = zonedTimeToDate(sy, sm2, sd, 0, 0, tz);
+    if (clStart.getTime() > fromMs) cands.push(clStart.getTime());
+  }
+  if (!cands.length) return new Date(fromMs + 30 * 86400000);
+  return new Date(Math.min(...cands));
+}
+
+/**
+ * Working-time (available) milliseconds between two instants: the wall-clock span
+ * [t1, t2] MINUS any silent-hours / closed-day / closure time inside it. Reuses
+ * findNextValidStart to skip non-available regions, so "available" means exactly
+ * what the scheduler places jobs in.
+ *
+ * Used by the pull-forward "move following chain" selection: a pair of jobs
+ * "closely follows" when the working gap between them is small even if a large
+ * chunk of silent/closed clock time sits in between (e.g. a job ending 01:00 and
+ * the next starting the following 06:30 has a ZERO working gap).
+ */
+function availableMsBetween(t1, t2, restr, closures) {
+  const endMs = t2.getTime();
+  if (endMs <= t1.getTime()) return 0;
+  let total = 0;
+  let cursor = t1;
+  let guard = 0;
+  while (cursor.getTime() < endMs && guard++ < 2000) {
+    const runStart = findNextValidStart(cursor, 0, restr, closures, [], 0, 0);
+    if (runStart.getTime() >= endMs) break;
+    const runEnd = nextUnavailableStart(runStart, restr, closures);
+    const spanEnd = Math.min(runEnd.getTime(), endMs);
+    total += spanEnd - runStart.getTime();
+    cursor = runEnd;
+  }
+  return total;
+}
+
+/**
+ * Select the anchor's following "tightly-packed run" for a pull-forward block move.
+ *
+ * Walks the same-printer jobs AFTER the anchor in start order and returns the
+ * maximal contiguous run of movable jobs where each consecutive pair's
+ * working-time gap (silent hours / closed days excluded, via availableMsBetween)
+ * is <= maxGapMs. Selection STOPS — and the terminator is NOT included — at the
+ * first job whose working gap exceeds maxGapMs OR that is immovable (locked /
+ * Printing / Awaiting Printer / printer-linked / Done / Paused). An immovable job
+ * is a HARD terminator: nothing after it is selected either.
+ *
+ * @param {object} anchor     { start, end } of the anchor (right-clicked job).
+ * @param {Array}  laterJobs  Same-printer jobs with start > anchor.start, each
+ *                            carrying start/end + status/locked/linked_printer_id.
+ * @param {object} restr      Scheduling restrictions.
+ * @param {Array}  closures   Closure ranges.
+ * @param {number} maxGapMs   Working-gap threshold (default 30 min).
+ * @returns {Array} the selected followers in start order (excludes the anchor).
+ */
+function selectFollowingChain(anchor, laterJobs, restr, closures, maxGapMs = 30 * 60000) {
+  const tz = restr?.timezone || DEFAULT_TZ;
+  const sorted = [...(laterJobs || [])]
+    .filter(j => j.start)
+    .sort((a, b) => parseJobTime(a.start, tz).getTime() - parseJobTime(b.start, tz).getTime());
+  const chain = [];
+  let prevEnd = parseJobTime(anchor.end, tz);
+  for (const job of sorted) {
+    if (isImmovableJob(job)) break; // hard terminator: stop, do not include
+    const jStart = parseJobTime(job.start, tz);
+    const gap = availableMsBetween(prevEnd, jStart, restr, closures);
+    if (gap > maxGapMs) break;
+    chain.push(job);
+    prevEnd = parseJobTime(job.end, tz);
+  }
+  return chain;
+}
+
 /**
  * Plan a "reshove" move: place the anchor VERBATIM at `to` and push every movable
  * job from that slot onward back one-by-one so the schedule stays tightly packed.
@@ -337,13 +450,21 @@ function pullForwardChain(chain, to, restr, closures, otherJobs, warmUpMs, coolD
  *                             cascade routes around but never moves.
  * @param {number} warmUpMs    Anchor warm-up fallback (ms).
  * @param {number} coolDownMs  Anchor cool-down fallback (ms).
+ * @param {Array}  chainFollowers  OPTIONAL. The pull-forward "move following chain"
+ *                             block: jobs selected by selectFollowingChain that
+ *                             travel WITH the anchor (packed right behind it,
+ *                             availability-aware) instead of being reshoved. They
+ *                             are excluded from the reshove pool and ALWAYS move
+ *                             (the user asked to pull the whole block forward), so
+ *                             `needsReshove` counts only NON-chain jobs that had to
+ *                             yield. Defaults to [] → classic single-anchor reshove.
  * @returns {{ needsReshove: boolean, anchorStart: string, updates: Array<{id,start,end}> }}
- *          `updates[0]` is always the anchor at its verbatim slot; the rest are the
- *          cascaded jobs in order. `needsReshove` is true iff placing the anchor
- *          verbatim forces at least one movable job to move — i.e. the slot was
- *          occupied and a reshuffle is required.
+ *          `updates[0]` is always the anchor at its verbatim slot; then the chain
+ *          followers in order; then the cascaded non-chain jobs. `needsReshove` is
+ *          true iff placing the block forces at least one NON-chain movable job to
+ *          move — i.e. the slot was occupied and a reshuffle is required.
  */
-function planReshove(anchor, to, restr, closures, movable, fixed, warmUpMs, coolDownMs) {
+function planReshove(anchor, to, restr, closures, movable, fixed, warmUpMs, coolDownMs, chainFollowers = []) {
   const tz = restr?.timezone || DEFAULT_TZ;
   const aWarmMs = anchor.warmUpMs != null ? anchor.warmUpMs : warmUpMs;
   const aCoolMs = anchor.coolDownMs != null ? anchor.coolDownMs : coolDownMs;
@@ -353,51 +474,80 @@ function planReshove(anchor, to, restr, closures, movable, fixed, warmUpMs, cool
 
   const toMs = to.getTime();
   const startMs = (j) => parseJobTime(j.start, tz).getTime();
+  const endMsOf = (j) => parseJobTime(j.end, tz).getTime();
+  const coolOf = (j) => (j.coolDownMs != null ? j.coolDownMs : coolDownMs);
+  const warmOf = (j) => (j.warmUpMs != null ? j.warmUpMs : warmUpMs);
+
+  // Chain followers travel WITH the anchor as one pulled-forward block. Exclude
+  // them from the reshove pool so they are never double-counted as movers.
+  const followers = chainFollowers || [];
+  const followerIds = new Set(followers.map((f) => f.id));
+  const movableList = (movable || []).filter((j) => !followerIds.has(j.id));
+
+  // Obstacles the cascade routes around but never moves. Block followers avoid
+  // these too — an immovable job can never be packed over.
+  const obstacles = [...(fixed || [])];
 
   // The anchor's own buffered footprint at the requested slot.
   const aBufStart = toMs - aWarmMs;
   const aBufEnd = toMs + aDurMs + aCoolMs;
   // A job's buffered interval [start - warmUp, end + coolDown].
-  const bufInterval = (j) => {
-    const s = startMs(j) - (j.warmUpMs != null ? j.warmUpMs : warmUpMs);
-    const e = parseJobTime(j.end, tz).getTime() + (j.coolDownMs != null ? j.coolDownMs : coolDownMs);
-    return [s, e];
-  };
+  const bufInterval = (j) => [startMs(j) - warmOf(j), endMsOf(j) + coolOf(j)];
   const overlapsAnchor = (j) => {
     const [s, e] = bufInterval(j);
     return aBufStart < e && aBufEnd > s;
   };
-
-  // Partition movable jobs into MOVERS (must reshove) and OBSTACLES (stay put).
-  // A movable job moves if it starts at/after the target OR its buffered print
-  // interval intersects the anchor's buffered slot — a job that starts before
-  // `to` but spans it is in the way and must be shoved, not treated as fixed.
-  const movers = [];
-  const obstacles = [...(fixed || [])];
-  for (const j of (movable || [])) {
-    if (!j.start) { obstacles.push(j); continue; }
-    if (startMs(j) >= toMs || overlapsAnchor(j)) movers.push(j);
-    else obstacles.push(j);
-  }
-  movers.sort((a, b) => startMs(a) - startMs(b));
 
   // Anchor: verbatim at the requested slot. No availability snap — manual override.
   const anchorStart = new Date(toMs);
   const anchorEnd = new Date(toMs + aDurMs);
   const updates = [{ id: anchor.id, start: anchorStart.toISOString(), end: anchorEnd.toISOString() }];
 
-  // Cascade: pack each mover right behind the previous one, starting with the
-  // anchor. Each placement is availability-aware. Stop once a job's tight-packed
-  // slot lands at or before its current start — the gap absorbed the shove and
-  // nothing further needs to move.
+  // Lay the selected followers down right behind the anchor, availability-aware.
+  // They ALWAYS move (pull the whole block forward), so — unlike the reshove
+  // cascade below — there is no "gap absorbed it" early-out here.
   let prevEndMs = anchorEnd.getTime();
   let prevCoolMs = aCoolMs;
+  for (const job of followers) {
+    const myCoolMs = coolOf(job);
+    const myWarmMs = warmOf(job);
+    const durMs = endMsOf(job) - startMs(job);
+    const durMins = Math.round(durMs / 60000);
+    const candidate = new Date(prevEndMs + prevCoolMs + myWarmMs);
+    const newStart = findNextValidStart(candidate, durMins, restr, closures, obstacles, myWarmMs, myCoolMs);
+    const newEnd = new Date(newStart.getTime() + durMs);
+    updates.push({ id: job.id, start: newStart.toISOString(), end: newEnd.toISOString() });
+    prevEndMs = newEnd.getTime();
+    prevCoolMs = myCoolMs;
+  }
+  // The placed block's buffered footprint end (anchor alone when no followers).
+  const blockBufEnd = prevEndMs + prevCoolMs;
+  const overlapsBlock = (j) => {
+    const [s, e] = bufInterval(j);
+    return aBufStart < e && blockBufEnd > s;
+  };
+
+  // Partition the remaining (non-chain) movable jobs into MOVERS (must reshove)
+  // and OBSTACLES (stay put). A job moves if it starts at/after the target OR its
+  // buffered print interval intersects the placed block's buffered footprint — a
+  // job that starts before `to` but spans it is in the way and must be shoved.
+  const movers = [];
+  for (const j of movableList) {
+    if (!j.start) { obstacles.push(j); continue; }
+    if (startMs(j) >= toMs || overlapsBlock(j)) movers.push(j);
+    else obstacles.push(j);
+  }
+  movers.sort((a, b) => startMs(a) - startMs(b));
+
+  // Cascade: pack each mover right behind the block. Each placement is
+  // availability-aware. Stop once a job's tight-packed slot lands at or before its
+  // current start — the gap absorbed the shove and nothing further needs to move.
+  const blockLen = updates.length; // anchor + followers
   for (const job of movers) {
-    const myCoolMs = job.coolDownMs != null ? job.coolDownMs : coolDownMs;
-    const myWarmMs = job.warmUpMs != null ? job.warmUpMs : warmUpMs;
+    const myCoolMs = coolOf(job);
+    const myWarmMs = warmOf(job);
     const jStartMs = startMs(job);
-    const jEndMs = parseJobTime(job.end, tz).getTime();
-    const durMs = jEndMs - jStartMs;
+    const durMs = endMsOf(job) - jStartMs;
     const durMins = Math.round(durMs / 60000);
 
     const candidate = new Date(prevEndMs + prevCoolMs + myWarmMs);
@@ -410,9 +560,10 @@ function planReshove(anchor, to, restr, closures, movable, fixed, warmUpMs, cool
     prevCoolMs = myCoolMs;
   }
 
-  // A reshuffle was needed exactly when placing the anchor verbatim shoved at
-  // least one movable job.
-  const needsReshove = updates.length > 1;
+  // A reshuffle (confirm dialog) is needed exactly when placing the block forced
+  // at least one NON-chain movable job to move. The block itself moving is the
+  // user's explicit intent, not a surprise reshuffle.
+  const needsReshove = updates.length > blockLen;
   // The verbatim anchor may overlap an ACTIVE/immovable job (a running or
   // printer-linked print). That job is never moved; flag it so the caller can
   // surface a conflict notice.
@@ -437,4 +588,8 @@ module.exports = {
   pushBackChain,
   pullForwardChain,
   planReshove,
+  isImmovableJob,
+  nextUnavailableStart,
+  availableMsBetween,
+  selectFollowingChain,
 };

@@ -8,6 +8,8 @@ const {
   pushBackChain,
   pullForwardChain,
   planReshove,
+  availableMsBetween,
+  selectFollowingChain,
 } = require('../scheduling');
 
 const TZ = 'Europe/Brussels';
@@ -742,5 +744,192 @@ describe('planReshove', () => {
     // Movable job would pack at 09:20Z but that overlaps the fixed 10:00Z–11:00Z (+buffers)
     // → skips to fixed end 11:00Z + cool15 + warm5 = 11:20Z.
     expect(plan.updates[1].start).toBe('2026-04-13T11:20:00.000Z');
+  });
+});
+
+describe('availableMsBetween (working-time gap, silent/closed excluded)', () => {
+  const restr = {
+    enabled: true,
+    silentStart: '21:00',
+    silentEnd: '06:30',
+    closedDays: [6], // Saturday
+    timezone: TZ,
+  };
+  const MIN = 60000;
+
+  test('both instants inside working hours: full wall-clock gap counts', () => {
+    // 10:00Z–10:25Z Brussels midday → entirely available → 25 min.
+    const gap = availableMsBetween(utc('2026-04-13T08:00:00.000Z'), utc('2026-04-13T08:25:00.000Z'), restr, []);
+    expect(gap).toBe(25 * MIN);
+  });
+
+  test('gap fully inside silent hours counts as ZERO working time', () => {
+    // 01:00 Brussels → next 06:30 Brussels: the whole span is silent (21:00–06:30).
+    // 2026-04-13 is a Monday. 01:00 Brussels = 2026-04-12T23:00Z; 06:30 = 2026-04-13T04:30Z.
+    const gap = availableMsBetween(utc('2026-04-12T23:00:00.000Z'), utc('2026-04-13T04:30:00.000Z'), restr, []);
+    expect(gap).toBe(0);
+  });
+
+  test('gap straddling the silent boundary counts only the working slivers', () => {
+    // A ends 20:45 Brussels (18:45Z), B starts next day 06:45 Brussels (04:45Z).
+    // Working slivers: 20:45–21:00 (15 min) + 06:30–06:45 (15 min) = 30 min.
+    const gap = availableMsBetween(utc('2026-04-13T18:45:00.000Z'), utc('2026-04-14T04:45:00.000Z'), restr, []);
+    expect(gap).toBe(30 * MIN);
+  });
+
+  test('t2 <= t1 returns 0 (overlapping / adjacent jobs)', () => {
+    expect(availableMsBetween(utc('2026-04-13T10:00:00.000Z'), utc('2026-04-13T09:00:00.000Z'), restr, [])).toBe(0);
+    expect(availableMsBetween(utc('2026-04-13T10:00:00.000Z'), utc('2026-04-13T10:00:00.000Z'), restr, [])).toBe(0);
+  });
+
+  test('closed day (Saturday) contributes zero working time', () => {
+    // Fri 2026-04-17 20:00 Brussels (18:00Z) → Sun 2026-04-19 08:00 Brussels (06:00Z).
+    // Working slivers: Fri 20:00–21:00 (60) + Sun 06:30–08:00 (90) = 150 min.
+    // Saturday is fully closed → contributes nothing.
+    const gap = availableMsBetween(utc('2026-04-17T18:00:00.000Z'), utc('2026-04-19T06:00:00.000Z'), restr, []);
+    expect(gap).toBe(150 * MIN);
+  });
+});
+
+describe('selectFollowingChain (pull-forward block selection)', () => {
+  const restr = {
+    enabled: true,
+    silentStart: '21:00',
+    silentEnd: '06:30',
+    closedDays: [6],
+    timezone: TZ,
+  };
+  const job = (id, startISO, endISO, extra = {}) =>
+    ({ id, start: startISO, end: endISO, status: 'Planned', linked_printer_id: null, locked: 0, ...extra });
+  const anchor = job(1, '2026-04-13T08:00:00.000Z', '2026-04-13T09:00:00.000Z');
+
+  test('chains consecutive jobs with <= 30 min working gap', () => {
+    const later = [
+      job(2, '2026-04-13T09:20:00.000Z', '2026-04-13T10:00:00.000Z'), // 20 min after anchor end
+      job(3, '2026-04-13T10:25:00.000Z', '2026-04-13T11:00:00.000Z'), // 25 min after job2 end
+    ];
+    const chain = selectFollowingChain(anchor, later, restr, []);
+    expect(chain.map(j => j.id)).toEqual([2, 3]);
+  });
+
+  test('a silent-hours-spanning gap (01:00 -> next 06:30) still chains', () => {
+    // Anchor ends 01:00 Brussels (2026-04-12T23:00Z); follower starts 06:30 Brussels
+    // (2026-04-13T04:30Z). Entire gap is silent → zero working gap → chains.
+    const nightAnchor = job(1, '2026-04-12T22:00:00.000Z', '2026-04-12T23:00:00.000Z'); // ends 01:00 Brussels
+    const later = [job(2, '2026-04-13T04:30:00.000Z', '2026-04-13T05:30:00.000Z')];     // starts 06:30 Brussels
+    const chain = selectFollowingChain(nightAnchor, later, restr, []);
+    expect(chain.map(j => j.id)).toEqual([2]);
+  });
+
+  test('a > 30 min working gap breaks the chain', () => {
+    const later = [
+      job(2, '2026-04-13T09:20:00.000Z', '2026-04-13T10:00:00.000Z'), // chains (20 min)
+      job(3, '2026-04-13T10:45:00.000Z', '2026-04-13T11:30:00.000Z'), // 45 min after job2 end → breaks
+      job(4, '2026-04-13T11:50:00.000Z', '2026-04-13T12:30:00.000Z'), // would chain to job3, but excluded
+    ];
+    const chain = selectFollowingChain(anchor, later, restr, []);
+    expect(chain.map(j => j.id)).toEqual([2]);
+  });
+
+  test('a locked job hard-terminates selection (it and everything after stay put)', () => {
+    const later = [
+      job(2, '2026-04-13T09:20:00.000Z', '2026-04-13T10:00:00.000Z'), // chains
+      job(3, '2026-04-13T10:20:00.000Z', '2026-04-13T11:00:00.000Z', { locked: 1 }), // locked terminator
+      job(4, '2026-04-13T11:20:00.000Z', '2026-04-13T12:00:00.000Z'), // tight, but after locked → excluded
+    ];
+    const chain = selectFollowingChain(anchor, later, restr, []);
+    expect(chain.map(j => j.id)).toEqual([2]);
+  });
+
+  test('an immovable (Printing/linked) job also hard-terminates selection', () => {
+    const later = [
+      job(2, '2026-04-13T09:20:00.000Z', '2026-04-13T10:00:00.000Z'),
+      job(3, '2026-04-13T10:20:00.000Z', '2026-04-13T11:00:00.000Z', { status: 'Printing' }),
+      job(4, '2026-04-13T11:20:00.000Z', '2026-04-13T12:00:00.000Z'),
+    ];
+    expect(selectFollowingChain(anchor, later, restr, []).map(j => j.id)).toEqual([2]);
+
+    const later2 = [
+      job(2, '2026-04-13T09:20:00.000Z', '2026-04-13T10:00:00.000Z', { linked_printer_id: 7 }),
+    ];
+    expect(selectFollowingChain(anchor, later2, restr, []).map(j => j.id)).toEqual([]);
+  });
+
+  test('empty result when the very first follower is already too far', () => {
+    const later = [job(2, '2026-04-13T10:30:00.000Z', '2026-04-13T11:00:00.000Z')]; // 90 min gap
+    expect(selectFollowingChain(anchor, later, restr, [])).toEqual([]);
+  });
+});
+
+describe('planReshove — pull-forward block (chainFollowers)', () => {
+  const restr = {
+    enabled: true,
+    silentStart: '21:00',
+    silentEnd: '06:30',
+    closedDays: [6],
+    timezone: TZ,
+  };
+  const warmUp = 5 * 60000;
+  const coolDown = 15 * 60000;
+  const job = (id, startISO, endISO) => ({ id, start: startISO, end: endISO, status: 'Planned' });
+  const anchorJob = (startISO, endISO) => ({ id: 1, start: startISO, end: endISO });
+
+  test('block moves forward together; no non-chain job → needsReshove false', () => {
+    // Anchor 14:00Z, two tight followers at 15:20Z and 16:40Z. Pull the block to 08:00Z.
+    const anchor = anchorJob('2026-04-13T14:00:00.000Z', '2026-04-13T15:00:00.000Z');
+    const followers = [
+      job(2, '2026-04-13T15:20:00.000Z', '2026-04-13T16:20:00.000Z'),
+      job(3, '2026-04-13T16:40:00.000Z', '2026-04-13T17:40:00.000Z'),
+    ];
+    const to = utc('2026-04-13T08:00:00.000Z');
+    const plan = planReshove(anchor, to, restr, [], followers, [], warmUp, coolDown, followers);
+    expect(plan.needsReshove).toBe(false); // block moving is intended, not a reshuffle
+    expect(plan.updates.map(u => u.id)).toEqual([1, 2, 3]);
+    // Anchor verbatim, followers pack 20 min behind each.
+    expect(plan.updates[0]).toMatchObject({ start: '2026-04-13T08:00:00.000Z', end: '2026-04-13T09:00:00.000Z' });
+    expect(plan.updates[1].start).toBe('2026-04-13T09:20:00.000Z');
+    expect(plan.updates[2].start).toBe('2026-04-13T10:40:00.000Z');
+  });
+
+  test('block landing on a NON-chain movable job triggers reshove of that job', () => {
+    // Anchor 14:00Z + follower 15:20Z form the block. A separate movable job sits at
+    // 08:00Z–09:00Z (10:00 Brussels). Pull the block to 08:00Z → block lands on it.
+    const anchor = anchorJob('2026-04-13T14:00:00.000Z', '2026-04-13T15:00:00.000Z');
+    const follower = job(2, '2026-04-13T15:20:00.000Z', '2026-04-13T16:20:00.000Z');
+    const nonChain = job(3, '2026-04-13T08:00:00.000Z', '2026-04-13T09:00:00.000Z');
+    const movable = [follower, nonChain];
+    const to = utc('2026-04-13T08:00:00.000Z');
+    const plan = planReshove(anchor, to, restr, [], movable, [], warmUp, coolDown, [follower]);
+    expect(plan.needsReshove).toBe(true); // non-chain job 3 had to yield
+    // Anchor 08:00–09:00, follower packed at 09:20, non-chain reshoved behind block.
+    expect(plan.updates[0]).toMatchObject({ id: 1, start: '2026-04-13T08:00:00.000Z' });
+    expect(plan.updates[1]).toMatchObject({ id: 2, start: '2026-04-13T09:20:00.000Z', end: '2026-04-13T10:20:00.000Z' });
+    // Non-chain job 3 shoved behind follower end 10:20 + 20m = 10:40.
+    expect(plan.updates[2]).toMatchObject({ id: 3, start: '2026-04-13T10:40:00.000Z' });
+  });
+
+  test('block followers respect silent hours when packing (availability-aware placement)', () => {
+    // Anchor pulled to 20:30 Brussels; the follower packed behind it would land in
+    // silent hours and must skip to next-day 06:30 — selection ignored silent hours,
+    // placement does not.
+    const anchor = anchorJob('2026-04-14T10:00:00.000Z', '2026-04-14T11:00:00.000Z'); // future
+    const follower = job(2, '2026-04-14T12:00:00.000Z', '2026-04-14T13:00:00.000Z');
+    const to = utc('2026-04-13T18:30:00.000Z'); // 20:30 Brussels
+    const plan = planReshove(anchor, to, restr, [], [follower], [], warmUp, coolDown, [follower]);
+    // Anchor verbatim 20:30–21:30 Brussels.
+    expect(getZoneParts(new Date(plan.updates[0].start), TZ).hour).toBe(20);
+    // Follower candidate 21:50 Brussels → silent → next-day 06:30.
+    const f = getZoneParts(new Date(plan.updates[1].start), TZ);
+    expect(f).toMatchObject({ day: 14, hour: 6, minute: 30 });
+  });
+
+  test('empty chainFollowers reproduces the classic single-anchor reshove', () => {
+    const anchor = anchorJob('2026-04-13T12:00:00.000Z', '2026-04-13T13:00:00.000Z'); // 14:00 Brussels
+    const movable = [job(2, '2026-04-13T08:00:00.000Z', '2026-04-13T09:00:00.000Z')]; // 10:00 Brussels
+    const to = utc('2026-04-13T08:00:00.000Z');
+    const plan = planReshove(anchor, to, restr, [], movable, [], warmUp, coolDown, []);
+    expect(plan.needsReshove).toBe(true);
+    expect(plan.updates[0]).toMatchObject({ id: 1, start: '2026-04-13T08:00:00.000Z' });
+    expect(plan.updates[1]).toMatchObject({ id: 2, start: '2026-04-13T09:20:00.000Z' });
   });
 });
