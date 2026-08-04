@@ -266,6 +266,17 @@ describe('project routes (integration)', () => {
     expect(appDb.prepare('SELECT COUNT(*) c FROM projects').get().c).toBe(0);
   });
 
+  test('assign-project route clears the project (project_id -> NULL) on the __none__ sentinel', async () => {
+    const c = await post('/api/jobs', { printerId, name: 'E', start: '2026-08-04T08:00', end: '2026-08-04T09:00', project: 'Detachable' });
+    expect(appDb.prepare('SELECT project_id FROM jobs WHERE id=?').get(c.body.id).project_id).toBe('detachable');
+    const r = await post(`/api/jobs/${c.body.id}/assign-project`, { projectId: '__none__' });
+    expect(r.status).toBe(200);
+    expect(r.body.project_id).toBeNull();
+    expect(appDb.prepare('SELECT project_id FROM jobs WHERE id=?').get(c.body.id).project_id).toBeNull();
+    // Clearing never deletes the now-emptied project.
+    expect(appDb.prepare('SELECT status FROM projects WHERE id=?').get('detachable').status).toBe('open');
+  });
+
   test('GET /api/projects/:id returns the project + its jobs (for grouped detail)', async () => {
     await post('/api/jobs', { printerId, name: 'X1', start: '2026-08-04T08:00', end: '2026-08-04T09:00', project: 'Grouped' });
     await post('/api/jobs', { printerId, name: 'X2', start: '2026-08-04T10:00', end: '2026-08-04T11:00', project: 'Grouped' });
@@ -313,6 +324,14 @@ describe('project push switch + UI wiring (index.html + app.js)', () => {
     expect(APP).toContain("getElementById('bs-assign-project').addEventListener");
     // both paths open the same existing-only picker
     expect(APP.match(/openAssignProject\(id\)/g).length).toBeGreaterThanOrEqual(2);
+  });
+
+  test('assign picker offers a "Geen project" clear option and preselects the current project', () => {
+    // Clear option at the top of the list.
+    expect(APP).toContain('<option value="__none__">Geen project</option>');
+    // Preselect reads the job's current project from the cache.
+    expect(APP).toContain('jobsCache[jobId]?.project_id');
+    expect(APP).toContain("sel.value = current || '__none__'");
   });
 
   test('app.js loads the stored project pref (default ON) and auto-saves it', () => {

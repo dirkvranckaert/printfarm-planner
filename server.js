@@ -1019,6 +1019,12 @@ app.post('/api/jobs/:id/assign-project', (req, res) => {
   const jobId = Number(req.params.id);
   const job = db.prepare('SELECT id FROM jobs WHERE id=?').get(jobId);
   if (!job) return res.status(404).json({ error: 'Job not found' });
+  // Clear sentinel: detach the job from any project (project_id -> NULL). Never
+  // creates a project, and never deletes the now-emptied project.
+  if (req.body.projectId === '__none__') {
+    db.prepare('UPDATE jobs SET project_id=NULL WHERE id=?').run(jobId);
+    return res.json({ id: jobId, project_id: null, reopened: false });
+  }
   const result = projects.assignExisting({ db, jobId, projectId: req.body.projectId });
   if (!result.ok) {
     return res.status(result.code).json({ error: result.code === 404 ? 'Project not found' : 'projectId required' });
