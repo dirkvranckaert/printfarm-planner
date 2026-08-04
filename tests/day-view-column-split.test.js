@@ -220,3 +220,28 @@ describe('renderDay — buffer-aware overlap (print windows disjoint, buffers cl
     }
   });
 });
+
+describe('renderDay — buffer blocks are tinted with the job\'s own colour', () => {
+  // PRINTER.color === '#0088cc' → hexRgba → rgba(0, 136, 204, a). jsdom normalises
+  // the inline value; assert the colour components are present (not the old grey).
+  const RGB = '0, 136, 204';
+
+  test('warm-up + cool-down buffers carry a tint + border in the job colour, not grey', async () => {
+    const T = boot([job(1, 10, 12)]); // lone job, printer warm 5 / cool 15 → both buffers render
+    await T.renderDay();
+    const wu = document.querySelector('.buffer-block[data-buffer-type="warmup"]');
+    const cd = document.querySelector('.buffer-block[data-buffer-type="cooldown"]');
+    expect(wu).toBeTruthy();
+    expect(cd).toBeTruthy();
+    for (const buf of [wu, cd]) {
+      // Background tint derives from the job colour...
+      expect(buf.style.background).toContain(RGB);
+      // ...and is clearly lighter than the solid job block (low alpha).
+      const alpha = parseFloat(buf.style.background.match(/,\s*([\d.]+)\)\s*$/)[1]);
+      expect(alpha).toBeLessThan(0.15);
+      // Left border is the full job colour (#0088cc), not the old grey #94a3b8.
+      expect(buf.style.borderLeftColor.toLowerCase()).toBe('#0088cc');
+      expect(buf.style.borderLeftColor.toLowerCase()).not.toContain('94a3b8');
+    }
+  });
+});

@@ -488,28 +488,14 @@ body {
   position: absolute;
   left: 3px;
   right: 3px;
+  /* Dashed left border + background are set inline per job in renderDay() as a
+     washed-out tint of that job's own colour (was a grey hatch — replaced so a
+     buffer reads as belonging to its job, esp. when jobs sit side-by-side). */
   border-left: 3px dashed #94a3b8;
   border-radius: 3px;
   overflow: hidden;
   pointer-events: none;
   z-index: 0;
-  background:
-    repeating-linear-gradient( 45deg, rgba(71,85,105,.45) 0, rgba(71,85,105,.45) 1.5px, transparent 1.5px, transparent 8px),
-    repeating-linear-gradient(-45deg, rgba(71,85,105,.45) 0, rgba(71,85,105,.45) 1.5px, transparent 1.5px, transparent 8px);
-}
-[data-theme="dark"] .buffer-block {
-  border-left-color: #64748b;
-  background:
-    repeating-linear-gradient( 45deg, rgba(148,163,184,.5) 0, rgba(148,163,184,.5) 1.5px, transparent 1.5px, transparent 8px),
-    repeating-linear-gradient(-45deg, rgba(148,163,184,.5) 0, rgba(148,163,184,.5) 1.5px, transparent 1.5px, transparent 8px);
-}
-@media (prefers-color-scheme: dark) {
-  :root:not([data-theme="light"]):not([data-theme="dark"]) .buffer-block {
-    border-left-color: #64748b;
-    background:
-      repeating-linear-gradient( 45deg, rgba(148,163,184,.5) 0, rgba(148,163,184,.5) 1.5px, transparent 1.5px, transparent 8px),
-      repeating-linear-gradient(-45deg, rgba(148,163,184,.5) 0, rgba(148,163,184,.5) 1.5px, transparent 1.5px, transparent 8px);
-  }
 }
 .buffer-label {
   display: block;

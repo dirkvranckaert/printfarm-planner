@@ -1361,6 +1361,12 @@ async function renderDay() {
       const pausedIcon = isPaused ? '<span class="job-paused-icon" title="Printer paused">⏸</span>' : '';
 
       const bgAlpha  = isDarkMode() ? 0.5 : 0.15;
+      // Buffer blocks (warm-up / cool-down) render as a WASHED-OUT tint of this
+      // job's own colour (clearly lighter than the solid job block above) plus a
+      // dashed left border in the full colour — so a buffer visually belongs to
+      // its job even when overlapping jobs sit side-by-side in the column.
+      const bufBg    = hexRgba(p.color, isDarkMode() ? 0.22 : 0.07);
+      const bufStyle = `background:${bufBg};border-left-color:${p.color};`;
       // Warm-up buffer renders from the job's own snapshotted warm_up_mins
       // (per-job); fall back to the printer scalar, then 0, defensively.
       const warmUp   = job.warm_up_mins ?? p.warm_up_mins ?? 0;
@@ -1374,7 +1380,7 @@ async function renderDay() {
         const bTop = Math.max(0, topPx - minToPx(warmUp));
         const bHt  = topPx - bTop;
         if (bHt > 0) {
-          h += `<div class="buffer-block" data-job-id="${job.id}" data-buffer-type="warmup" style="top:${bTop}px;height:${bHt}px;${splitStyle}">${bHt >= 10 ? '<span class="buffer-label">Warm-up</span>' : ''}</div>`;
+          h += `<div class="buffer-block" data-job-id="${job.id}" data-buffer-type="warmup" style="top:${bTop}px;height:${bHt}px;${splitStyle}${bufStyle}">${bHt >= 10 ? '<span class="buffer-label">Warm-up</span>' : ''}</div>`;
         }
       }
 
@@ -1403,7 +1409,7 @@ async function renderDay() {
         const bTop = topPx + htPx;
         const bHt  = Math.min(minToPx(coolDown), minToPx(DAY_MINS) - bTop);
         if (bHt > 0) {
-          h += `<div class="buffer-block" data-job-id="${job.id}" data-buffer-type="cooldown" style="top:${bTop}px;height:${bHt}px;${splitStyle}">${bHt >= 10 ? '<span class="buffer-label">Cool-down</span>' : ''}</div>`;
+          h += `<div class="buffer-block" data-job-id="${job.id}" data-buffer-type="cooldown" style="top:${bTop}px;height:${bHt}px;${splitStyle}${bufStyle}">${bHt >= 10 ? '<span class="buffer-label">Cool-down</span>' : ''}</div>`;
         }
       }
     });
