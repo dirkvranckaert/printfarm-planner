@@ -353,6 +353,9 @@ let printerStatus    = {};       // keyed by "brand:serial" — live status from
 let topbarLimit      = 3;        // max chips shown; set from /api/config
 let topbarModeCache  = 'pinned'; // 'pinned' | 'active'; loaded on init
 let _lastTopbarIds   = null;     // comma-joined IDs of last rendered chips; null forces a rebuild
+let lastUpcomingHtml = null;     // last markup rendered by renderUpcoming; lets a no-op SSE re-render skip the DOM rebuild
+let lastWeekHtml     = null;     // ditto for renderWeek — skip no-op SSE rebuilds, preserve .week-view scroll
+let lastMonthHtml    = null;     // ditto for renderMonth — skip no-op SSE rebuilds, preserve .month-view scroll
 let bambuAccountEmail = null;    // set when BambuLab account is connected
 let pushSubscribed = false;
 
@@ -1926,7 +1929,22 @@ async function renderWeek() {
   });
 
   h += '</tbody></table></div>';
+
+  // Skip the DOM rebuild when the markup is byte-identical to what's shown — a
+  // no-op SSE re-render would otherwise destroy the .week-view scroll container
+  // and reset scrollTop to 0. The querySelector guard forces a rebuild after a
+  // view switch. Mirrors renderUpcoming/renderMonth.
+  if (h === lastWeekHtml && container.querySelector('.week-view')) return;
+  lastWeekHtml = h;
+
+  const prevScrollTop = container.querySelector('.week-view')?.scrollTop ?? 0;
+
   container.innerHTML = h;
+
+  if (prevScrollTop) {
+    const viewEl = container.querySelector('.week-view');
+    if (viewEl) viewEl.scrollTop = prevScrollTop;
+  }
 
   // Click chip → edit  |  right-click → context menu
   document.querySelectorAll('.week-job-chip').forEach(el => {
@@ -2014,7 +2032,22 @@ async function renderMonth() {
   });
 
   h += '</div></div>';
+
+  // Skip the DOM rebuild when the markup is byte-identical to what's shown — a
+  // no-op SSE re-render would otherwise destroy the .month-view scroll container
+  // and reset scrollTop to 0. The querySelector guard forces a rebuild after a
+  // view switch. Mirrors renderUpcoming/renderWeek.
+  if (h === lastMonthHtml && container.querySelector('.month-view')) return;
+  lastMonthHtml = h;
+
+  const prevScrollTop = container.querySelector('.month-view')?.scrollTop ?? 0;
+
   container.innerHTML = h;
+
+  if (prevScrollTop) {
+    const viewEl = container.querySelector('.month-view');
+    if (viewEl) viewEl.scrollTop = prevScrollTop;
+  }
 
   // Click chip → edit  |  right-click → context menu
   document.querySelectorAll('.month-job-chip').forEach(el => {
@@ -2103,7 +2136,27 @@ async function renderUpcoming() {
   }
 
   h += '</div>';
+
+  // Skip the DOM rebuild entirely when the markup is byte-identical to what's
+  // already shown. Background SSE frames (renderCalendar → renderUpcoming) fire
+  // every few seconds; when nothing changed, rebuilding innerHTML would destroy
+  // the .upcoming-view scroll container and reset scrollTop to 0, yanking the
+  // user back to the top mid-edit. The querySelector guard forces a rebuild
+  // after a view switch (container no longer holds .upcoming-view even if the
+  // cached HTML matches).
+  if (h === lastUpcomingHtml && container.querySelector('.upcoming-view')) return;
+  lastUpcomingHtml = h;
+
+  // When the data DID change, preserve scroll across the innerHTML swap so the
+  // re-render doesn't reset the user's position (mirrors renderDay's approach).
+  const prevScrollTop = container.querySelector('.upcoming-view')?.scrollTop ?? 0;
+
   container.innerHTML = h;
+
+  if (prevScrollTop) {
+    const viewEl = container.querySelector('.upcoming-view');
+    if (viewEl) viewEl.scrollTop = prevScrollTop;
+  }
 
   container.querySelectorAll('.upcoming-job-row[data-job-id]').forEach(el => {
     el.addEventListener('click', e => {
