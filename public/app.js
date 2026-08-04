@@ -1428,6 +1428,7 @@ async function renderDay() {
                 <span class="job-status-badge" style="flex-shrink:0;${statusBadgeStyle(status)}">${escHtml(status)}</span>
               </div>`;
       if (htPx >= 40 && job.customerName) h += `<span class="job-block-customer">${escHtml(job.customerName)}</span>`;
+      if (htPx >= 40 && job.project) h += `<span class="job-block-project">${escHtml(job.project)}</span>`;
       if (htPx >= 55 && job.bedType) h += `<span class="job-block-bedtype">${formatBedType(job.bedType)}</span>`;
       if (htPx >= 80 && job.thumbFile) h += `<img src="/api/uploads/${escHtml(job.thumbFile)}" class="job-block-thumb" alt="">`;
       if (endMins <= DAY_MINS) h += '<div class="job-resize-handle"></div>';

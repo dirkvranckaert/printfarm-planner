@@ -449,7 +449,11 @@ app.delete('/api/printers/:id', (req, res) => {
 
 // --- Jobs ---
 app.get('/api/jobs', (req, res) => {
-  res.json(db.prepare('SELECT * FROM jobs').all());
+  // Resolve each job's project label (null when unassigned) so the day-view
+  // card can show it alongside customer/orderNr, same as those ride the payload.
+  res.json(db.prepare(
+    'SELECT jobs.*, projects.label AS project FROM jobs LEFT JOIN projects ON jobs.project_id = projects.id'
+  ).all());
 });
 // Attach a 3MF to an existing job (must be before :id routes)
 app.post('/api/jobs/:id/attach-3mf', express.raw({ type: '*/*', limit: '500mb' }), (req, res) => {
