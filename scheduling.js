@@ -390,10 +390,17 @@ function availableMsBetween(t1, t2, restr, closures) {
  * Walks the same-printer jobs AFTER the anchor in start order and returns the
  * maximal contiguous run of movable jobs where each consecutive pair's
  * working-time gap (silent hours / closed days excluded, via availableMsBetween)
- * is <= maxGapMs. Selection STOPS — and the terminator is NOT included — at the
- * first job whose working gap exceeds maxGapMs OR that is immovable (locked /
- * Printing / Awaiting Printer / printer-linked / Done / Paused). An immovable job
- * is a HARD terminator: nothing after it is selected either.
+ * is <= maxGapMs. Selection STOPS only at a real working-time gap that exceeds
+ * maxGapMs — the terminator is NOT included.
+ *
+ * An immovable job (locked / Printing / Awaiting Printer / printer-linked / Done /
+ * Paused) does NOT terminate the chain: it is a fixed obstacle that stays exactly
+ * where it is (excluded from the returned block), but the chain continues PAST it.
+ * The immovable job still counts for gap continuity — the working gap is measured
+ * between every consecutive pair in the run, including the immovable one — so a
+ * tightly-packed run survives a locked job wedged in the middle. Movement (in
+ * planReshove) then routes the selected movers AROUND the skipped immovable jobs,
+ * which arrive there via the caller's `fixed` obstacle bucket.
  *
  * @param {object} anchor     { start, end } of the anchor (right-clicked job).
  * @param {Array}  laterJobs  Same-printer jobs with start > anchor.start, each
@@ -401,7 +408,8 @@ function availableMsBetween(t1, t2, restr, closures) {
  * @param {object} restr      Scheduling restrictions.
  * @param {Array}  closures   Closure ranges.
  * @param {number} maxGapMs   Working-gap threshold (default 30 min).
- * @returns {Array} the selected followers in start order (excludes the anchor).
+ * @returns {Array} the selected MOVABLE followers in start order (excludes the
+ *                  anchor AND any skipped immovable jobs).
  */
 function selectFollowingChain(anchor, laterJobs, restr, closures, maxGapMs = 30 * 60000) {
   const tz = restr?.timezone || DEFAULT_TZ;
@@ -411,12 +419,14 @@ function selectFollowingChain(anchor, laterJobs, restr, closures, maxGapMs = 30 
   const chain = [];
   let prevEnd = parseJobTime(anchor.end, tz);
   for (const job of sorted) {
-    if (isImmovableJob(job)) break; // hard terminator: stop, do not include
     const jStart = parseJobTime(job.start, tz);
     const gap = availableMsBetween(prevEnd, jStart, restr, closures);
-    if (gap > maxGapMs) break;
-    chain.push(job);
+    if (gap > maxGapMs) break; // real working-time gap: chain ends here
+    // Advance continuity across this job whether or not it travels with the block.
     prevEnd = parseJobTime(job.end, tz);
+    // Immovable job: skip it (stays put as an obstacle) but keep pulling the tail.
+    if (isImmovableJob(job)) continue;
+    chain.push(job);
   }
   return chain;
 }

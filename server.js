@@ -798,7 +798,9 @@ app.post('/api/jobs/:id/pull-forward', (req, res) => {
   // "Move following chain" toggle (default OFF). When ON, the anchor drags its
   // tightly-packed following run forward with it: the maximal contiguous run of
   // movable jobs whose consecutive working-time gaps (silent hours / closed days
-  // excluded) stay <= 30 min, terminated at the first bigger gap OR immovable job.
+  // excluded) stay <= 30 min, terminated only at the first bigger gap. Immovable
+  // jobs in the run are skipped (they stay put) but do NOT break the chain — the
+  // movers route around them via the `fixed` obstacle bucket.
   const moveChain = req.body?.moveChain === true;
   let followers = [];
   if (moveChain && anchorRow) {

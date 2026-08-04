@@ -800,8 +800,9 @@ describe('lockable jobs — immovability via the real routes (supertest)', () =>
 
 
 // Pull-forward "move following chain" toggle: moveChain:true drags the anchor's
-// tightly-packed following run (<= 30 min working gaps, terminated at a locked/
-// immovable job) forward with it. Default OFF = single-anchor behaviour unchanged.
+// tightly-packed following run (<= 30 min working gaps, broken only at a bigger
+// gap) forward with it. Immovable/locked jobs in the run are skipped — they stay
+// put and the movers route around them. Default OFF = single-anchor unchanged.
 describe('pull-forward — move following chain toggle', () => {
   const request = require('supertest');
   let app, appDb, printerId;
@@ -869,19 +870,27 @@ describe('pull-forward — move following chain toggle', () => {
     expect(getJob(far).start).toBe(iso('2026-04-13T17:10:00Z'));
   });
 
-  test('toggle ON: a locked job terminates selection — it and jobs after it stay put', async () => {
+  test('toggle ON: a locked job is skipped — it stays put, the tail after it pulls forward', async () => {
     const anchor = addJob('2026-04-13T14:00:00Z', '2026-04-13T15:00:00Z');
-    const f1 = addJob('2026-04-13T15:20:00Z', '2026-04-13T16:20:00Z');                 // chains
-    const lockedMid = addJob('2026-04-13T16:40:00Z', '2026-04-13T17:40:00Z', { locked: 1 }); // terminator
-    const after = addJob('2026-04-13T18:00:00Z', '2026-04-13T19:00:00Z');              // tight to locked, excluded
+    const f1 = addJob('2026-04-13T15:20:00Z', '2026-04-13T16:20:00Z');                 // chains (20 min gap)
+    const lockedMid = addJob('2026-04-13T16:40:00Z', '2026-04-13T17:40:00Z', { locked: 1 }); // skipped, stays put
+    const after = addJob('2026-04-13T18:00:00Z', '2026-04-13T19:00:00Z');              // tight past locked → pulled in
     const r = await request(app).post(`/api/jobs/${anchor}/pull-forward`)
       .set('Cookie', authCookie).send({ to: '2026-04-13T08:00:00Z', moveChain: true });
     expect(r.status).toBe(200);
     expect(getJob(anchor).start).toBe(iso('2026-04-13T08:00:00Z'));
     expect(getJob(f1).start).toBe(iso('2026-04-13T09:20:00Z'));
-    // Locked job and everything after it are byte-unchanged.
+    // Locked job is byte-unchanged (never moved, it is a fixed obstacle).
     expect(getJob(lockedMid).start).toBe(iso('2026-04-13T16:40:00Z'));
-    expect(getJob(after).start).toBe(iso('2026-04-13T18:00:00Z'));
+    expect(getJob(lockedMid).end).toBe(iso('2026-04-13T17:40:00Z'));
+    // The tail after the locked job is pulled forward: packs behind f1 (end 10:20Z
+    // + cool15 + warm5 = 10:40Z), routing around the untouched locked job.
+    const afterRow = getJob(after);
+    expect(afterRow.start).toBe(iso('2026-04-13T10:40:00Z'));
+    // Explicit no-overlap with the locked job.
+    const ls = Date.parse(getJob(lockedMid).start), le = Date.parse(getJob(lockedMid).end);
+    const as = Date.parse(afterRow.start), ae = Date.parse(afterRow.end);
+    expect(as < le && ls < ae).toBe(false);
   });
 
   test('toggle ON: block landing on a non-chain job → needsReshove, then reshove on confirm', async () => {
