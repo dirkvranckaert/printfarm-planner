@@ -799,6 +799,114 @@ describe('lockable jobs — immovability via the real routes (supertest)', () =>
 });
 
 
+// Pull-forward "move following chain" toggle: moveChain:true drags the anchor's
+// tightly-packed following run (<= 30 min working gaps, terminated at a locked/
+// immovable job) forward with it. Default OFF = single-anchor behaviour unchanged.
+describe('pull-forward — move following chain toggle', () => {
+  const request = require('supertest');
+  let app, appDb, printerId;
+  const SESSION_TOKEN = 'movechain-session-token';
+  const authCookie = `pf_session=${SESSION_TOKEN}`;
+  const iso = (d) => new Date(d).toISOString();
+
+  beforeAll(() => {
+    appDb = require('../db');
+    app   = require('../server');
+    appDb.prepare('INSERT OR REPLACE INTO sessions (token, expires_at) VALUES (?,?)')
+      .run(SESSION_TOKEN, Date.now() + 3_600_000);
+  });
+
+  beforeEach(() => {
+    appDb.exec('DELETE FROM jobs; DELETE FROM printers; DELETE FROM closures;');
+    appDb.prepare('INSERT OR REPLACE INTO settings (key,value) VALUES (?,?)')
+      .run('schedulingRestrictions', JSON.stringify({
+        enabled: true, silentStart: '04:00', silentEnd: '04:01', closedDays: [], timezone: 'Europe/Brussels',
+      }));
+    const r = appDb.prepare('INSERT INTO printers (name, color, warm_up_mins, cool_down_mins) VALUES (?,?,?,?)')
+      .run('P1', '#f00', 5, 15);
+    printerId = r.lastInsertRowid;
+  });
+
+  const addJob = (start, end, { status = 'Planned', locked = 0 } = {}) =>
+    appDb.prepare('INSERT INTO jobs (printerId, name, start, end, status, locked) VALUES (?,?,?,?,?,?)')
+      .run(printerId, 'J', iso(start), iso(end), status, locked).lastInsertRowid;
+  const getJob = (id) => appDb.prepare('SELECT * FROM jobs WHERE id=?').get(id);
+
+  test('toggle OFF (default): only the anchor moves, followers stay put', async () => {
+    const anchor = addJob('2026-04-13T14:00:00Z', '2026-04-13T15:00:00Z');
+    const follower = addJob('2026-04-13T15:20:00Z', '2026-04-13T16:20:00Z'); // tight, would chain if ON
+    const r = await request(app).post(`/api/jobs/${anchor}/pull-forward`)
+      .set('Cookie', authCookie).send({ to: '2026-04-13T08:00:00Z' });
+    expect(r.status).toBe(200);
+    expect(getJob(anchor).start).toBe(iso('2026-04-13T08:00:00Z'));
+    // Follower untouched — single-anchor default path.
+    expect(getJob(follower).start).toBe(iso('2026-04-13T15:20:00Z'));
+  });
+
+  test('toggle ON: anchor + tight followers pull forward together', async () => {
+    const anchor = addJob('2026-04-13T14:00:00Z', '2026-04-13T15:00:00Z');
+    const f1 = addJob('2026-04-13T15:20:00Z', '2026-04-13T16:20:00Z'); // 20 min gap → chains
+    const f2 = addJob('2026-04-13T16:40:00Z', '2026-04-13T17:40:00Z'); // 20 min gap → chains
+    const r = await request(app).post(`/api/jobs/${anchor}/pull-forward`)
+      .set('Cookie', authCookie).send({ to: '2026-04-13T08:00:00Z', moveChain: true });
+    expect(r.status).toBe(200);
+    expect(getJob(anchor).start).toBe(iso('2026-04-13T08:00:00Z'));
+    // Followers packed 20 min behind: 09:20Z and 10:40Z.
+    expect(getJob(f1).start).toBe(iso('2026-04-13T09:20:00Z'));
+    expect(getJob(f2).start).toBe(iso('2026-04-13T10:40:00Z'));
+  });
+
+  test('toggle ON: chain breaks at a > 30 min working gap', async () => {
+    const anchor = addJob('2026-04-13T14:00:00Z', '2026-04-13T15:00:00Z');
+    const f1 = addJob('2026-04-13T15:20:00Z', '2026-04-13T16:20:00Z'); // chains
+    const far = addJob('2026-04-13T17:10:00Z', '2026-04-13T18:10:00Z'); // 50 min after f1 end → breaks
+    const r = await request(app).post(`/api/jobs/${anchor}/pull-forward`)
+      .set('Cookie', authCookie).send({ to: '2026-04-13T08:00:00Z', moveChain: true });
+    expect(r.status).toBe(200);
+    expect(getJob(anchor).start).toBe(iso('2026-04-13T08:00:00Z'));
+    expect(getJob(f1).start).toBe(iso('2026-04-13T09:20:00Z'));
+    // Beyond the break: untouched.
+    expect(getJob(far).start).toBe(iso('2026-04-13T17:10:00Z'));
+  });
+
+  test('toggle ON: a locked job terminates selection — it and jobs after it stay put', async () => {
+    const anchor = addJob('2026-04-13T14:00:00Z', '2026-04-13T15:00:00Z');
+    const f1 = addJob('2026-04-13T15:20:00Z', '2026-04-13T16:20:00Z');                 // chains
+    const lockedMid = addJob('2026-04-13T16:40:00Z', '2026-04-13T17:40:00Z', { locked: 1 }); // terminator
+    const after = addJob('2026-04-13T18:00:00Z', '2026-04-13T19:00:00Z');              // tight to locked, excluded
+    const r = await request(app).post(`/api/jobs/${anchor}/pull-forward`)
+      .set('Cookie', authCookie).send({ to: '2026-04-13T08:00:00Z', moveChain: true });
+    expect(r.status).toBe(200);
+    expect(getJob(anchor).start).toBe(iso('2026-04-13T08:00:00Z'));
+    expect(getJob(f1).start).toBe(iso('2026-04-13T09:20:00Z'));
+    // Locked job and everything after it are byte-unchanged.
+    expect(getJob(lockedMid).start).toBe(iso('2026-04-13T16:40:00Z'));
+    expect(getJob(after).start).toBe(iso('2026-04-13T18:00:00Z'));
+  });
+
+  test('toggle ON: block landing on a non-chain job → needsReshove, then reshove on confirm', async () => {
+    const anchor = addJob('2026-04-13T14:00:00Z', '2026-04-13T15:00:00Z');
+    const follower = addJob('2026-04-13T15:20:00Z', '2026-04-13T16:20:00Z'); // chains with anchor
+    // A separate movable job occupies the landing zone at 10:00 Brussels (08:00Z).
+    const blocker = addJob('2026-04-13T08:00:00Z', '2026-04-13T09:00:00Z');
+    const body = { to: '2026-04-13T08:00:00Z', moveChain: true };
+
+    const r1 = await request(app).post(`/api/jobs/${anchor}/pull-forward`).set('Cookie', authCookie).send(body);
+    expect(r1.body.needsReshove).toBe(true);
+    // Nothing written yet.
+    expect(getJob(anchor).start).toBe(iso('2026-04-13T14:00:00Z'));
+    expect(getJob(blocker).start).toBe(iso('2026-04-13T08:00:00Z'));
+
+    const r2 = await request(app).post(`/api/jobs/${anchor}/pull-forward`).set('Cookie', authCookie).send({ ...body, reshove: true });
+    expect(r2.body.reshoved).toBe(true);
+    expect(getJob(anchor).start).toBe(iso('2026-04-13T08:00:00Z'));
+    expect(getJob(follower).start).toBe(iso('2026-04-13T09:20:00Z'));
+    // Blocker shoved behind the block tail (follower end 10:20Z + 20m = 10:40Z).
+    expect(getJob(blocker).start).toBe(iso('2026-04-13T10:40:00Z'));
+  });
+});
+
+
 describe('PATCH /api/jobs/:id — status persistence (real route via supertest)', () => {
   const request = require('supertest');
   let app, appDb, printerId;

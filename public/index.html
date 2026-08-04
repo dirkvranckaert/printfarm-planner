@@ -605,6 +605,9 @@
         <label style="display:block;font-size:12px;color:var(--text-muted);margin:10px 0 4px">Window end</label>
         <input type="datetime-local" id="pullforward-window-end" style="width:100%;padding:6px 8px;font-size:14px">
       </div>
+      <label style="display:flex;align-items:center;gap:6px;font-size:12px;color:var(--text-muted);margin:12px 0 0">
+        <input type="checkbox" id="pullforward-chain-toggle"> Move following chain (pull the whole tightly-packed run of jobs after this one forward together)
+      </label>
       <div style="display:flex;gap:8px;justify-content:flex-end;margin-top:16px">
         <button type="button" id="pullforward-cancel" class="btn btn-secondary">Cancel</button>
         <button type="button" id="pullforward-confirm" class="btn btn-primary">Pull forward</button>

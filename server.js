@@ -793,29 +793,49 @@ app.post('/api/jobs/:id/pull-forward', (req, res) => {
 
   const { movable, fixed } = classifyForReshove(allSamePrinter, anchor.id);
   const anchorObj = buildReshoveAnchor(anchor, printer);
+  const anchorRow = allSamePrinter.find(j => j.id === anchor.id);
+
+  // "Move following chain" toggle (default OFF). When ON, the anchor drags its
+  // tightly-packed following run forward with it: the maximal contiguous run of
+  // movable jobs whose consecutive working-time gaps (silent hours / closed days
+  // excluded) stay <= 30 min, terminated at the first bigger gap OR immovable job.
+  const moveChain = req.body?.moveChain === true;
+  let followers = [];
+  if (moveChain && anchorRow) {
+    const laterJobs = allSamePrinter.filter(j =>
+      j.id !== anchor.id && parseJobTime(j.start, tz).getTime() > anchorStartMs
+    );
+    followers = scheduling.selectFollowingChain(anchorRow, laterJobs, restr, closures);
+  }
+  const followerIds = new Set(followers.map(f => f.id));
 
   // Window mode: if the anchor fits in a clean gap inside [to, windowEnd] without
   // disturbing any other job, place it there and tight-pack the downstream jobs.
   if (hasWindow) {
     const anchorDurMins = Math.round((parseJobTime(anchor.end, tz).getTime() - anchorStartMs) / 60000);
-    const others = allSamePrinter.filter(j => j.id !== anchor.id);
+    // Chain followers travel with the anchor, so they must NOT count against the
+    // clean-fit check (they will move out of the way themselves).
+    const others = allSamePrinter.filter(j => j.id !== anchor.id && !followerIds.has(j.id));
     const fitStart = scheduling.findNextValidStart(
       toDate, anchorDurMins, restr, closures, others, anchorObj.warmUpMs, anchorObj.coolDownMs
     );
     if (fitStart.getTime() <= windowEnd.getTime()) {
-      // Clean fit — no reshuffle. Chain = the anchor + downstream cascadable,
+      // Clean fit — no reshuffle. With the toggle ON the chain is the selected
+      // following run; otherwise it's the anchor + downstream cascadable,
       // non-linked, UNLOCKED jobs inside the window. Linked or locked jobs are
       // immovable → they stay in otherJobs as obstacles, never tight-packed.
       const windowEndMs = windowEnd.getTime();
       const CASCADABLE_STATUSES = new Set(['Planned', 'Awaiting']);
-      const chain = allSamePrinter
-        .filter(j => {
-          if (j.id === anchor.id) return true;
-          if (!CASCADABLE_STATUSES.has(j.status) || j.linked_printer_id != null || j.locked) return false;
-          const s = parseJobTime(j.start, tz).getTime();
-          return s > anchorStartMs && s <= windowEndMs;
-        })
-        .sort((a, b) => parseJobTime(a.start, tz).getTime() - parseJobTime(b.start, tz).getTime());
+      const chain = moveChain
+        ? [anchorRow, ...followers]
+        : allSamePrinter
+            .filter(j => {
+              if (j.id === anchor.id) return true;
+              if (!CASCADABLE_STATUSES.has(j.status) || j.linked_printer_id != null || j.locked) return false;
+              const s = parseJobTime(j.start, tz).getTime();
+              return s > anchorStartMs && s <= windowEndMs;
+            })
+            .sort((a, b) => parseJobTime(a.start, tz).getTime() - parseJobTime(b.start, tz).getTime());
       const chainIds = new Set(chain.map(j => j.id));
       const otherJobs = allSamePrinter.filter(j => !chainIds.has(j.id));
       const updates = scheduling.pullForwardChain(chain, toDate, restr, closures, otherJobs, warmUpMs, coolDownMs);
@@ -825,9 +845,10 @@ app.post('/api/jobs/:id/pull-forward', (req, res) => {
     // No gap in the window → fall through to the forced verbatim + reshove path.
   }
 
-  // Forced path (no window, or window had no gap): anchor verbatim at `to`,
-  // movable jobs reshoved behind it.
-  const plan = scheduling.planReshove(anchorObj, toDate, restr, closures, movable, fixed, warmUpMs, coolDownMs);
+  // Forced path (no window, or window had no gap): anchor verbatim at `to`, the
+  // selected chain pulled forward behind it, other movable jobs reshoved behind
+  // the block. `followers` is [] when the toggle is off → classic single-anchor.
+  const plan = scheduling.planReshove(anchorObj, toDate, restr, closures, movable, fixed, warmUpMs, coolDownMs, followers);
   return respondToReshovePlan(res, req, plan);
 });
 

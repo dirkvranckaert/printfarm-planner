@@ -2854,11 +2854,12 @@ function closePushBackModal() {
 // Pull this job + any Planned jobs after it within the window forward
 // (tight-pack) starting at the given datetime. `to` and `windowEnd` may be
 // null; the server then uses defaults (to=now, windowEnd=to+24h).
-async function pullForwardJob(jobId, to, windowEnd) {
+async function pullForwardJob(jobId, to, windowEnd, moveChain) {
   try {
     const body = {};
     if (to) body.to = to;
     if (windowEnd) body.windowEnd = windowEnd;
+    if (moveChain) body.moveChain = true;
     const res = await performTimedMove({ api, path: `/api/jobs/${jobId}/pull-forward`, body, confirmReshove });
     if (res.cancelled) return;
     await renderCalendar();
@@ -2878,6 +2879,7 @@ function openPullForwardModal(jobId) {
   const endInput   = document.getElementById('pullforward-window-end');
   const toggle     = document.getElementById('pullforward-window-toggle');
   const windowRow  = document.getElementById('pullforward-window-row');
+  const chainToggle = document.getElementById('pullforward-chain-toggle');
   // Default start = now. The user's most common intent is "tighten toward now".
   const now = new Date();
   startInput.value = toDatetimeLocal(now);
@@ -2885,6 +2887,8 @@ function openPullForwardModal(jobId) {
   // the window-end field for the fit-into-a-gap mode.
   toggle.checked = false;
   windowRow.classList.add('hidden');
+  // Default = move only the anchor. The toggle drags the following chain along.
+  if (chainToggle) chainToggle.checked = false;
   endInput.value = toDatetimeLocal(new Date(now.getTime() + 24 * 60 * 60 * 1000));
   document.getElementById('pullforward-modal').classList.remove('hidden');
   setTimeout(() => startInput.focus(), 50);
@@ -4177,11 +4181,12 @@ function setupListeners() {
     const startVal = document.getElementById('pullforward-datetime').value;
     const useWindow = document.getElementById('pullforward-window-toggle').checked;
     const endVal   = useWindow ? document.getElementById('pullforward-window-end').value : null;
+    const moveChain = document.getElementById('pullforward-chain-toggle').checked;
     const id = _pullForwardJobId;
     if (!startVal || id == null) return closePullForwardModal();
     closePullForwardModal();
     // No end time → force the exact start (verbatim + reshuffle). End time → window fit.
-    await pullForwardJob(id, startVal, endVal || null);
+    await pullForwardJob(id, startVal, endVal || null, moveChain);
   });
 
   // Reshove confirm modal
