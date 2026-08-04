@@ -301,10 +301,18 @@ describe('project push switch + UI wiring (index.html + app.js)', () => {
     expect(HTML).toContain('id="job-project"');
     expect(HTML).toContain('id="project-suggestions"');
     expect(HTML).toContain('id="ctx-assign-project"');
+    expect(HTML).toContain('id="bs-assign-project"');
     expect(HTML).toContain('id="projects-modal"');
     expect(HTML).toContain('id="project-detail-modal"');
     expect(HTML).toContain('id="assign-project-modal"');
     expect(HTML).toContain('id="push-notify-project"');
+  });
+
+  test('assign-to-project is wired on both desktop ctx-menu and tablet bottom sheet', () => {
+    expect(APP).toContain("getElementById('ctx-assign-project').addEventListener");
+    expect(APP).toContain("getElementById('bs-assign-project').addEventListener");
+    // both paths open the same existing-only picker
+    expect(APP.match(/openAssignProject\(id\)/g).length).toBeGreaterThanOrEqual(2);
   });
 
   test('app.js loads the stored project pref (default ON) and auto-saves it', () => {

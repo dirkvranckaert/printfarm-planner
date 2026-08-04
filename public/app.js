@@ -2566,6 +2566,11 @@ function setupBottomSheet() {
   document.getElementById('bs-move-next-day')?.addEventListener('click', async () => { const id = bsJobId; hideBottomSheet(); if (id !== null) await resolveConflictNextDay(id); });
   document.getElementById('bs-move-printer')?.addEventListener('click', async () => { const id = bsJobId; hideBottomSheet(); if (id !== null) await resolveConflictMovePrinter(id); });
 
+  document.getElementById('bs-assign-project').addEventListener('click', () => {
+    const id = bsJobId;
+    hideBottomSheet();
+    if (id !== null) openAssignProject(id);
+  });
   document.getElementById('bs-duplicate').addEventListener('click', () => {
     if (bsJobId !== null) duplicateJob(bsJobId);
     hideBottomSheet();
