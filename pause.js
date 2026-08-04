@@ -111,12 +111,14 @@ function pauseTick({ db, now, restr }) {
     // Cascade downstream Planned/Awaiting jobs if we drifted forward.
     if (newEndMs > oldEndMs) {
       const allSamePrinter = db.prepare(
-        "SELECT id, name, status, start, end FROM jobs WHERE printerId=? AND queued=0 AND start!='' AND id!=?"
+        "SELECT id, name, status, start, end, locked FROM jobs WHERE printerId=? AND queued=0 AND start!='' AND id!=?"
       ).all(printer.id, job.id);
 
       const chain = allSamePrinter
         .filter(j => {
-          if (!CASCADABLE_STATUSES.has(j.status)) return false;
+          // A locked job is never pushed by the pause drift cascade — it stays
+          // put and the overlap (if any) stands for manual resolution.
+          if (!CASCADABLE_STATUSES.has(j.status) || j.locked) return false;
           const s = scheduling.parseJobTime(j.start, tz);
           return s && s.getTime() >= oldEndMs;
         })

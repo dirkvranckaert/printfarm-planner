@@ -29,6 +29,7 @@ function makeDb() {
       end TEXT NOT NULL,
       queued INTEGER NOT NULL DEFAULT 0,
       linked_printer_id INTEGER,
+      locked INTEGER NOT NULL DEFAULT 0,
       paused_at TEXT,
       paused_remaining_ms INTEGER
     );
@@ -47,10 +48,10 @@ function addPrinter(db, name = 'P1S') {
   return db.prepare('SELECT * FROM printers WHERE id=?').get(r.lastInsertRowid);
 }
 
-function addJob(db, printerId, { name, status = 'Planned', start, end, linked_printer_id = null }) {
+function addJob(db, printerId, { name, status = 'Planned', start, end, linked_printer_id = null, locked = 0 }) {
   const r = db.prepare(
-    'INSERT INTO jobs (printerId, name, status, start, end, linked_printer_id) VALUES (?,?,?,?,?,?)'
-  ).run(printerId, name, status, start, end, linked_printer_id);
+    'INSERT INTO jobs (printerId, name, status, start, end, linked_printer_id, locked) VALUES (?,?,?,?,?,?,?)'
+  ).run(printerId, name, status, start, end, linked_printer_id, locked);
   return db.prepare('SELECT * FROM jobs WHERE id=?').get(r.lastInsertRowid);
 }
 
@@ -130,6 +131,26 @@ describe('pause.pauseTick', () => {
     const aEndMs = new Date(getJob(db, a.id).end).getTime();
     // B must start no earlier than A's new end + buffers (warm+cool = 20 min).
     expect(bStartMs).toBeGreaterThanOrEqual(aEndMs + 20 * 60000 - 1);
+  });
+
+  test('does NOT cascade a locked downstream job (overlap stands)', () => {
+    const db = makeDb();
+    const printer = addPrinter(db);
+    const a = addJob(db, printer.id, {
+      name: 'A', status: 'Printing',
+      start: '2026-04-13T08:00:00.000Z', end: '2026-04-13T09:00:00.000Z',
+      linked_printer_id: printer.id,
+    });
+    const bLocked = addJob(db, printer.id, {
+      name: 'B locked', status: 'Planned',
+      start: '2026-04-13T09:30:00.000Z', end: '2026-04-13T10:00:00.000Z',
+      locked: 1,
+    });
+    pause.beginPause({ db, jobId: a.id, now: new Date('2026-04-13T08:30:00.000Z') });
+    pause.pauseTick({ db, now: new Date('2026-04-13T09:30:00.000Z'), restr: RESTR });
+    // Locked B stays exactly where it was despite A drifting into it.
+    expect(getJob(db, bLocked.id).start).toBe('2026-04-13T09:30:00.000Z');
+    expect(getJob(db, bLocked.id).end).toBe('2026-04-13T10:00:00.000Z');
   });
 
   test('does not touch jobs in status != Paused', () => {

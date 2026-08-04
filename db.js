@@ -147,6 +147,25 @@ db.exec(`UPDATE jobs SET warm_up_mins =
   COALESCE((SELECT p.warm_up_mins FROM printers p WHERE p.id = jobs.printerId), 5)
   WHERE warm_up_mins IS NULL`);
 
+// Lock state. A locked job is immovable by every scheduling path (manual
+// push/pull, drag, planReshove, realign cascade, pause cascade, conflict
+// resolution). The ONE exception is the live printer-status end-time sync of
+// the job itself (realign writes the job's own start/end directly, bypassing
+// the route guards). Prod-safe guarded ALTER, mirroring cool_down_mins /
+// warm_up_mins above. DEFAULT 0 → all existing rows are unlocked, so the
+// recomputed schedule is byte-identical to before this migration.
+const jobColsLock = db.pragma('table_info(jobs)');
+if (!jobColsLock.some(c => c.name === 'locked')) {
+  db.exec('ALTER TABLE jobs ADD COLUMN locked INTEGER NOT NULL DEFAULT 0');
+}
+// Delay-conflict notification dedup flag (Part 3). Set once we've pushed the
+// "active print delayed into a locked job" notice for the CURRENTLY-active
+// conflict; cleared when the conflict clears (re-arm) or suppressed (=1) at
+// print-start when the overlap pre-existed. DEFAULT 0.
+if (!jobColsLock.some(c => c.name === 'conflict_notified')) {
+  db.exec('ALTER TABLE jobs ADD COLUMN conflict_notified INTEGER NOT NULL DEFAULT 0');
+}
+
 // One-time migration: if the favourite column was previously added with DEFAULT 0
 // (all printers show favourite=0), set them all to 1 so they appear in day view.
 const favMigrated = db.prepare("SELECT value FROM settings WHERE key='favouriteMigrated'").get();

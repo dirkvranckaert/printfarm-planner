@@ -128,6 +128,19 @@ function tryRealign(printer, job, remainingMins, { snapStart = false } = {}) {
       lastRealignAt.set(printer.id, Date.now());
       broadcastJobsUpdated();
     }
+    // Part 3: an active printing job's runtime delay has extended it into a
+    // locked (immovable) job. Notify once per active conflict.
+    if (result.notifyLockedConflict && push.isEnabled('conflict')) {
+      let body = `Printer ${printer.name}'s active print is delayed and now conflicts with the next job`;
+      if (result.conflictJob?.name) body += ` '${result.conflictJob.name}'`;
+      push.sendToAll({
+        title: 'PrintFarm',
+        body,
+        tag: `conflict-${printer.id}`,
+        requireInteraction: true,
+        url: `/#job/${job.id}`,
+      });
+    }
     return result;
   } catch (err) {
     console.error('[realign] error:', err.message);
@@ -530,11 +543,20 @@ app.post('/api/jobs', (req, res) => {
   res.status(201).json({ id: result.lastInsertRowid, ...req.body, start: normStart, end: normEnd, queued: isQueued, cool_down_mins: coolDownMins, warm_up_mins: warmUpMins });
 });
 app.put('/api/jobs/:id', (req, res) => {
-  const { printerId, name, customerName, orderNr, start, end, status, colors, printFile, remarks, queued, durationMins, bedType } = req.body;
+  const { name, customerName, orderNr, status, colors, printFile, remarks, queued, durationMins, bedType } = req.body;
+  const existing = db.prepare('SELECT start, end, printerId, cool_down_mins, warm_up_mins, locked FROM jobs WHERE id=?').get(req.params.id);
   const isQueued = queued ? 1 : 0;
+  // A locked job is immovable: the edit dialog (this PUT) can change any field
+  // EXCEPT its schedule. Preserve the stored start/end/printerId when locked so
+  // editing name/remarks/etc. never repositions it. Lock is NOT toggled here.
+  let { printerId, start, end } = req.body;
+  if (existing && existing.locked) {
+    printerId = existing.printerId;
+    start = existing.start;
+    end = existing.end;
+  }
   const normStart = isQueued ? '' : (normalizeJobTime(start) ?? '');
   const normEnd = isQueued ? '' : (normalizeJobTime(end) ?? '');
-  const existing = db.prepare('SELECT cool_down_mins, warm_up_mins FROM jobs WHERE id=?').get(req.params.id);
   const coolDownMins = resolveJobCoolDown(req.body.cool_down_mins, printerId, existing?.cool_down_mins);
   const warmUpMins = resolveJobWarmUp(req.body.warm_up_mins, printerId, existing?.warm_up_mins);
   db.prepare(
@@ -559,9 +581,27 @@ app.patch('/api/jobs/:id', (req, res) => {
     if (!result.ok) return res.status(result.code).json({ error: result.error });
     return res.json(db.prepare('SELECT * FROM jobs WHERE id=?').get(id));
   }
-  const allowed = ['printerId', 'name', 'customerName', 'orderNr', 'start', 'end', 'status', 'colors', 'printFile', 'remarks', 'queued', 'durationMins', 'linked_printer_id', 'bedType', 'cool_down_mins', 'warm_up_mins'];
+  // Lock state guards. The toggle is only allowed via this route (the context
+  // menu), never while the job is Printing / Awaiting Printer. And a locked job
+  // is immovable: strip start/end/printerId from any PATCH so a drag, resize,
+  // conflict "next day" / "move printer" can't reposition it. The live printer
+  // sync moves the job's own end via realign.js (direct UPDATE), not this route,
+  // so that exception is unaffected.
+  const lockRow = db.prepare('SELECT status, locked FROM jobs WHERE id=?').get(req.params.id);
+  if ('locked' in req.body && lockRow
+      && (lockRow.status === 'Printing' || lockRow.status === 'Awaiting Printer')) {
+    return res.status(409).json({ error: 'Cannot change lock state while the job is Printing or Awaiting Printer' });
+  }
+  // Effective lock state after this PATCH: honour an incoming unlock in the same
+  // request, otherwise use the stored value.
+  const willBeLocked = 'locked' in req.body
+    ? Number(req.body.locked) === 1
+    : !!(lockRow && lockRow.locked);
+  const MOVE_FIELDS = new Set(['start', 'end', 'printerId']);
+  const allowed = ['printerId', 'name', 'customerName', 'orderNr', 'start', 'end', 'status', 'colors', 'printFile', 'remarks', 'queued', 'durationMins', 'linked_printer_id', 'bedType', 'cool_down_mins', 'warm_up_mins', 'locked'];
   const fields = Object.entries(req.body)
     .filter(([k]) => allowed.includes(k))
+    .filter(([k]) => !(willBeLocked && MOVE_FIELDS.has(k)))
     // Defense-in-depth: cool_down_mins / warm_up_mins are written raw here,
     // bypassing the resolve* helpers. Drop either unless it's a valid
     // non-negative integer so a bad value (null/''/negative/non-numeric) can't
@@ -570,6 +610,8 @@ app.patch('/api/jobs/:id', (req, res) => {
     .map(([k, v]) => {
       if ((k === 'start' || k === 'end') && v) return [k, normalizeJobTime(v)];
       if (k === 'cool_down_mins' || k === 'warm_up_mins') return [k, Number(v)];
+      // Coerce lock to 0/1 — SQLite binds reject a raw boolean.
+      if (k === 'locked') return [k, v ? 1 : 0];
       return [k, v];
     });
   if (!fields.length) return res.status(400).json({ error: 'no valid fields' });
@@ -591,7 +633,7 @@ app.patch('/api/jobs/:id', (req, res) => {
 // can tell printer-anchored jobs apart.
 function loadPrinterJobs(printerId, printer) {
   return db.prepare(
-    "SELECT id, name, status, start, end, cool_down_mins, warm_up_mins, linked_printer_id FROM jobs WHERE printerId=? AND queued=0 AND start!=''"
+    "SELECT id, name, status, start, end, cool_down_mins, warm_up_mins, linked_printer_id, locked FROM jobs WHERE printerId=? AND queued=0 AND start!=''"
   ).all(printerId).map(j => ({
     ...j,
     coolDownMs: (j.cool_down_mins ?? printer?.cool_down_mins ?? 15) * 60000,
@@ -601,15 +643,16 @@ function loadPrinterJobs(printerId, printer) {
 
 // Split a printer's jobs (excluding the anchor) into the sets scheduling.planReshove
 // needs: `movable` = jobs the cascade may push back (Planned/Awaiting, not linked
-// to a printer); `fixed` = everything else (Printing, Awaiting Printer, Done,
-// Paused, or printer-linked) — obstacles the reshove routes around but never moves.
+// to a printer, not locked); `fixed` = everything else (Printing, Awaiting Printer,
+// Done, Paused, printer-linked, or locked) — obstacles the reshove routes around
+// but never moves. A locked job joins the fixed bucket exactly like a Printing job.
 const RESHOVE_MOVABLE_STATUSES = new Set(['Planned', 'Awaiting']);
 function classifyForReshove(allSamePrinter, anchorId) {
   const movable = [];
   const fixed = [];
   for (const j of allSamePrinter) {
     if (j.id === anchorId) continue;
-    if (RESHOVE_MOVABLE_STATUSES.has(j.status) && j.linked_printer_id == null) movable.push(j);
+    if (RESHOVE_MOVABLE_STATUSES.has(j.status) && j.linked_printer_id == null && !j.locked) movable.push(j);
     else fixed.push(j);
   }
   return { movable, fixed };
@@ -664,6 +707,8 @@ app.post('/api/jobs/:id/push-back', (req, res) => {
   if (!anchor || anchor.queued || !anchor.start) {
     return res.status(400).json({ error: 'Job is not scheduled' });
   }
+  // A locked job is immovable — never moved by a manual push-back either.
+  if (anchor.locked) return res.json({ updatedCount: 0, updates: [] });
   const restr = getSchedulingRestrictions();
   const tz = restr.timezone || DEFAULT_TZ;
   const toRaw = req.body?.to;
@@ -713,6 +758,8 @@ app.post('/api/jobs/:id/pull-forward', (req, res) => {
   if (!anchor || anchor.queued || !anchor.start) {
     return res.status(400).json({ error: 'Job is not scheduled' });
   }
+  // A locked job is immovable — never moved by a manual pull-forward either.
+  if (anchor.locked) return res.json({ updatedCount: 0, updates: [] });
   const restr = getSchedulingRestrictions();
   const tz = restr.timezone || DEFAULT_TZ;
   const toRaw = req.body?.to;
