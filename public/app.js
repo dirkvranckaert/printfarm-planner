@@ -1519,6 +1519,10 @@ function expandDayBodyForDrag(bottomMins) {
 
 function onDragMove(e) {
   if (!drag) return;
+  // Snap-to-avoid-overlap is opt-in: hold CTRL (or Cmd on Mac) to snap a drop
+  // clear of other jobs' print windows. Without a modifier, drops are free —
+  // the job lands at the dropped time (still on the 15-min grid).
+  const wantSnap = !!(e && (e.ctrlKey || e.metaKey));
 
   if (drag.type === 'queue-schedule') {
     drag.moved = true;
@@ -1537,9 +1541,11 @@ function onDragMove(e) {
       const proposed = snap15(Math.max(0, Math.min(pxToMin(e.clientY - rect.top), DAY_MINS + 240 - drag.durationMins)));
       drag.printerId = parseInt(targetCol.dataset.printerId);
       // Avoid landing on top of an existing job's warm-up / cool-down buffer
-      // on the same printer column. Mirrors the "move" branch behaviour so
-      // queue-drag drops don't ignore pre/post print time.
-      const snapped = snapAvoidingJobs(proposed, drag.durationMins, drag.printerId, drag.jobId);
+      // on the same printer column (opt-in via CTRL/Cmd). Mirrors the "move"
+      // branch so queue-drag drops don't ignore pre/post print time when snapping.
+      const snapped = wantSnap
+        ? snapAvoidingJobs(proposed, drag.durationMins, drag.printerId, drag.jobId)
+        : proposed;
       const y = Math.max(0, Math.min(snapped, DAY_MINS + 240 - drag.durationMins));
       drag.currentMins = y;
 
@@ -1600,7 +1606,10 @@ function onDragMove(e) {
     const rect = drag.colEl.getBoundingClientRect();
     const y    = snap15(Math.max(0, Math.min(pxToMin(e.clientY - rect.top), DAY_MINS + 240)));
 
-    const snapped = snapAvoidingJobs(snap15(Math.max(0, Math.min(y - drag.offsetMins, DAY_MINS + 240 - drag.durationMins))), drag.durationMins, drag.printerId, drag.jobId);
+    const base    = snap15(Math.max(0, Math.min(y - drag.offsetMins, DAY_MINS + 240 - drag.durationMins)));
+    const snapped = wantSnap
+      ? snapAvoidingJobs(base, drag.durationMins, drag.printerId, drag.jobId)
+      : base;
     const newTop  = Math.max(0, Math.min(snapped, DAY_MINS + 240 - drag.durationMins));
     if (Math.abs(newTop - drag.currentTopMins) >= 1) drag.moved = true;
     drag.currentTopMins = newTop;
