@@ -893,6 +893,24 @@ describe('pull-forward — move following chain toggle', () => {
     expect(as < le && ls < ae).toBe(false);
   });
 
+  test('toggle ON + WINDOW mode: locked job in the chain is skipped, tail pulls forward around it', async () => {
+    const anchor = addJob('2026-04-13T14:00:00Z', '2026-04-13T15:00:00Z');
+    const f1 = addJob('2026-04-13T15:20:00Z', '2026-04-13T16:20:00Z');                 // chains
+    const lockedMid = addJob('2026-04-13T16:40:00Z', '2026-04-13T17:40:00Z', { locked: 1 }); // skipped, stays
+    const after = addJob('2026-04-13T18:00:00Z', '2026-04-13T19:00:00Z');              // tight past locked → pulled in
+    // Window [08:00, 12:00] has a clean gap for the anchor → clean-fit tight-pack path.
+    const r = await request(app).post(`/api/jobs/${anchor}/pull-forward`)
+      .set('Cookie', authCookie).send({ to: '2026-04-13T08:00:00Z', windowEnd: '2026-04-13T12:00:00Z', moveChain: true });
+    expect(r.status).toBe(200);
+    expect(getJob(anchor).start).toBe(iso('2026-04-13T08:00:00Z'));
+    expect(getJob(f1).start).toBe(iso('2026-04-13T09:20:00Z'));
+    // Tail after the locked job pulls forward: packs behind f1 (end 10:20Z + 20m = 10:40Z).
+    expect(getJob(after).start).toBe(iso('2026-04-13T10:40:00Z'));
+    // Locked job byte-unchanged — it is an obstacle the window chain routes around.
+    expect(getJob(lockedMid).start).toBe(iso('2026-04-13T16:40:00Z'));
+    expect(getJob(lockedMid).end).toBe(iso('2026-04-13T17:40:00Z'));
+  });
+
   test('toggle ON: block landing on a non-chain job → needsReshove, then reshove on confirm', async () => {
     const anchor = addJob('2026-04-13T14:00:00Z', '2026-04-13T15:00:00Z');
     const follower = addJob('2026-04-13T15:20:00Z', '2026-04-13T16:20:00Z'); // chains with anchor
