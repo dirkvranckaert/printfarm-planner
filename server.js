@@ -7,6 +7,7 @@ const db     = require('./db');
 const brands = require('./brands');
 const push   = require('./push');
 const pause  = require('./pause');
+const projects = require('./projects');
 const awaitingPrinter = require('./awaiting-printer');
 const { parse3mf, extractThumbnails } = require('./parse3mf');
 const sharedAuth = require('./shared-auth');
@@ -530,6 +531,29 @@ function resolveJobWarmUp(explicit, printerId, fallback) {
   const p = printerId ? db.prepare('SELECT warm_up_mins FROM printers WHERE id=?').get(printerId) : null;
   return p?.warm_up_mins ?? 5;
 }
+// Resolve a free-text project name for a job, set jobs.project_id, and fire the
+// first-create push (behind the `project` toggle). `name` undefined = field not
+// supplied -> leave the job's project untouched. `name` explicit '' = clear it.
+// Returns the resolve result (or null) for callers that want the created flag.
+function applyProjectToJob(jobId, name) {
+  if (name === undefined) return null;
+  const result = projects.resolveProject({ db, name });
+  if (!result) {
+    // Blank name -> detach the job from any project.
+    db.prepare('UPDATE jobs SET project_id=NULL WHERE id=?').run(jobId);
+    return null;
+  }
+  db.prepare('UPDATE jobs SET project_id=? WHERE id=?').run(result.id, jobId);
+  if (result.created && push.isEnabled('project')) {
+    push.sendToAll({
+      title: 'PrintFarm',
+      body: `New project created: ${result.label}`,
+      tag: `project-${result.id}`,
+      url: '/',
+    });
+  }
+  return result;
+}
 app.post('/api/jobs', (req, res) => {
   const { printerId, name, customerName, orderNr, start, end, status, colors, printFile, remarks, queued, durationMins, bedType } = req.body;
   const isQueued = queued ? 1 : 0;
@@ -540,7 +564,9 @@ app.post('/api/jobs', (req, res) => {
   const result = db.prepare(
     'INSERT INTO jobs (printerId, name, customerName, orderNr, start, end, status, colors, printFile, remarks, queued, durationMins, bedType, cool_down_mins, warm_up_mins) VALUES (?,?,?,?,?,?,?,?,?,?,?,?,?,?,?)'
   ).run(printerId, name, customerName, orderNr, normStart, normEnd, status ?? 'Planned', colors, printFile, remarks, isQueued, durationMins ?? 0, bedType ?? null, coolDownMins, warmUpMins);
-  res.status(201).json({ id: result.lastInsertRowid, ...req.body, start: normStart, end: normEnd, queued: isQueued, cool_down_mins: coolDownMins, warm_up_mins: warmUpMins });
+  applyProjectToJob(result.lastInsertRowid, req.body.project);
+  const projectId = db.prepare('SELECT project_id FROM jobs WHERE id=?').get(result.lastInsertRowid)?.project_id ?? null;
+  res.status(201).json({ id: result.lastInsertRowid, ...req.body, start: normStart, end: normEnd, queued: isQueued, cool_down_mins: coolDownMins, warm_up_mins: warmUpMins, project_id: projectId });
 });
 app.put('/api/jobs/:id', (req, res) => {
   const { name, customerName, orderNr, status, colors, printFile, remarks, queued, durationMins, bedType } = req.body;
@@ -565,7 +591,9 @@ app.put('/api/jobs/:id', (req, res) => {
   // If the user moves a job out of 'Paused' via the edit dialog, clear the
   // stale pause snapshot so it does not drift on the next tick.
   if (status !== 'Paused') pause.clearPauseFields({ db, jobId: Number(req.params.id) });
-  res.json({ id: Number(req.params.id), ...req.body, start: normStart, end: normEnd, queued: isQueued, cool_down_mins: coolDownMins, warm_up_mins: warmUpMins });
+  applyProjectToJob(Number(req.params.id), req.body.project);
+  const projectId = db.prepare('SELECT project_id FROM jobs WHERE id=?').get(req.params.id)?.project_id ?? null;
+  res.json({ id: Number(req.params.id), ...req.body, start: normStart, end: normEnd, queued: isQueued, cool_down_mins: coolDownMins, warm_up_mins: warmUpMins, project_id: projectId });
 });
 app.patch('/api/jobs/:id', (req, res) => {
   // "Link when printer starts": enter the 'Awaiting Printer' pending state.
@@ -962,6 +990,42 @@ app.delete('/api/jobs/:id', (req, res) => {
   res.status(204).end();
 });
 
+// ---- Projects ----
+// Sorted summary list: active projects first (most active first), completed
+// below, closed at the very bottom. Each carries { toPrint, busy, done, total }.
+app.get('/api/projects', (req, res) => {
+  res.json(projects.summaries(db));
+});
+// Project detail: the project row + all its jobs (for the grouped-by-status
+// detail view, which reuses the Job Status Overview rendering client-side).
+app.get('/api/projects/:id', (req, res) => {
+  const id = projects.normalizeId(req.params.id);
+  const project = db.prepare('SELECT id, label, status, created_at FROM projects WHERE id=?').get(id);
+  if (!project) return res.status(404).json({ error: 'Project not found' });
+  const jobs = db.prepare('SELECT * FROM jobs WHERE project_id=?').all(id);
+  res.json({ project, jobs });
+});
+// Manual close (from the project detail dialog). A later matching job auto-reopens
+// it (see resolveProject).
+app.post('/api/projects/:id/close', (req, res) => {
+  const id = projects.normalizeId(req.params.id);
+  const project = db.prepare('SELECT id FROM projects WHERE id=?').get(id);
+  if (!project) return res.status(404).json({ error: 'Project not found' });
+  db.prepare("UPDATE projects SET status='closed' WHERE id=?").run(id);
+  res.json({ id, status: 'closed' });
+});
+// Context-menu assign: attach a job to an EXISTING project only (never creates).
+app.post('/api/jobs/:id/assign-project', (req, res) => {
+  const jobId = Number(req.params.id);
+  const job = db.prepare('SELECT id FROM jobs WHERE id=?').get(jobId);
+  if (!job) return res.status(404).json({ error: 'Job not found' });
+  const result = projects.assignExisting({ db, jobId, projectId: req.body.projectId });
+  if (!result.ok) {
+    return res.status(result.code).json({ error: result.code === 404 ? 'Project not found' : 'projectId required' });
+  }
+  res.json({ id: jobId, project_id: result.id, reopened: result.reopened });
+});
+
 // --- Closures ---
 app.get('/api/closures', (req, res) => {
   res.json(db.prepare('SELECT * FROM closures').all());
@@ -1136,6 +1200,10 @@ app.post('/api/import-3mf-schedule', express.raw({ type: '*/*', limit: '500mb' }
     const isFirstAvailable = mode === 'first-available';
     if (!plates?.length || (!isFirstAvailable && !startISO && !startDate)) return res.status(400).json({ error: 'plates and start time required' });
 
+    // Resolve the (optional) batch project ONCE, so every imported job shares
+    // the same project_id and the first-create push fires at most once.
+    const proj = schedule.project ? projects.resolveProject({ db, name: schedule.project }) : null;
+
     // Expand each plate by its `copies` count (default 1), preserving order.
     // Validate up-front so an invalid/oversized count rejects before any file
     // IO — copies are never silently dropped. Copies cascade back-to-back on
@@ -1206,6 +1274,8 @@ app.post('/api/import-3mf-schedule', express.raw({ type: '*/*', limit: '500mb' }
         warmUp
       );
 
+      if (proj) db.prepare('UPDATE jobs SET project_id=? WHERE id=?').run(proj.id, result.lastInsertRowid);
+
       createdJobs.push({
         id: result.lastInsertRowid,
         name: pl.name,
@@ -1220,7 +1290,17 @@ app.post('/api/import-3mf-schedule', express.raw({ type: '*/*', limit: '500mb' }
       currentStart = new Date(endDate.getTime() + (coolDown + warmUp) * 60000);
     }
 
-    res.status(201).json({ jobs: createdJobs, file: storedName });
+    // First-create push (once per batch), behind the `project` toggle.
+    if (proj?.created && push.isEnabled('project')) {
+      push.sendToAll({
+        title: 'PrintFarm',
+        body: `New project created: ${proj.label}`,
+        tag: `project-${proj.id}`,
+        url: '/',
+      });
+    }
+
+    res.status(201).json({ jobs: createdJobs, file: storedName, project_id: proj?.id ?? null });
   } catch (err) {
     res.status(400).json({ error: err.message });
   }

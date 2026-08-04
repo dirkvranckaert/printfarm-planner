@@ -28,6 +28,7 @@
         🖨 <span id="printer-status-badge"></span>
       </button>
       <button id="btn-add-job" class="btn btn-primary">+ Job</button>
+      <button id="btn-projects" class="btn btn-secondary">Projecten</button>
       <button id="btn-queue" class="btn btn-secondary">Queue</button>
       <div class="topbar-menu-wrap" id="topbar-menu-wrap">
         <button class="btn btn-secondary topbar-menu-btn" id="btn-topbar-menu" title="Menu" aria-expanded="false">⋮</button>
@@ -106,6 +107,11 @@
             <label for="job-ordernr">Order number</label>
             <input type="text" id="job-ordernr" placeholder="Optional">
           </div>
+        </div>
+        <div class="form-group">
+          <label for="job-project">Project</label>
+          <input type="text" id="job-project" placeholder="Optional — new or existing" list="project-suggestions" autocomplete="off">
+          <datalist id="project-suggestions"></datalist>
         </div>
         <div class="form-group">
           <label for="job-printer">Printer *</label>
@@ -469,6 +475,7 @@
               <label class="checkbox-label" style="font-size:13px;margin-top:4px"><input type="checkbox" id="push-notify-upcoming"><span>Scheduled job about to start</span></label>
               <label class="checkbox-label" style="font-size:13px;margin-top:4px"><input type="checkbox" id="push-notify-paused"><span>Printer paused mid-print</span></label>
               <label class="checkbox-label" style="font-size:13px;margin-top:4px"><input type="checkbox" id="push-notify-conflict"><span>Active print delayed into a locked job</span></label>
+              <label class="checkbox-label" style="font-size:13px;margin-top:4px"><input type="checkbox" id="push-notify-project"><span>New project created</span></label>
               <div style="margin-top:10px;display:flex;align-items:center;gap:8px">
                 <button type="button" id="btn-test-push" class="btn btn-secondary btn-sm">🔔 Test push</button>
                 <span style="font-size:11px;color:var(--text-muted)">Sends a real test push to every subscribed device.</span>
@@ -567,6 +574,7 @@
     <button class="ctx-item" id="ctx-pull-now">⏪ Pull forward to now</button>
     <button class="ctx-item" id="ctx-pull-to">⏪ Pull forward to…</button>
     <div class="ctx-separator"></div>
+    <button class="ctx-item" id="ctx-assign-project">📁 Assign to project</button>
     <button class="ctx-item" id="ctx-duplicate">📋 Duplicate</button>
     <button class="ctx-item ctx-item-danger" id="ctx-delete">🗑 Delete</button>
   </div>
@@ -680,6 +688,61 @@
       <div class="modal-footer">
         <div class="modal-footer-right">
           <button class="btn btn-secondary" data-close="status-overview-modal">Close</button>
+        </div>
+      </div>
+    </div>
+  </div>
+
+  <!-- ==================== Projects Modal ==================== -->
+  <div id="projects-modal" class="modal-overlay hidden">
+    <div class="modal modal-wide">
+      <div class="modal-header">
+        <h2>Projecten</h2>
+        <button class="modal-close" data-close="projects-modal">✕</button>
+      </div>
+      <div class="modal-body" id="projects-body"></div>
+      <div class="modal-footer">
+        <div class="modal-footer-right">
+          <button class="btn btn-secondary" data-close="projects-modal">Close</button>
+        </div>
+      </div>
+    </div>
+  </div>
+
+  <!-- ==================== Project Detail Modal ==================== -->
+  <div id="project-detail-modal" class="modal-overlay hidden">
+    <div class="modal modal-wide">
+      <div class="modal-header">
+        <h2 id="project-detail-title">Project</h2>
+        <button class="modal-close" data-close="project-detail-modal">✕</button>
+      </div>
+      <div class="modal-body" id="project-detail-body"></div>
+      <div class="modal-footer">
+        <button id="btn-close-project" class="btn btn-secondary">Close project</button>
+        <div class="modal-footer-right">
+          <button class="btn btn-secondary" data-close="project-detail-modal">Close</button>
+        </div>
+      </div>
+    </div>
+  </div>
+
+  <!-- ==================== Assign to Project Modal ==================== -->
+  <div id="assign-project-modal" class="modal-overlay hidden">
+    <div class="modal">
+      <div class="modal-header">
+        <h2>Assign to project</h2>
+        <button class="modal-close" data-close="assign-project-modal">✕</button>
+      </div>
+      <div class="modal-body">
+        <div class="form-group" style="margin-bottom:0">
+          <label for="assign-project-select">Existing project</label>
+          <select id="assign-project-select"></select>
+        </div>
+      </div>
+      <div class="modal-footer">
+        <div class="modal-footer-right">
+          <button class="btn btn-secondary" data-close="assign-project-modal">Cancel</button>
+          <button id="btn-assign-project" class="btn btn-primary">Assign</button>
         </div>
       </div>
     </div>

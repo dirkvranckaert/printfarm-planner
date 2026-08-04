@@ -3069,6 +3069,18 @@ async function openJobModal(jobId = null, prefill = {}) {
   document.getElementById('customer-suggestions').innerHTML =
     customers.map(c => `<option value="${escHtml(c)}">`).join('');
 
+  // Populate project suggestions (datalist) + prefill the current job's project.
+  await loadProjectSuggestions();
+  const projInput = document.getElementById('job-project');
+  if (projInput) {
+    if (jobId !== null) {
+      const job = allJobs.find(j => j.id === jobId);
+      projInput.value = job?.project_id ? (projectsById[job.project_id]?.label ?? job.project_id) : '';
+    } else {
+      projInput.value = prefill.project ?? '';
+    }
+  }
+
   // Always open in duration mode; derive h/m from start+end when available
   setEndMode('duration', startVal, endVal);
 
@@ -3094,6 +3106,7 @@ async function saveJob() {
   const printFile    = document.getElementById('job-printfile').value.trim();
   const bedType      = document.getElementById('job-bedtype').value || null;
   const remarks      = document.getElementById('job-remarks').value.trim();
+  const project      = document.getElementById('job-project').value.trim();
   const status       = editingJobStatus;
   // Blank cool-down → omit so the server keeps the snapshot (or takes a fresh
   // one from the printer on create). A number is a manual per-job override.
@@ -3110,7 +3123,7 @@ async function saveJob() {
     const qm = parseInt(document.getElementById('job-queue-dur-m').value) || 0;
     if (qh === 0 && qm === 0) return alert('Please enter an expected duration.');
     const durationMins = qh * 60 + qm;
-    const data = { printerId, name, customerName, orderNr, colors, printFile, bedType, remarks, status, queued: true, durationMins };
+    const data = { printerId, name, customerName, orderNr, colors, printFile, bedType, remarks, status, queued: true, durationMins, project };
     if (coolDownMins != null) data.cool_down_mins = coolDownMins;
     if (warmUpMins != null) data.warm_up_mins = warmUpMins;
     if (wasEditing) await api('PUT', `/api/jobs/${editJobId}`, data);
@@ -3149,7 +3162,7 @@ async function saveJob() {
     }
   }
 
-  const data = { printerId, name, customerName, orderNr, colors, printFile, bedType, remarks, start, end, status, queued: false };
+  const data = { printerId, name, customerName, orderNr, colors, printFile, bedType, remarks, start, end, status, queued: false, project };
   if (coolDownMins != null) data.cool_down_mins = coolDownMins;
   if (warmUpMins != null) data.warm_up_mins = warmUpMins;
   if (wasEditing) await api('PUT', `/api/jobs/${editJobId}`, data);
@@ -3612,16 +3625,19 @@ async function openSettingsModal() {
   const pnu = await api('GET', '/api/settings/push.notify.upcoming').catch(() => null);
   const pnp = await api('GET', '/api/settings/push.notify.paused').catch(() => null);
   const pnc = await api('GET', '/api/settings/push.notify.conflict').catch(() => null);
+  const pnpr = await api('GET', '/api/settings/push.notify.project').catch(() => null);
   const cbDone     = document.getElementById('push-notify-done');
   const cbStarted  = document.getElementById('push-notify-started');
   const cbUpcoming = document.getElementById('push-notify-upcoming');
   const cbPaused   = document.getElementById('push-notify-paused');
   const cbConflict = document.getElementById('push-notify-conflict');
+  const cbProject  = document.getElementById('push-notify-project');
   if (cbDone)     cbDone.checked     = pnd?.value !== false;
   if (cbStarted)  cbStarted.checked  = pns?.value !== false;
   if (cbUpcoming) cbUpcoming.checked = pnu?.value !== false;
   if (cbPaused)   cbPaused.checked   = pnp?.value !== false;
   if (cbConflict) cbConflict.checked = pnc?.value !== false;
+  if (cbProject)  cbProject.checked  = pnpr?.value !== false;
 
   // Load scheduling restrictions
   const schedRestr = await api('GET', '/api/settings/schedulingRestrictions');
@@ -3779,7 +3795,7 @@ function setupSettingsAutoSave() {
   }));
 
   // Push notifications
-  ['push-notify-done', 'push-notify-started', 'push-notify-upcoming', 'push-notify-paused', 'push-notify-conflict'].forEach(id => {
+  ['push-notify-done', 'push-notify-started', 'push-notify-upcoming', 'push-notify-paused', 'push-notify-conflict', 'push-notify-project'].forEach(id => {
     q(id)?.addEventListener('change', function() { autoSave('push.notify.' + id.replace('push-notify-', ''), this.checked); });
   });
   q('btn-test-push')?.addEventListener('click', async () => {
@@ -4006,9 +4022,19 @@ function updateStatusOverviewBadge() {
 function renderStatusOverviewBody() {
   const body = document.getElementById('status-overview-body');
   if (!body) return;
+  const scheduled = Object.values(jobsCache).filter(j => !j.queued);
+  renderStatusGroups(body, scheduled, soCollapsed);
+}
+
+// Shared status-grouped renderer used by BOTH the Job Status Overview and the
+// project detail view. Groups `jobList` by status into SO_STATUS_ORDER sections
+// with per-section counts + job rows, honouring `collapsed` (a Set of collapsed
+// status names). Left-click a row -> jump to the job; right-click -> status menu.
+function renderStatusGroups(body, jobList, collapsed) {
+  if (!body) return;
 
   const printerMap = Object.fromEntries(printers.map(p => [p.id, p]));
-  const scheduled = Object.values(jobsCache).filter(j => !j.queued);
+  const scheduled = jobList;
 
   const p2 = n => String(n).padStart(2, '0');
   const fmtDateTime = d => {
@@ -4022,7 +4048,7 @@ function renderStatusOverviewBody() {
       .filter(j => (j.status ?? 'Planned') === status)
       .sort((a, b) => new Date(b.start) - new Date(a.start));
 
-    const expanded = !soCollapsed.has(status);
+    const expanded = !collapsed.has(status);
     h += `<div class="so-section">
       <div class="so-section-header" data-so-status="${escHtml(status)}">
         <span class="job-status-badge" style="${statusBadgeStyle(status)}">${escHtml(status)}</span>
@@ -4063,7 +4089,7 @@ function renderStatusOverviewBody() {
       const toggle = hdr.querySelector('.so-section-toggle');
       const isHidden = sectionBody.classList.toggle('hidden');
       toggle.textContent = isHidden ? '▼' : '▲';
-      if (isHidden) soCollapsed.add(status); else soCollapsed.delete(status);
+      if (isHidden) collapsed.add(status); else collapsed.delete(status);
     });
   });
 
@@ -4097,6 +4123,112 @@ async function openStatusOverview() {
   }
   renderStatusOverviewBody();
   document.getElementById('status-overview-modal').classList.remove('hidden');
+}
+
+// =============================================================================
+// Projects
+// =============================================================================
+// id -> { id, label, status, ... } cache, refreshed whenever we fetch the list.
+let projectsById = {};
+let pdProjectId = null;                 // project id shown in the detail modal
+let pdCollapsed = null;                 // per-status collapsed set for the detail view
+
+// Fetch the sorted project summaries and refresh the id->label cache.
+async function fetchProjects() {
+  const list = await api('GET', '/api/projects');
+  projectsById = Object.fromEntries(list.map(p => [p.id, p]));
+  return list;
+}
+
+// Populate the #project-suggestions datalist (used by the +job / edit field).
+async function loadProjectSuggestions() {
+  const list = await fetchProjects().catch(() => []);
+  const dl = document.getElementById('project-suggestions');
+  if (dl) dl.innerHTML = list.map(p => `<option value="${escHtml(p.label)}">`).join('');
+}
+
+// Compact per-project counter: "5/12  ● 1 bezig" (done/total + busy badge).
+function projectCounterHtml(p) {
+  const busyBadge = p.busy > 0
+    ? ` <span class="project-busy-badge">● ${p.busy} bezig</span>`
+    : '';
+  return `<span class="project-counter">${p.done}/${p.total}</span>${busyBadge}`;
+}
+
+async function openProjectsModal() {
+  const list = await fetchProjects();
+  const body = document.getElementById('projects-body');
+  if (list.length === 0) {
+    body.innerHTML = `<div class="so-empty">Nog geen projecten.</div>`;
+  } else {
+    body.innerHTML = list.map(p => {
+      const closed = p.status === 'closed';
+      const closedTag = closed ? ` <span class="project-closed-tag">gesloten</span>` : '';
+      return `<div class="project-row${closed ? ' project-row-closed' : ''}" data-project-id="${escHtml(p.id)}">
+        <span class="project-row-label">${escHtml(p.label)}${closedTag}</span>
+        <span class="project-row-counter">${projectCounterHtml(p)}</span>
+      </div>`;
+    }).join('');
+    body.querySelectorAll('.project-row[data-project-id]').forEach(row => {
+      row.addEventListener('click', () => openProjectDetail(row.dataset.projectId));
+    });
+  }
+  document.getElementById('projects-modal').classList.remove('hidden');
+}
+
+async function openProjectDetail(projectId) {
+  const data = await api('GET', `/api/projects/${encodeURIComponent(projectId)}`);
+  if (!data) return;
+  pdProjectId = data.project.id;
+  // Reuse the same expand-default as the status overview.
+  pdCollapsed = new Set(SO_STATUS_ORDER.filter(s => !SO_EXPAND_DEFAULT.includes(s)));
+  const closed = data.project.status === 'closed';
+  const title = document.getElementById('project-detail-title');
+  title.textContent = data.project.label + (closed ? ' (gesloten)' : '');
+  // The detail view reuses the Job Status Overview rendering, filtered to this
+  // project's jobs. printers is already populated by the app boot / overview.
+  renderStatusGroups(document.getElementById('project-detail-body'), data.jobs.filter(j => !j.queued), pdCollapsed);
+  // Hide the "Close project" control for an already-closed project.
+  document.getElementById('btn-close-project').classList.toggle('hidden', closed);
+  document.getElementById('project-detail-modal').classList.remove('hidden');
+}
+
+async function closeCurrentProject() {
+  if (!pdProjectId) return;
+  if (!confirm('Dit project sluiten? Het zakt naar onder in de lijst.')) return;
+  await api('POST', `/api/projects/${encodeURIComponent(pdProjectId)}/close`);
+  closeModal('project-detail-modal');
+  openProjectsModal();
+}
+
+// Context-menu "Assign to project": picker of EXISTING projects only.
+async function openAssignProject(jobId) {
+  const list = await fetchProjects();
+  const open = list.filter(p => p.status !== 'closed');
+  const sel = document.getElementById('assign-project-select');
+  if (open.length === 0) {
+    alert('Nog geen projecten om aan toe te wijzen. Maak er eerst een via +Job.');
+    return;
+  }
+  sel.innerHTML = open.map(p => `<option value="${escHtml(p.id)}">${escHtml(p.label)}</option>`).join('');
+  sel.dataset.jobId = String(jobId);
+  document.getElementById('assign-project-modal').classList.remove('hidden');
+}
+
+async function confirmAssignProject() {
+  const sel = document.getElementById('assign-project-select');
+  const jobId = parseInt(sel.dataset.jobId);
+  const projectId = sel.value;
+  if (!jobId || !projectId) return;
+  try {
+    await api('POST', `/api/jobs/${jobId}/assign-project`, { projectId });
+    closeModal('assign-project-modal');
+    renderCalendar();
+  } catch (err) {
+    let msg = err.message;
+    try { msg = JSON.parse(err.message).error || msg; } catch { /* raw */ }
+    alert(msg);
+  }
 }
 
 // =============================================================================
@@ -4139,6 +4271,11 @@ function setupListeners() {
       }
       hideCtxMenu();
     });
+  });
+  document.getElementById('ctx-assign-project').addEventListener('click', () => {
+    const id = ctxJobId;
+    hideCtxMenu();
+    if (id !== null) openAssignProject(id);
   });
   document.getElementById('ctx-duplicate').addEventListener('click', () => {
     if (ctxJobId !== null) duplicateJob(ctxJobId);
@@ -4312,6 +4449,10 @@ function setupListeners() {
     showQueuePanel = !showQueuePanel;
     renderQueuePanel();
   });
+
+  document.getElementById('btn-projects').addEventListener('click', openProjectsModal);
+  document.getElementById('btn-close-project').addEventListener('click', closeCurrentProject);
+  document.getElementById('btn-assign-project').addEventListener('click', confirmAssignProject);
 
   document.getElementById('job-queued').addEventListener('change', e => {
     setQueuedMode(e.target.checked);

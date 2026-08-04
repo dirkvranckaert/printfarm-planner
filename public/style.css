@@ -909,6 +909,43 @@ h3 { font-size: 14px; font-weight: 600; margin-bottom: 12px; }
 .so-row-date { color: var(--text-muted); font-size: 12px; }
 .so-empty { padding: 10px 14px; color: var(--text-muted); font-size: 13px; }
 
+/* ======================== Projects list ======================== */
+.project-row {
+  display: flex;
+  align-items: center;
+  justify-content: space-between;
+  gap: 12px;
+  padding: 10px 14px;
+  border: 1px solid var(--border);
+  border-radius: 8px;
+  margin-bottom: 8px;
+  cursor: pointer;
+}
+.project-row:hover { background: var(--bg); }
+.project-row-label { font-weight: 600; font-size: 14px; }
+.project-row-counter { display: inline-flex; align-items: center; gap: 8px; white-space: nowrap; }
+.project-counter { font-weight: 600; font-size: 14px; }
+.project-busy-badge {
+  font-size: 12px;
+  font-weight: 600;
+  color: var(--primary);
+  background: var(--primary-tint, rgba(0,0,0,.06));
+  border-radius: 10px;
+  padding: 1px 8px;
+}
+.project-closed-tag,
+.project-row-closed .project-row-label { color: var(--text-muted); }
+.project-closed-tag {
+  font-size: 11px;
+  font-weight: 600;
+  text-transform: uppercase;
+  border: 1px solid var(--border);
+  border-radius: 8px;
+  padding: 1px 6px;
+  margin-left: 6px;
+}
+.project-row-closed { opacity: 0.7; }
+
 /* ======================== End-mode toggle ======================== */
 .end-mode-toggle { display: flex; gap: 4px; margin-bottom: 2px; }
 .end-mode-btn {
