@@ -656,6 +656,149 @@ describe('timed moves — reshove on occupied slot (all four entry points)', () 
 });
 
 
+describe('lockable jobs — immovability via the real routes (supertest)', () => {
+  const request = require('supertest');
+  let app, appDb, printerId;
+  const SESSION_TOKEN = 'lock-session-token';
+  const authCookie = `pf_session=${SESSION_TOKEN}`;
+  const iso = (d) => new Date(d).toISOString();
+
+  beforeAll(() => {
+    appDb = require('../db');
+    app   = require('../server');
+    appDb.prepare('INSERT OR REPLACE INTO sessions (token, expires_at) VALUES (?,?)')
+      .run(SESSION_TOKEN, Date.now() + 3_600_000);
+  });
+
+  beforeEach(() => {
+    appDb.exec('DELETE FROM jobs; DELETE FROM printers; DELETE FROM closures;');
+    appDb.prepare('INSERT OR REPLACE INTO settings (key,value) VALUES (?,?)')
+      .run('schedulingRestrictions', JSON.stringify({
+        enabled: true, silentStart: '04:00', silentEnd: '04:01', closedDays: [], timezone: 'Europe/Brussels',
+      }));
+    const r = appDb.prepare('INSERT INTO printers (name, color, warm_up_mins, cool_down_mins) VALUES (?,?,?,?)')
+      .run('P1', '#f00', 5, 15);
+    printerId = r.lastInsertRowid;
+  });
+
+  const addJob = (start, end, { status = 'Planned', locked = 0 } = {}) =>
+    appDb.prepare('INSERT INTO jobs (printerId, name, start, end, status, locked) VALUES (?,?,?,?,?,?)')
+      .run(printerId, 'J', iso(start), iso(end), status, locked).lastInsertRowid;
+  const getJob = (id) => appDb.prepare('SELECT * FROM jobs WHERE id=?').get(id);
+
+  test('migration added locked + conflict_notified columns to jobs', () => {
+    const cols = appDb.pragma('table_info(jobs)').map(c => c.name);
+    expect(cols).toContain('locked');
+    expect(cols).toContain('conflict_notified');
+  });
+
+  test('locked anchor: push-back is a no-op (never moves)', async () => {
+    const anchor = addJob('2026-04-13T06:00:00Z', '2026-04-13T07:00:00Z', { locked: 1 });
+    const r = await request(app).post(`/api/jobs/${anchor}/push-back`)
+      .set('Cookie', authCookie).send({ to: '2026-04-13T12:00:00Z' });
+    expect(r.status).toBe(200);
+    expect(r.body.updatedCount).toBe(0);
+    expect(getJob(anchor).start).toBe(iso('2026-04-13T06:00:00Z'));
+  });
+
+  test('locked anchor: pull-forward is a no-op (never moves)', async () => {
+    const anchor = addJob('2026-04-13T14:00:00Z', '2026-04-13T15:00:00Z', { locked: 1 });
+    const r = await request(app).post(`/api/jobs/${anchor}/pull-forward`)
+      .set('Cookie', authCookie).send({ to: '2026-04-13T08:00:00Z' });
+    expect(r.status).toBe(200);
+    expect(r.body.updatedCount).toBe(0);
+    expect(getJob(anchor).start).toBe(iso('2026-04-13T14:00:00Z'));
+  });
+
+  test('reshove routes around a locked downstream job — it is never shoved', async () => {
+    const anchor  = addJob('2026-04-13T06:00:00Z', '2026-04-13T07:00:00Z');            // 08:00–09:00 Brussels
+    const lockedBlocker = addJob('2026-04-13T12:00:00Z', '2026-04-13T13:00:00Z', { locked: 1 });
+    const to = '2026-04-13T12:00:00Z'; // push anchor onto the locked blocker
+    // A locked blocker is in the "fixed" bucket, never a mover → no reshove needed.
+    const r = await request(app).post(`/api/jobs/${anchor}/push-back`)
+      .set('Cookie', authCookie).send({ to, reshove: true });
+    expect(r.status).toBe(200);
+    // Locked blocker unchanged regardless of the anchor landing on it.
+    expect(getJob(lockedBlocker).start).toBe(iso('2026-04-13T12:00:00Z'));
+    expect(getJob(lockedBlocker).end).toBe(iso('2026-04-13T13:00:00Z'));
+  });
+
+  test('pull-forward WINDOW mode never tight-packs a downstream locked job', async () => {
+    const anchor = addJob('2026-04-13T14:00:00Z', '2026-04-13T15:00:00Z');                 // future anchor
+    const lockedDownstream = addJob('2026-04-13T16:00:00Z', '2026-04-13T17:00:00Z', { locked: 1 }); // in window, downstream
+    // Window [08:00, 20:00] spans the locked job. Without the guard the window
+    // chain would pull the locked job forward to pack behind the anchor.
+    const r = await request(app).post(`/api/jobs/${anchor}/pull-forward`)
+      .set('Cookie', authCookie)
+      .send({ to: '2026-04-13T08:00:00Z', windowEnd: '2026-04-13T20:00:00Z' });
+    expect(r.status).toBe(200);
+    // Anchor moved into the window gap...
+    expect(new Date(getJob(anchor).start).getTime()).toBeLessThan(new Date('2026-04-13T14:00:00Z').getTime());
+    // ...but the locked downstream job is byte-unchanged.
+    expect(getJob(lockedDownstream).start).toBe(iso('2026-04-13T16:00:00Z'));
+    expect(getJob(lockedDownstream).end).toBe(iso('2026-04-13T17:00:00Z'));
+  });
+
+  test('lock toggle blocked while Printing (409)', async () => {
+    const id = addJob('2026-04-13T06:00:00Z', '2026-04-13T07:00:00Z', { status: 'Printing' });
+    const r = await request(app).patch(`/api/jobs/${id}`).set('Cookie', authCookie).send({ locked: 1 });
+    expect(r.status).toBe(409);
+    expect(getJob(id).locked).toBe(0);
+  });
+
+  test('lock toggle blocked while Awaiting Printer (409)', async () => {
+    const id = addJob('2026-04-13T06:00:00Z', '2026-04-13T07:00:00Z', { status: 'Awaiting Printer' });
+    const r = await request(app).patch(`/api/jobs/${id}`).set('Cookie', authCookie).send({ locked: 1 });
+    expect(r.status).toBe(409);
+    expect(getJob(id).locked).toBe(0);
+  });
+
+  test('lock toggle persists for a Planned job', async () => {
+    const id = addJob('2026-04-13T06:00:00Z', '2026-04-13T07:00:00Z');
+    const r = await request(app).patch(`/api/jobs/${id}`).set('Cookie', authCookie).send({ locked: 1 });
+    expect(r.status).toBe(200);
+    expect(getJob(id).locked).toBe(1);
+  });
+
+  test('PATCH on a locked job drops start/end/printerId (drag/next-day/move-printer defense)', async () => {
+    const id = addJob('2026-04-13T06:00:00Z', '2026-04-13T07:00:00Z', { locked: 1 });
+    const r = await request(app).patch(`/api/jobs/${id}`).set('Cookie', authCookie)
+      .send({ start: '2026-04-13T20:00:00Z', end: '2026-04-13T21:00:00Z', printerId: 999 });
+    // start/end/printerId all stripped → nothing valid left to write.
+    expect(r.status).toBe(400);
+    const after = getJob(id);
+    expect(after.start).toBe(iso('2026-04-13T06:00:00Z'));
+    expect(after.end).toBe(iso('2026-04-13T07:00:00Z'));
+    expect(after.printerId).toBe(printerId);
+  });
+
+  test('unlock + move in the SAME PATCH is honoured (not stripped)', async () => {
+    const id = addJob('2026-04-13T06:00:00Z', '2026-04-13T07:00:00Z', { locked: 1 });
+    const r = await request(app).patch(`/api/jobs/${id}`).set('Cookie', authCookie)
+      .send({ locked: 0, start: '2026-04-13T20:00:00Z', end: '2026-04-13T21:00:00Z' });
+    expect(r.status).toBe(200);
+    const after = getJob(id);
+    expect(after.locked).toBe(0);
+    expect(after.start).toBe(iso('2026-04-13T20:00:00Z'));
+  });
+
+  test('PUT (edit dialog) preserves start/end/printerId on a locked job', async () => {
+    const id = addJob('2026-04-13T06:00:00Z', '2026-04-13T07:00:00Z', { locked: 1 });
+    const r = await request(app).put(`/api/jobs/${id}`).set('Cookie', authCookie)
+      .send({
+        printerId: 999, name: 'Renamed', start: '2026-04-13T20:00:00Z', end: '2026-04-13T21:00:00Z',
+        status: 'Planned', queued: false,
+      });
+    expect(r.status).toBe(200);
+    const after = getJob(id);
+    // Name change applied; schedule preserved.
+    expect(after.name).toBe('Renamed');
+    expect(after.start).toBe(iso('2026-04-13T06:00:00Z'));
+    expect(after.printerId).toBe(printerId);
+  });
+});
+
+
 describe('PATCH /api/jobs/:id — status persistence (real route via supertest)', () => {
   const request = require('supertest');
   let app, appDb, printerId;

@@ -67,11 +67,55 @@ function realignLinkedJob({ db, printer, job, remainingMins, now, restr, snapSta
   // Keep the block's DURATION constant — we only shift it, never resize it.
   const durationMs     = currentEndMs - currentStartMs;
   const predictedEndMs = now.getTime() + remainingMins * 60000;
+  const predictedStartMs = predictedEndMs - durationMs;
   const deltaMs        = predictedEndMs - currentEndMs;
 
-  // Nothing material changed — skip to avoid thrashing on printer jitter.
+  // --- Part 3: delay-conflict with a locked job ---
+  // Detect BEFORE the move threshold and key off the PREDICTED end interval, not
+  // the stored/updated block. This decouples the notification from the 2-min
+  // realign move threshold: a sub-threshold delay that still crosses into a
+  // locked job notifies, and an overlap cleared by a sub-threshold move re-arms.
+  //
+  // The active printing job's predicted block may overlap a LOCKED job on the
+  // same printer. Because the locked job is never auto-moved, that overlap stands
+  // and the operator resolves it manually — but we notify once so they know.
+  // Dedup + timing (all keyed on the printing job's `conflict_notified`):
+  //   - Once per active conflict: send only on the tick it first appears.
+  //   - Re-arm on resolution: any no-overlap tick clears the flag.
+  //   - Suppress pre-existing overlaps: if the overlap is already present on the
+  //     print-start snapshot (snapStart), mark as notified WITHOUT sending — it's
+  //     a scheduling overlap, not a runtime delay. It only ever notifies if it
+  //     first clears and then re-appears from a later delay.
+  const lockedAhead = db.prepare(
+    "SELECT id, name, start, end FROM jobs WHERE printerId=? AND queued=0 AND start!='' AND id!=? AND locked=1"
+  ).all(printer.id, job.id);
+  let conflictJob = null;
+  for (const lj of lockedAhead) {
+    const ls = scheduling.parseJobTime(lj.start, tz);
+    const le = scheduling.parseJobTime(lj.end, tz);
+    if (!ls || !le) continue;
+    // Raw block intersection — the print's predicted end extending into the locked job.
+    if (predictedStartMs < le.getTime() && predictedEndMs > ls.getTime()) { conflictJob = lj; break; }
+  }
+
+  let notifyLockedConflict = false;
+  const alreadyNotified = db.prepare('SELECT conflict_notified FROM jobs WHERE id=?').get(job.id)?.conflict_notified;
+  if (conflictJob) {
+    if (!alreadyNotified) {
+      db.prepare('UPDATE jobs SET conflict_notified=1 WHERE id=?').run(job.id);
+      // snapStart = the print-start snapshot. An overlap present here pre-existed
+      // the print (scheduling issue) → suppress. A later tick → runtime delay → notify.
+      if (!snapStart) notifyLockedConflict = true;
+    }
+  } else if (alreadyNotified) {
+    // Conflict cleared — re-arm for a future runtime-delay conflict.
+    db.prepare('UPDATE jobs SET conflict_notified=0 WHERE id=?').run(job.id);
+  }
+
+  // Nothing material changed — skip the block move to avoid thrashing on printer
+  // jitter. The conflict notification above is independent of this gate.
   if (!snapStart && Math.abs(deltaMs) < thresholdMs) {
-    return { changed: false, deltaMs, updated: [] };
+    return { changed: false, deltaMs, updated: [], notifyLockedConflict, conflictJob };
   }
 
   const newEndMs   = predictedEndMs;
@@ -88,7 +132,7 @@ function realignLinkedJob({ db, printer, job, remainingMins, now, restr, snapSta
   if (deltaMs > 0) {
     const closures = db.prepare('SELECT startDate, endDate FROM closures').all();
     const allSamePrinter = db.prepare(
-      "SELECT id, name, status, start, end, cool_down_mins, warm_up_mins FROM jobs WHERE printerId=? AND queued=0 AND start!='' AND id!=?"
+      "SELECT id, name, status, start, end, cool_down_mins, warm_up_mins, locked FROM jobs WHERE printerId=? AND queued=0 AND start!='' AND id!=?"
     ).all(printer.id, job.id).map(j => ({
       ...j,
       coolDownMs: (j.cool_down_mins ?? printer.cool_down_mins ?? 15) * 60000,
@@ -96,10 +140,12 @@ function realignLinkedJob({ db, printer, job, remainingMins, now, restr, snapSta
     }));
 
     // Downstream chain = jobs on this printer whose current start is at or after
-    // the current job's ORIGINAL stored end, in cascadable state.
+    // the current job's ORIGINAL stored end, in cascadable state. A locked job is
+    // never in the chain — it stays put (moves to otherJobs as an obstacle). If a
+    // late-running print now overlaps it, that conflict stands (see below).
     const chain = allSamePrinter
       .filter(j => {
-        if (!CASCADABLE_STATUSES.has(j.status)) return false;
+        if (!CASCADABLE_STATUSES.has(j.status) || j.locked) return false;
         const s = scheduling.parseJobTime(j.start, tz);
         return s && s.getTime() >= currentEndMs;
       })
@@ -127,7 +173,7 @@ function realignLinkedJob({ db, printer, job, remainingMins, now, restr, snapSta
     }
   }
 
-  return { changed: true, deltaMs, updated };
+  return { changed: true, deltaMs, updated, notifyLockedConflict, conflictJob };
 }
 
 module.exports = { realignLinkedJob, DEFAULT_THRESHOLD_MS };

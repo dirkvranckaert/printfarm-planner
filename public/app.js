@@ -1386,6 +1386,7 @@ async function renderDay() {
       const isPaused   = !!job.linked_printer_id && getPrinterLiveStatus(p)?.stage === 'PAUSE';
       const pausedCls  = isPaused ? ' job-paused' : '';
       const pausedIcon = isPaused ? '<span class="job-paused-icon" title="Printer paused">⏸</span>' : '';
+      const lockIcon   = job.locked ? '<span class="job-lock-icon" title="Locked — immovable">🔒</span>' : '';
 
       const bgAlpha  = isDarkMode() ? 0.5 : 0.15;
       // Buffer blocks (warm-up / cool-down) render as a WASHED-OUT tint of this
@@ -1420,6 +1421,7 @@ async function renderDay() {
               <div style="display:flex;align-items:center;gap:4px;overflow:hidden">
                 ${conflictIcon}
                 ${pausedIcon}
+                ${lockIcon}
                 <span class="job-block-name" style="flex-shrink:1;min-width:0;overflow:hidden;text-overflow:ellipsis;white-space:nowrap">${job.orderNr ? `#${escHtml(job.orderNr)} — ` : ''}${escHtml(job.name)}</span>
                 ${job.colors ? renderColorSwatches(job.colors) : ''}
                 ${job.linked_printer_id ? '<span title="Linked to printer">🔗</span>' : ''}
@@ -1808,6 +1810,7 @@ function attachDayEvents() {
       const jobId   = parseInt(el.dataset.jobId);
       const job     = jobsCache[jobId];
       if (!job) return;
+      if (job.locked) return; // locked jobs are immovable — no drag
       const colEl   = el.closest('.day-printer-col');
       const colRect = colEl.getBoundingClientRect();
       const elRect  = el.getBoundingClientRect();
@@ -1845,6 +1848,7 @@ function attachDayEvents() {
       const jobId  = parseInt(jobEl.dataset.jobId);
       const job    = jobsCache[jobId];
       if (!job) return;
+      if (job.locked) return; // locked jobs are immovable — no resize
       const colEl  = jobEl.closest('.day-printer-col');
       const colRect = colEl.getBoundingClientRect();
       const elRect  = jobEl.getBoundingClientRect();
@@ -2360,6 +2364,34 @@ function jobLinkMenuState(job) {
   return null;
 }
 
+// Lock/unlock context-menu state. The lock is toggled ONLY here (context menu),
+// never from the edit dialog. Hidden while the job is Printing or Awaiting
+// Printer — the lock state is frozen in those states. An unlocked job shows
+// "Lock" (closed padlock); a locked job shows "Unlock" (open padlock).
+function jobLockMenuState(job) {
+  if (!job) return null;
+  if (job.status === 'Printing' || job.status === 'Awaiting Printer') return null;
+  return job.locked
+    ? { label: '🔓 Unlock', action: 'unlock' }
+    : { label: '🔒 Lock', action: 'lock' };
+}
+
+// Toggle a job's lock state via the context menu. Optimistically updates the
+// cache so the next render shows the icon immediately.
+async function applyLockAction(jobId, action) {
+  const locked = action === 'lock' ? 1 : 0;
+  try {
+    await api('PATCH', `/api/jobs/${jobId}`, { locked });
+    if (jobsCache[jobId]) jobsCache[jobId].locked = locked;
+    return true;
+  } catch (err) {
+    let msg = err.message;
+    try { msg = JSON.parse(err.message).error || msg; } catch { /* raw text */ }
+    alert(msg);
+    return false;
+  }
+}
+
 // Apply a chosen link action (link / unlink / prelink / cancel-await) for a
 // job id. Returns true on success; surfaces server rejections via alert.
 async function applyLinkAction(jobId, action) {
@@ -2396,7 +2428,8 @@ function pushOptionVisibility(job, now = Date.now()) {
     || job.status === 'Printing'
     || job.status === 'Awaiting Printer'
     || job.linked_printer_id != null
-    || !!job.queued;
+    || !!job.queued
+    || !!job.locked; // locked jobs are immovable — no push/pull options
   if (anchored) {
     return { pushNow: false, pushTo: false, pullNow: false, pullTo: false };
   }
@@ -2459,13 +2492,27 @@ function showBottomSheet(jobId) {
     linkSep.classList.add('hidden');
   }
 
+  // Lock / unlock item
+  const bsLockItem = document.getElementById('bs-lock-item');
+  const bsLockSep  = document.getElementById('bs-lock-sep');
+  const bsLockState = jobLockMenuState(job);
+  if (bsLockState) {
+    bsLockItem.classList.remove('hidden');
+    bsLockSep.classList.remove('hidden');
+    bsLockItem.textContent = bsLockState.label;
+    bsLockItem.dataset.action = bsLockState.action;
+  } else {
+    bsLockItem.classList.add('hidden');
+    bsLockSep.classList.add('hidden');
+  }
+
   // Gate the push/pull-to-now options
   applyPushOptionVisibility(job, 'bs');
 
-  // Conflict resolution in bottom sheet
+  // Conflict resolution in bottom sheet. Hidden for a locked (immovable) job.
   const bsConflict = document.getElementById('bs-conflict-section');
   if (bsConflict) {
-    if (lastConflictIds.has(jobId)) bsConflict.classList.remove('hidden');
+    if (lastConflictIds.has(jobId) && !job.locked) bsConflict.classList.remove('hidden');
     else bsConflict.classList.add('hidden');
   }
 
@@ -2556,6 +2603,14 @@ function setupBottomSheet() {
     const id = bsJobId;
     hideBottomSheet();
     await applyLinkAction(id, action);
+    renderCalendar();
+  });
+  document.getElementById('bs-lock-item').addEventListener('click', async () => {
+    if (bsJobId === null) return;
+    const action = document.getElementById('bs-lock-item').dataset.action;
+    const id = bsJobId;
+    hideBottomSheet();
+    await applyLockAction(id, action);
     renderCalendar();
   });
 }
@@ -2670,12 +2725,27 @@ function showCtxMenu(e, jobId) {
     linkSep.style.display = 'none';
   }
 
+  // Lock / unlock item
+  const lockItem = document.getElementById('ctx-lock-item');
+  const lockSep  = document.getElementById('ctx-lock-sep');
+  const lockState = jobLockMenuState(jobsCache[jobId]);
+  if (lockState) {
+    lockItem.classList.remove('hidden');
+    lockSep.style.display = '';
+    lockItem.textContent = lockState.label;
+    lockItem.dataset.action = lockState.action;
+  } else {
+    lockItem.classList.add('hidden');
+    lockSep.style.display = 'none';
+  }
+
   // Gate the push/pull-to-now options
   applyPushOptionVisibility(jobsCache[jobId], 'ctx');
 
-  // Show/hide conflict resolution options
+  // Show/hide conflict resolution options. A locked job is immovable, so the
+  // conflict-resolution moves never apply to it.
   const conflictSection = document.getElementById('ctx-conflict-section');
-  if (lastConflictIds.has(jobId)) {
+  if (lastConflictIds.has(jobId) && !jobsCache[jobId]?.locked) {
     conflictSection.classList.remove('hidden');
   } else {
     conflictSection.classList.add('hidden');
@@ -2902,7 +2972,13 @@ async function openJobModal(jobId = null, prefill = {}) {
     const job = await api('GET', `/api/jobs/${jobId}`);
     if (!job) return;
     const isQueued = job.queued && !scheduleMode;
-    title.textContent = scheduleMode ? 'Schedule Job' : isQueued ? 'Edit Queued Job' : 'Edit Print Job';
+    const titleText = scheduleMode ? 'Schedule Job' : isQueued ? 'Edit Queued Job' : 'Edit Print Job';
+    // Show the lock state in the dialog title (read-only indicator; the lock is
+    // toggled only from the context menu, never here).
+    title.textContent = titleText;
+    if (job.locked) {
+      title.insertAdjacentHTML('afterbegin', '<span class="job-lock-icon" title="Locked — immovable" style="margin-right:6px">🔒</span>');
+    }
     delBtn.classList.remove('hidden');
     document.getElementById('job-name').value      = job.name        ?? '';
     sel.value                                       = job.printerId;
@@ -4142,6 +4218,15 @@ function setupListeners() {
     const id = ctxJobId;
     hideCtxMenu();
     await applyLinkAction(id, action);
+    renderCalendar();
+  });
+  // Lock / unlock
+  document.getElementById('ctx-lock-item').addEventListener('click', async () => {
+    if (ctxJobId === null) return;
+    const action = document.getElementById('ctx-lock-item').dataset.action;
+    const id = ctxJobId;
+    hideCtxMenu();
+    await applyLockAction(id, action);
     renderCalendar();
   });
 
