@@ -4216,8 +4216,13 @@ async function openAssignProject(jobId) {
     alert('Nog geen projecten om aan toe te wijzen. Maak er eerst een via +Job.');
     return;
   }
-  sel.innerHTML = open.map(p => `<option value="${escHtml(p.id)}">${escHtml(p.label)}</option>`).join('');
+  const noneOpt = `<option value="__none__">Geen project</option>`;
+  sel.innerHTML = noneOpt + open.map(p => `<option value="${escHtml(p.id)}">${escHtml(p.label)}</option>`).join('');
   sel.dataset.jobId = String(jobId);
+  // Preselect the job's current project (falls back to "Geen project" when the
+  // job has none, or when its project is closed and thus not in the open list).
+  const current = jobsCache[jobId]?.project_id;
+  sel.value = current || '__none__';
   document.getElementById('assign-project-modal').classList.remove('hidden');
 }
 
