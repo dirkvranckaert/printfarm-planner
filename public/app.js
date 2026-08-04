@@ -3611,14 +3611,17 @@ async function openSettingsModal() {
   const pns = await api('GET', '/api/settings/push.notify.started').catch(() => null);
   const pnu = await api('GET', '/api/settings/push.notify.upcoming').catch(() => null);
   const pnp = await api('GET', '/api/settings/push.notify.paused').catch(() => null);
+  const pnc = await api('GET', '/api/settings/push.notify.conflict').catch(() => null);
   const cbDone     = document.getElementById('push-notify-done');
   const cbStarted  = document.getElementById('push-notify-started');
   const cbUpcoming = document.getElementById('push-notify-upcoming');
   const cbPaused   = document.getElementById('push-notify-paused');
+  const cbConflict = document.getElementById('push-notify-conflict');
   if (cbDone)     cbDone.checked     = pnd?.value !== false;
   if (cbStarted)  cbStarted.checked  = pns?.value !== false;
   if (cbUpcoming) cbUpcoming.checked = pnu?.value !== false;
   if (cbPaused)   cbPaused.checked   = pnp?.value !== false;
+  if (cbConflict) cbConflict.checked = pnc?.value !== false;
 
   // Load scheduling restrictions
   const schedRestr = await api('GET', '/api/settings/schedulingRestrictions');
@@ -3776,7 +3779,7 @@ function setupSettingsAutoSave() {
   }));
 
   // Push notifications
-  ['push-notify-done', 'push-notify-started', 'push-notify-upcoming', 'push-notify-paused'].forEach(id => {
+  ['push-notify-done', 'push-notify-started', 'push-notify-upcoming', 'push-notify-paused', 'push-notify-conflict'].forEach(id => {
     q(id)?.addEventListener('change', function() { autoSave('push.notify.' + id.replace('push-notify-', ''), this.checked); });
   });
   q('btn-test-push')?.addEventListener('click', async () => {
