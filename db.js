@@ -166,6 +166,24 @@ if (!jobColsLock.some(c => c.name === 'conflict_notified')) {
   db.exec('ALTER TABLE jobs ADD COLUMN conflict_notified INTEGER NOT NULL DEFAULT 0');
 }
 
+// Projects. A project groups jobs by a free-text name. Prod-safe: guarded
+// CREATE TABLE + a nullable jobs.project_id (DEFAULT NULL). No destructive
+// backfill — existing jobs stay unassigned, so the recomputed schedule is
+// byte-identical to before this migration.
+//   id     = lowercase(trim(name)) — the match key.
+//   label  = the name in the exact casing it was FIRST entered (display name).
+//   status = 'open' | 'closed'.
+db.exec(`CREATE TABLE IF NOT EXISTS projects (
+  id         TEXT PRIMARY KEY,
+  label      TEXT NOT NULL,
+  status     TEXT NOT NULL DEFAULT 'open',
+  created_at INTEGER NOT NULL DEFAULT (strftime('%s','now')*1000)
+);`);
+const jobColsProject = db.pragma('table_info(jobs)');
+if (!jobColsProject.some(c => c.name === 'project_id')) {
+  db.exec('ALTER TABLE jobs ADD COLUMN project_id TEXT');
+}
+
 // One-time migration: if the favourite column was previously added with DEFAULT 0
 // (all printers show favourite=0), set them all to 1 so they appear in day view.
 const favMigrated = db.prepare("SELECT value FROM settings WHERE key='favouriteMigrated'").get();
