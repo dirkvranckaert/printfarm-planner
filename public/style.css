@@ -536,6 +536,9 @@ body {
 }
 .week-table {
   width: 100%;
+  /* Fill the calendar height so per-printer rows grow to use the full screen
+     instead of clumping at the top (min-height on td is just a floor). */
+  height: 100%;
   border-collapse: collapse;
   min-width: 480px;
 }
@@ -594,10 +597,21 @@ body {
   flex: 1;
   overflow: auto;
   background: var(--surface);
+  /* Column flex so the grid can flex:1 and fill the full calendar height. */
+  display: flex;
+  flex-direction: column;
 }
 .month-grid {
   display: grid;
   grid-template-columns: repeat(7, minmax(0, 1fr));
+  /* Fill all available space: full width via the 1fr columns, full height via
+     flex:1 + 1fr week rows (header row stays compact). Previously the rows were
+     content-sized (~90px), clumping at the top and leaving the lower half of a
+     large screen empty. */
+  flex: 1;
+  grid-template-rows: auto;
+  grid-auto-rows: 1fr;
+  width: 100%;
   border-top: 1px solid var(--border);
   border-left: 1px solid var(--border);
 }
