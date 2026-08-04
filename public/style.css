@@ -1329,6 +1329,8 @@ body.is-resizing,    body.is-resizing    * { cursor: ns-resize  !important; user
    Upcoming view
    ============================================================ */
 .upcoming-view {
+  flex: 1;
+  overflow-y: auto;
   padding: 16px 20px;
   max-width: 860px;
   margin: 0 auto;
