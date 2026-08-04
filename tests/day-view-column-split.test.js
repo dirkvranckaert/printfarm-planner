@@ -176,3 +176,47 @@ describe('renderDay — overlapping blocks render side-by-side (real DOM)', () =
     expect(pct(cd1.style.left)).toBeCloseTo(pct(b1.style.left));
   });
 });
+
+// Job with explicit minute-precision start/end.
+const jobM = (id, sh, sm, eh, em) => ({
+  id, printerId: 5, name: `Job ${id}`, customerName: null, orderNr: null,
+  start: iso(sh, sm), end: iso(eh, em), status: 'Planned', queued: 0, linked_printer_id: null, colors: null,
+});
+
+describe('renderDay — buffer-aware overlap (print windows disjoint, buffers clash)', () => {
+  const pct = v => parseFloat(v);
+
+  test('cool-down of A overlapping warm-up of B → side-by-side even though prints do NOT overlap', async () => {
+    // Printer warm 5 / cool 15. A: 10:00–11:00 (cool → 11:15). B: 11:10–12:00
+    // (warm → 11:05). Print windows are 10 min apart (no raw overlap) but the
+    // buffer-inclusive intervals [.., 11:15] and [11:05, ..] DO overlap → split.
+    const T = boot([jobM(1, 10, 0, 11, 0), jobM(2, 11, 10, 12, 0)]);
+    await T.renderDay();
+    const blocks = [...document.querySelectorAll('.job-block')].sort(
+      (a, b) => Number(a.dataset.jobId) - Number(b.dataset.jobId));
+    expect(blocks.map(b => Number(b.dataset.jobId))).toEqual([1, 2]);
+
+    // Prove the raw print windows are genuinely disjoint (buffer is what splits).
+    expect(new Date(jobM(1, 10, 0, 11, 0).end).getTime())
+      .toBeLessThanOrEqual(new Date(jobM(2, 11, 10, 12, 0).start).getTime());
+
+    // Both blocks are half-width at distinct offsets → rendered side-by-side.
+    for (const b of blocks) expect(pct(b.style.width)).toBeCloseTo(50);
+    const lefts = blocks.map(b => pct(b.style.left)).sort((x, y) => x - y);
+    expect(lefts[0]).toBeCloseTo(0);
+    expect(lefts[1]).toBeCloseTo(50);
+  });
+
+  test('buffers also clear of each other → both keep full column width', async () => {
+    // A: 10:00–11:00 (cool → 11:15). B: 11:30–12:00 (warm → 11:25). 11:15 < 11:25
+    // → buffer-inclusive intervals disjoint → no split, both full width.
+    const T = boot([jobM(1, 10, 0, 11, 0), jobM(2, 11, 30, 12, 0)]);
+    await T.renderDay();
+    const blocks = [...document.querySelectorAll('.job-block')];
+    expect(blocks).toHaveLength(2);
+    for (const b of blocks) {
+      expect(b.style.left).toBe('');
+      expect(b.style.width).toBe('');
+    }
+  });
+});

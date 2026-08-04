@@ -29,7 +29,8 @@ function makeDb() {
       end TEXT NOT NULL,
       queued INTEGER NOT NULL DEFAULT 0,
       linked_printer_id INTEGER,
-      cool_down_mins INTEGER
+      cool_down_mins INTEGER,
+      warm_up_mins INTEGER
     );
     CREATE TABLE closures (
       id INTEGER PRIMARY KEY AUTOINCREMENT,
