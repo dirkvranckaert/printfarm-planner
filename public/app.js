@@ -4172,7 +4172,7 @@ async function loadProjectSuggestions() {
   if (dl) dl.innerHTML = list.map(p => `<option value="${escHtml(p.label)}">`).join('');
 }
 
-// Compact per-project counter: "5/12  ● 1 bezig" (done/total + busy badge),
+// Compact per-project counter: "jobs 5/12  ● 1 bezig" (done/total + busy badge),
 // plus an optional items line "items 3/8 ● 2 bezig · 1 verlies" in the same
 // visual style. The items line renders only when the project tracks items
 // (itemsTotal > 0); losses are already subtracted from both figures server-side.
@@ -4180,7 +4180,7 @@ function projectCounterHtml(p) {
   const busyBadge = p.busy > 0
     ? ` <span class="project-busy-badge">● ${p.busy} bezig</span>`
     : '';
-  const jobLine = `<span class="project-counter-line"><span class="project-counter">${p.done}/${p.total}</span>${busyBadge}</span>`;
+  const jobLine = `<span class="project-counter-line"><span class="project-counter">jobs ${p.done}/${p.total}</span>${busyBadge}</span>`;
   let itemsLine = '';
   if (p.itemsTotal > 0) {
     const itemsBusy = p.itemsBusy > 0
