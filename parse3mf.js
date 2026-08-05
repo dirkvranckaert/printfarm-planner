@@ -58,7 +58,10 @@ function extractThumbnails(input) {
     const thumbnails = [];
     for (let i = 1; i <= 20; i++) {
       const buf = extractBinary(filePath, `Metadata/plate_${i}.png`);
-      if (!buf || buf.length < 100) break;
+      // A missing/tiny thumbnail for one plate must NOT stop the scan — later
+      // plates can still have their own render (e.g. a gap at plate N). Skip
+      // this index and keep going through all 20 possible plates.
+      if (!buf || buf.length < 100) continue;
       thumbnails.push({ plateIndex: i, buffer: buf, filename: `plate_${i}.png` });
     }
     return thumbnails;

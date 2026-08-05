@@ -24,6 +24,9 @@ describe('import-3mf-schedule — queue mode (real route via supertest)', () => 
   // data and only uses the body for storage + thumbnail extraction (which
   // safely yields none for a non-zip buffer).
   const dummyBody = Buffer.from('not-a-real-3mf');
+  // A REAL 2-plate .gcode.3mf (Dino Body / Dino Feet) so thumbnail carry-over
+  // can be proven end-to-end through the actual route.
+  const fixtureBody = fs.readFileSync(path.join(__dirname, 'fixtures', 'two-plate.gcode.3mf'));
 
   const schedule = (obj) => encodeURIComponent(JSON.stringify(obj));
 
@@ -36,6 +39,12 @@ describe('import-3mf-schedule — queue mode (real route via supertest)', () => 
 
   beforeEach(() => {
     appDb.exec('DELETE FROM jobs; DELETE FROM printers;');
+    // Benign restrictions so the time-slotted (first-available) path is
+    // deterministic — silent-hours math itself is covered in scheduling.test.js.
+    appDb.prepare('INSERT OR REPLACE INTO settings (key,value) VALUES (?,?)')
+      .run('schedulingRestrictions', JSON.stringify({
+        enabled: false, silentStart: '04:00', silentEnd: '04:01', closedDays: [], timezone: 'Europe/Brussels',
+      }));
     const r = appDb.prepare('INSERT INTO printers (name, color, warm_up_mins, cool_down_mins) VALUES (?,?,?,?)')
       .run('P1S', '#f00', 5, 15);
     printerId = r.lastInsertRowid;
@@ -47,13 +56,13 @@ describe('import-3mf-schedule — queue mode (real route via supertest)', () => 
     for (const f of createdFiles) { try { fs.unlinkSync(path.join(uploadsDir, f)); } catch { /* ignore */ } }
   });
 
-  const post = (scheduleObj) =>
+  const post = (scheduleObj, body = dummyBody) =>
     request(app)
       .post('/api/import-3mf-schedule')
       .set('Cookie', authCookie)
       .set('Content-Type', 'application/octet-stream')
       .set('X-Schedule', schedule(scheduleObj))
-      .send(dummyBody);
+      .send(body);
 
   test('queue mode: every plate becomes a separate queued job with empty start/end and carried items', async () => {
     const plates = [
@@ -111,5 +120,64 @@ describe('import-3mf-schedule — queue mode (real route via supertest)', () => 
     // start stayed empty -> end must stay empty (never new Date('') -> throw).
     expect(res.body.start).toBe('');
     expect(res.body.end).toBe('');
+  });
+
+  test('queue mode: a null printerId lands as an unassigned queued job (headless import)', async () => {
+    const res = await post({ plates: [{ plateIndex: 1, name: 'Unassigned', printerId: null, durationMins: 90, items: 3 }], mode: 'queue' });
+    if (res.body.file) createdFiles.push(res.body.file);
+    expect(res.status).toBe(201);
+    expect(res.body.jobs).toHaveLength(1);
+    expect(res.body.jobs[0].printerId).toBeNull();
+    const row = appDb.prepare('SELECT printerId, queued, start, items FROM jobs WHERE id=?').get(res.body.jobs[0].id);
+    expect(row).toEqual({ printerId: null, queued: 1, start: '', items: 3 });
+  });
+
+  test('an unknown printer is rejected up-front with NO partial import (transaction + validation)', async () => {
+    const res = await post({ mode: 'queue', plates: [
+      { plateIndex: 1, name: 'Good', printerId, durationMins: 60, items: 1 },
+      { plateIndex: 2, name: 'Bad', printerId: 999999, durationMins: 30, items: 1 }, // no such printer
+    ] });
+    expect(res.status).toBe(400);
+    expect(res.body.error).toMatch(/Unknown printer/);
+    // Neither plate persisted — the whole import rolled back / never started.
+    expect(appDb.prepare('SELECT COUNT(*) c FROM jobs').get().c).toBe(0);
+    // No stored 3MF artifact was left behind (validation ran before any write).
+    expect(res.body.file).toBeUndefined();
+  });
+
+  test('first-available (time-slotted) path still works: populated start/end, queued=0, sequential', async () => {
+    const res = await post({ mode: 'first-available', plates: [
+      { plateIndex: 1, name: 'A', printerId, durationMins: 60 },
+      { plateIndex: 2, name: 'B', printerId, durationMins: 30 },
+    ] });
+    if (res.body.file) createdFiles.push(res.body.file);
+    expect(res.status).toBe(201);
+    expect(res.body.jobs).toHaveLength(2);
+    for (const j of res.body.jobs) {
+      expect(j.queued).toBe(0);
+      expect(j.start).not.toBe('');
+      expect(j.end).not.toBe('');
+    }
+    // Sequential + non-overlapping (cool-down + warm-up gap between plates).
+    expect(new Date(res.body.jobs[1].start).getTime())
+      .toBeGreaterThanOrEqual(new Date(res.body.jobs[0].end).getTime());
+    const rows = appDb.prepare("SELECT queued, start FROM jobs WHERE start != '' ORDER BY id").all();
+    expect(rows.map(r => r.queued)).toEqual([0, 0]);
+  });
+
+  test('queue mode carries each plate render through from a real 3MF body', async () => {
+    // Real fixture body -> the route extracts plate_1.png / plate_2.png and
+    // attaches a thumbFile per matching plateIndex.
+    const res = await post({ mode: 'queue', plates: [
+      { plateIndex: 1, name: 'Dino Body', printerId, durationMins: 120, items: 1 },
+      { plateIndex: 2, name: 'Dino Feet', printerId, durationMins: 45, items: 2 },
+    ] }, fixtureBody);
+    if (res.body.file) createdFiles.push(res.body.file);
+    for (const j of res.body.jobs) if (j.thumbFile) createdFiles.push(j.thumbFile);
+    expect(res.status).toBe(201);
+    expect(res.body.jobs).toHaveLength(2);
+    // Both plates got their own render carried over.
+    for (const j of res.body.jobs) expect(j.thumbFile).toBeTruthy();
+    expect(res.body.jobs[0].thumbFile).not.toBe(res.body.jobs[1].thumbFile);
   });
 });

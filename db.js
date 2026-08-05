@@ -215,4 +215,41 @@ if (!favMigrated) {
   db.prepare("INSERT OR REPLACE INTO settings (key, value) VALUES ('favouriteMigrated', '1')").run();
 }
 
+// Relax the legacy NOT NULL on jobs.printerId. An unassigned QUEUE job is now a
+// first-class state: the headless 3MF importer has no printer at slice time and
+// sends printerId=null, so such jobs must land on the queue (queued=1) instead
+// of crashing on insert. SQLite can't drop a column constraint in place, so
+// rebuild the table once — preserving every column/type/default and all rows —
+// and re-emit printerId WITHOUT the NOT NULL. Idempotent: gated on the constraint
+// still being present, so it runs at most once. The schema is rebuilt
+// programmatically from PRAGMA table_info, so it self-adapts to whatever columns
+// this DB has migrated through. `jobs` has no FKs/indexes/triggers/views, so
+// there are no dependents to recreate.
+const printerIdCol = db.pragma('table_info(jobs)').find(c => c.name === 'printerId');
+if (printerIdCol && printerIdCol.notnull === 1) {
+  const cols = db.pragma('table_info(jobs)');
+  const defs = cols.map(c => {
+    const parts = [`"${c.name}"`, c.type || 'BLOB'];
+    if (c.pk === 1 && /INT/i.test(c.type || '')) {
+      // The integer primary key keeps AUTOINCREMENT so ids stay monotonic.
+      parts.push('PRIMARY KEY AUTOINCREMENT');
+    } else {
+      if (c.name !== 'printerId' && c.notnull === 1) parts.push('NOT NULL');
+      if (c.dflt_value !== null) parts.push(`DEFAULT ${c.dflt_value}`);
+    }
+    return parts.join(' ');
+  }).join(', ');
+  const colList = cols.map(c => `"${c.name}"`).join(', ');
+  // FK enforcement can't be toggled inside a transaction; jobs has no FKs so
+  // this is belt-and-braces for the DROP/RENAME step.
+  db.pragma('foreign_keys = OFF');
+  db.transaction(() => {
+    db.exec(`CREATE TABLE jobs_rebuild (${defs})`);
+    db.exec(`INSERT INTO jobs_rebuild (${colList}) SELECT ${colList} FROM jobs`);
+    db.exec('DROP TABLE jobs');
+    db.exec('ALTER TABLE jobs_rebuild RENAME TO jobs');
+  })();
+  db.pragma('foreign_keys = ON');
+}
+
 module.exports = db;

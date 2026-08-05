@@ -1338,17 +1338,35 @@ app.post('/api/import-3mf-schedule', express.raw({ type: '*/*', limit: '500mb' }
     // the plate's printer via the same loop that handles multiple plates.
     const expandedPlates = scheduling.expandPlateCopies(plates);
 
-    // Save the 3MF file
+    // Validate every plate's printer BEFORE any file IO or insert, so a bad
+    // printer on a later plate can never leave a partial import behind (orphan
+    // jobs + a stored 3MF). A null printerId is allowed: it is an unassigned
+    // QUEUE job (the headless importer has no printer at slice time). Any
+    // non-null id must resolve to a real printer. The lookups are cached so the
+    // insert loop reuses them (per-job warm-up/cool-down snapshot).
+    const printerCache = new Map();
+    for (const pl of expandedPlates) {
+      if (pl.printerId == null) continue;
+      if (!printerCache.has(pl.printerId)) {
+        const p = db.prepare('SELECT warm_up_mins, cool_down_mins FROM printers WHERE id=?').get(pl.printerId);
+        if (!p) return res.status(400).json({ error: `Unknown printer: ${pl.printerId}` });
+        printerCache.set(pl.printerId, p);
+      }
+    }
+
+    // Save the 3MF file + thumbnails. Tracked in `writtenFiles` so a failed
+    // insert transaction can remove them — no orphan artifacts on rollback.
     const fileId = crypto.randomBytes(8).toString('hex');
     const storedName = `${fileId}.3mf`;
+    const writtenFiles = [storedName];
     fs.writeFileSync(path.join(UPLOADS_DIR, storedName), req.body);
 
-    // Extract thumbnails and save as images
     const thumbs = extractThumbnails(req.body);
     const thumbMap = {};
     for (const t of thumbs) {
       const imgId = crypto.randomBytes(8).toString('hex') + '.png';
       fs.writeFileSync(path.join(UPLOADS_DIR, imgId), t.buffer);
+      writtenFiles.push(imgId);
       thumbMap[t.plateIndex] = imgId;
     }
 
@@ -1370,70 +1388,84 @@ app.post('/api/import-3mf-schedule', express.raw({ type: '*/*', limit: '500mb' }
     }
     const createdJobs = [];
 
-    for (const pl of expandedPlates) {
-      const durationMins = pl.durationMins || 0;
+    // All inserts run in ONE transaction: any throw rolls back every prior
+    // insert, so the import is all-or-nothing. Files written above are cleaned
+    // up in the catch below if the transaction fails.
+    const runInserts = db.transaction(() => {
+      for (const pl of expandedPlates) {
+        const durationMins = pl.durationMins || 0;
 
-      // Get printer buffers for next-plate gap calculation
-      const printer = pl.printerId ? db.prepare('SELECT warm_up_mins, cool_down_mins FROM printers WHERE id=?').get(pl.printerId) : null;
-      const warmUp = printer?.warm_up_mins ?? 5;
-      const coolDown = printer?.cool_down_mins ?? 15;
+        const printer = pl.printerId != null ? printerCache.get(pl.printerId) : null;
+        const warmUp = printer?.warm_up_mins ?? 5;
+        const coolDown = printer?.cool_down_mins ?? 15;
 
-      const thumbFile = thumbMap[pl.plateIndex] || null;
-      const colorsStr = pl.colors ? JSON.stringify(pl.colors) : null;
+        const thumbFile = thumbMap[pl.plateIndex] || null;
+        const colorsStr = pl.colors ? JSON.stringify(pl.colors) : null;
 
-      // Item count forwarded by the calculator (plate objectCount). Null-safe:
-      // a missing/invalid value leaves items NULL (untracked). plate_name
-      // remembers which plate this job came from for later display + reload.
-      const plItems = Number.isInteger(pl.items) && pl.items >= 0 ? pl.items : null;
-      const plateName = pl.name || null;
+        // Item count forwarded by the calculator (plate objectCount). Null-safe:
+        // a missing/invalid value leaves items NULL (untracked). plate_name
+        // remembers which plate this job came from for later display + reload.
+        const plItems = Number.isInteger(pl.items) && pl.items >= 0 ? pl.items : null;
+        const plateName = pl.name || null;
 
-      // Time-slotted only when not queueing. Queue mode leaves start/end empty.
-      let startStr = '';
-      let endStr = '';
-      if (!isQueue) {
-        const validStart = findNextValidStart(currentStart, durationMins, pl.printerId);
-        const endDate = new Date(validStart.getTime() + durationMins * 60000);
-        startStr = validStart.toISOString();
-        endStr = endDate.toISOString();
-        // Next plate candidate: after this job's end + cool-down + warm-up
-        currentStart = new Date(endDate.getTime() + (coolDown + warmUp) * 60000);
+        // Time-slotted only when not queueing. Queue mode leaves start/end empty.
+        let startStr = '';
+        let endStr = '';
+        if (!isQueue) {
+          const validStart = findNextValidStart(currentStart, durationMins, pl.printerId);
+          const endDate = new Date(validStart.getTime() + durationMins * 60000);
+          startStr = validStart.toISOString();
+          endStr = endDate.toISOString();
+          // Next plate candidate: after this job's end + cool-down + warm-up
+          currentStart = new Date(endDate.getTime() + (coolDown + warmUp) * 60000);
+        }
+
+        const result = db.prepare(
+          'INSERT INTO jobs (printerId, name, customerName, orderNr, start, end, status, colors, printFile, remarks, queued, durationMins, thumbFile, bedType, cool_down_mins, warm_up_mins, items, plate_name) VALUES (?,?,?,?,?,?,?,?,?,?,?,?,?,?,?,?,?,?)'
+        ).run(
+          pl.printerId || null,
+          pl.name || `Plate ${pl.plateIndex}`,
+          pl.customerName || null,
+          pl.orderNr || null,
+          startStr,
+          endStr,
+          'Planned',
+          colorsStr,
+          storedName,
+          null,
+          isQueue ? 1 : 0,
+          durationMins,
+          thumbFile || null,
+          pl.bedType || null,
+          coolDown,
+          warmUp,
+          plItems,
+          plateName
+        );
+
+        if (proj) db.prepare('UPDATE jobs SET project_id=? WHERE id=?').run(proj.id, result.lastInsertRowid);
+
+        createdJobs.push({
+          id: result.lastInsertRowid,
+          name: pl.name,
+          printerId: pl.printerId ?? null,
+          start: startStr,
+          end: endStr,
+          durationMins,
+          thumbFile,
+          queued: isQueue ? 1 : 0,
+        });
       }
+    });
 
-      const result = db.prepare(
-        'INSERT INTO jobs (printerId, name, customerName, orderNr, start, end, status, colors, printFile, remarks, queued, durationMins, thumbFile, bedType, cool_down_mins, warm_up_mins, items, plate_name) VALUES (?,?,?,?,?,?,?,?,?,?,?,?,?,?,?,?,?,?)'
-      ).run(
-        pl.printerId || null,
-        pl.name || `Plate ${pl.plateIndex}`,
-        pl.customerName || null,
-        pl.orderNr || null,
-        startStr,
-        endStr,
-        'Planned',
-        colorsStr,
-        storedName,
-        null,
-        isQueue ? 1 : 0,
-        durationMins,
-        thumbFile || null,
-        pl.bedType || null,
-        coolDown,
-        warmUp,
-        plItems,
-        plateName
-      );
-
-      if (proj) db.prepare('UPDATE jobs SET project_id=? WHERE id=?').run(proj.id, result.lastInsertRowid);
-
-      createdJobs.push({
-        id: result.lastInsertRowid,
-        name: pl.name,
-        printerId: pl.printerId,
-        start: startStr,
-        end: endStr,
-        durationMins,
-        thumbFile,
-        queued: isQueue ? 1 : 0,
-      });
+    try {
+      runInserts();
+    } catch (insertErr) {
+      // Roll back the stored artifacts too — the DB already rolled back.
+      for (const f of writtenFiles) {
+        try { fs.unlinkSync(path.join(UPLOADS_DIR, f)); } catch { /* best effort */ }
+      }
+      throw insertErr;
     }
 
     // First-create push (once per batch), behind the `project` toggle.
