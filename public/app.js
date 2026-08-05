@@ -3012,6 +3012,7 @@ async function openJobModal(jobId = null, prefill = {}) {
     } else { thumbGroup.style.display = 'none'; }
     // Show download link if printFile is an uploaded file
     const pfDisplay = document.getElementById('job-printfile-display');
+    const hasRetained3mf = job.printFile && !job.printFile.includes('/') && job.printFile.endsWith('.3mf');
     if (job.printFile && !job.printFile.includes('/')) {
       const dlName = `${job.orderNr ? job.orderNr + '_' : ''}${job.name.replace(/[^a-zA-Z0-9_-]/g, '_')}.3mf`;
       pfDisplay.innerHTML = `<a href="/api/uploads/${escHtml(job.printFile)}" download="${escHtml(dlName)}" style="color:var(--primary);font-size:13px">📦 ${escHtml(dlName)}</a>`;
@@ -3020,6 +3021,10 @@ async function openJobModal(jobId = null, prefill = {}) {
       pfDisplay.innerHTML = '';
       document.getElementById('job-printfile').style.display = '';
     }
+    // "Herlaad items uit 3MF" only makes sense when a retained .3mf is on file.
+    document.getElementById('btn-reload-items-3mf').classList.toggle('hidden', !hasRetained3mf);
+    document.getElementById('job-items').value      = job.items != null ? job.items : '';
+    document.getElementById('job-items-lost').value = job.items_lost ?? 0;
     document.getElementById('job-remarks').value   = job.remarks      ?? '';
     document.getElementById('job-cooldown').value  = job.cool_down_mins ?? '';
     document.getElementById('job-warmup').value    = job.warm_up_mins ?? '';
@@ -3055,6 +3060,9 @@ async function openJobModal(jobId = null, prefill = {}) {
     document.getElementById('job-printfile').style.display = '';
     document.getElementById('job-printfile-display').innerHTML = '';
     document.getElementById('job-thumb-group').style.display = 'none';
+    document.getElementById('btn-reload-items-3mf').classList.add('hidden');
+    document.getElementById('job-items').value      = prefill.items != null ? prefill.items : '';
+    document.getElementById('job-items-lost').value = prefill.items_lost ?? 0;
     document.getElementById('job-remarks').value   = prefill.remarks      ?? '';
     // Leave blank on create → server snapshots the printer's warm-up/cool-down.
     document.getElementById('job-cooldown').value  = prefill.cool_down_mins ?? '';
@@ -3120,16 +3128,26 @@ async function saveJob() {
   const coolDownMins = cooldownRaw === '' ? null : (parseInt(cooldownRaw, 10) || 0);
   const warmupRaw    = document.getElementById('job-warmup').value.trim();
   const warmUpMins   = warmupRaw === '' ? null : (parseInt(warmupRaw, 10) || 0);
+  // Items: blank = untracked (null). Items lost: blank = 0. Both must be
+  // non-negative integers; losses may not exceed items when items is tracked
+  // (reject rather than clamp — the user should see and fix a wrong number).
+  const itemsRaw     = document.getElementById('job-items').value.trim();
+  const itemsLostRaw = document.getElementById('job-items-lost').value.trim();
+  const items        = itemsRaw === '' ? null : parseInt(itemsRaw, 10);
+  const itemsLost    = itemsLostRaw === '' ? 0 : parseInt(itemsLostRaw, 10);
 
   if (!name)      return alert('Please enter a job name.');
   if (!printerId) return alert('Please select a printer.');
+  if (items != null && (!Number.isInteger(items) || items < 0)) return alert('Items moet een positief geheel getal zijn (of leeg voor niet-bijgehouden).');
+  if (!Number.isInteger(itemsLost) || itemsLost < 0) return alert('Verlies moet een positief geheel getal zijn.');
+  if (items != null && itemsLost > items) return alert('Verlies kan niet groter zijn dan het aantal items.');
 
   if (isQueued) {
     const qh = parseInt(document.getElementById('job-queue-dur-h').value) || 0;
     const qm = parseInt(document.getElementById('job-queue-dur-m').value) || 0;
     if (qh === 0 && qm === 0) return alert('Please enter an expected duration.');
     const durationMins = qh * 60 + qm;
-    const data = { printerId, name, customerName, orderNr, colors, printFile, bedType, remarks, status, queued: true, durationMins, project };
+    const data = { printerId, name, customerName, orderNr, colors, printFile, bedType, remarks, status, queued: true, durationMins, project, items, items_lost: itemsLost };
     if (coolDownMins != null) data.cool_down_mins = coolDownMins;
     if (warmUpMins != null) data.warm_up_mins = warmUpMins;
     if (wasEditing) await api('PUT', `/api/jobs/${editJobId}`, data);
@@ -3168,7 +3186,7 @@ async function saveJob() {
     }
   }
 
-  const data = { printerId, name, customerName, orderNr, colors, printFile, bedType, remarks, start, end, status, queued: false, project };
+  const data = { printerId, name, customerName, orderNr, colors, printFile, bedType, remarks, start, end, status, queued: false, project, items, items_lost: itemsLost };
   if (coolDownMins != null) data.cool_down_mins = coolDownMins;
   if (warmUpMins != null) data.warm_up_mins = warmUpMins;
   if (wasEditing) await api('PUT', `/api/jobs/${editJobId}`, data);
@@ -4153,12 +4171,26 @@ async function loadProjectSuggestions() {
   if (dl) dl.innerHTML = list.map(p => `<option value="${escHtml(p.label)}">`).join('');
 }
 
-// Compact per-project counter: "5/12  ● 1 bezig" (done/total + busy badge).
+// Compact per-project counter: "5/12  ● 1 bezig" (done/total + busy badge),
+// plus an optional items line "items 3/8 ● 2 bezig · 1 verlies" in the same
+// visual style. The items line renders only when the project tracks items
+// (itemsTotal > 0); losses are already subtracted from both figures server-side.
 function projectCounterHtml(p) {
   const busyBadge = p.busy > 0
     ? ` <span class="project-busy-badge">● ${p.busy} bezig</span>`
     : '';
-  return `<span class="project-counter">${p.done}/${p.total}</span>${busyBadge}`;
+  const jobLine = `<span class="project-counter-line"><span class="project-counter">${p.done}/${p.total}</span>${busyBadge}</span>`;
+  let itemsLine = '';
+  if (p.itemsTotal > 0) {
+    const itemsBusy = p.itemsBusy > 0
+      ? ` <span class="project-busy-badge">● ${p.itemsBusy} bezig</span>`
+      : '';
+    const lost = p.itemsLost > 0
+      ? ` <span class="project-items-lost">· ${p.itemsLost} verlies</span>`
+      : '';
+    itemsLine = `<span class="project-counter-line project-items-line"><span class="project-items-counter">items ${p.itemsDoneAdj}/${p.itemsTotalAdj}</span>${itemsBusy}${lost}</span>`;
+  }
+  return `${jobLine}${itemsLine}`;
 }
 
 async function openProjectsModal() {
@@ -4506,6 +4538,7 @@ function setupListeners() {
   });
 
   document.getElementById('btn-save-job').addEventListener('click',    saveJob);
+  document.getElementById('btn-reload-items-3mf').addEventListener('click', reloadItemsFrom3mf);
   document.getElementById('btn-delete-job').addEventListener('click',  deleteJob);
   document.getElementById('btn-save-printer').addEventListener('click',  savePrinter);
   document.getElementById('btn-add-printer').addEventListener('click', () => openPrinterDialog(null));
@@ -4954,6 +4987,59 @@ async function confirm3mfSchedule() {
 let attachJobId = null;
 let attach3mfBuffer = null;
 let attach3mfParsed = null;
+
+// "Herlaad items uit 3MF": re-parse the job's retained 3MF and set its item
+// count from the plate. Single plate → apply directly. Multiple → let the user
+// pick which plate (by name) this job maps to. Persists via PATCH immediately.
+async function reloadItemsFrom3mf() {
+  if (!editJobId) return;
+  const jobId = editJobId;
+  let plates;
+  try {
+    plates = await api('GET', `/api/jobs/${jobId}/3mf-plates`);
+  } catch {
+    alert('Kon het 3MF-bestand niet lezen.');
+    return;
+  }
+  if (!Array.isArray(plates) || plates.length === 0) {
+    alert('Geen geldig 3MF-bestand gevonden voor deze job.');
+    return;
+  }
+  if (plates.length === 1) {
+    await applyReloadedPlate(jobId, plates[0]);
+    return;
+  }
+  // Multiple plates → name picker (reuses the import modal shell).
+  closeModal('job-modal');
+  document.getElementById('import3mf-title').textContent = 'Kies plate voor items';
+  const rows = plates.map((pl, i) => {
+    const label = pl.name || `Plate ${i + 1}`;
+    const h = Math.floor((pl.durationMins || 0) / 60), m = (pl.durationMins || 0) % 60;
+    return `<div class="attach-plate-option" data-reload-plate="${i}" style="display:flex;justify-content:space-between;align-items:center;gap:12px;padding:12px;background:var(--bg);border:1px solid var(--border);border-radius:6px;cursor:pointer">
+      <strong>${escHtml(label)}</strong>
+      <span style="color:var(--text-muted);font-size:13px">${pl.objectCount} items · ${h}h ${m}m</span>
+    </div>`;
+  }).join('');
+  document.getElementById('import3mf-body').innerHTML = `<div style="display:flex;flex-direction:column;gap:8px">${rows}</div>`;
+  document.getElementById('btn-import3mf-save').style.display = 'none';
+  document.getElementById('import3mf-modal').classList.remove('hidden');
+  document.querySelectorAll('#import3mf-body [data-reload-plate]').forEach(el => {
+    el.addEventListener('click', async () => {
+      const idx = parseInt(el.dataset.reloadPlate, 10);
+      await applyReloadedPlate(jobId, plates[idx]);
+      closeModal('import3mf-modal');
+    });
+  });
+}
+
+async function applyReloadedPlate(jobId, plate) {
+  const items = Number.isInteger(plate.objectCount) ? plate.objectCount : null;
+  await api('PATCH', `/api/jobs/${jobId}`, { items, plate_name: plate.name ?? null });
+  // Reflect in the still-open edit dialog (single-plate path keeps it open).
+  const itemsInput = document.getElementById('job-items');
+  if (itemsInput && editJobId === jobId) itemsInput.value = items != null ? items : '';
+  await renderCalendar();
+}
 
 function initAttach3mf() {
   document.getElementById('attach-3mf-input')?.addEventListener('change', async function() {

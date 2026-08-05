@@ -184,6 +184,29 @@ if (!jobColsProject.some(c => c.name === 'project_id')) {
   db.exec('ALTER TABLE jobs ADD COLUMN project_id TEXT');
 }
 
+// Item-count tracking. A job produces a physical item count, seeded from its
+// 3MF plate's objectCount on import (editable manually); items_lost records
+// scrapped/failed items on that job; plate_name remembers which plate of a
+// multi-plate 3MF this job maps to (set on import / migration / manual reload).
+// Prod-safe additive columns, mirroring locked / project_id above:
+//   - items      nullable (NULL = untracked, distinct from a real 0)
+//   - items_lost NOT NULL DEFAULT 0 → existing rows read as zero losses
+//   - plate_name nullable
+// No destructive backfill here — the guarded startup backfill (server.js)
+// self-heals items from the retained 3MF where it can, everything else stays
+// NULL. Scheduling never reads these columns, so the recomputed schedule is
+// byte-identical to before this migration.
+const jobColsItems = db.pragma('table_info(jobs)');
+if (!jobColsItems.some(c => c.name === 'items')) {
+  db.exec('ALTER TABLE jobs ADD COLUMN items INTEGER');
+}
+if (!jobColsItems.some(c => c.name === 'items_lost')) {
+  db.exec('ALTER TABLE jobs ADD COLUMN items_lost INTEGER NOT NULL DEFAULT 0');
+}
+if (!jobColsItems.some(c => c.name === 'plate_name')) {
+  db.exec('ALTER TABLE jobs ADD COLUMN plate_name TEXT');
+}
+
 // One-time migration: if the favourite column was previously added with DEFAULT 0
 // (all printers show favourite=0), set them all to 1 so they appear in day view.
 const favMigrated = db.prepare("SELECT value FROM settings WHERE key='favouriteMigrated'").get();

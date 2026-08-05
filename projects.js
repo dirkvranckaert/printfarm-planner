@@ -63,20 +63,46 @@ function assignExisting({ db, jobId, projectId }) {
   return { ok: true, id, label: row.label, reopened };
 }
 
-// Compute per-project counts { toPrint, busy, done, total } keyed by project id.
+// Compute per-project counts keyed by project id. Job counts:
+// { toPrint, busy, done, total }. Item counts (only jobs with items NOT NULL
+// contribute): itemsTotal (Σ items), itemsDone (Σ items on Done jobs),
+// itemsBusy (Σ items on Printing/Post Printing jobs), itemsLost (Σ items_lost).
+// Losses are subtracted from BOTH the done AND the total figure (Dirk's rule):
+//   doneAdj  = max(0, itemsDone  − itemsLost)
+//   totalAdj = max(0, itemsTotal − itemsLost)
 function countsByProject(db) {
-  const rows = db.prepare("SELECT project_id AS pid, status FROM jobs WHERE project_id IS NOT NULL AND (queued IS NULL OR queued=0)").all();
+  const rows = db.prepare("SELECT project_id AS pid, status, items, items_lost FROM jobs WHERE project_id IS NOT NULL AND (queued IS NULL OR queued=0)").all();
   const map = {};
   for (const r of rows) {
-    const m = map[r.pid] || (map[r.pid] = { toPrint: 0, busy: 0, done: 0, total: 0 });
+    const m = map[r.pid] || (map[r.pid] = {
+      toPrint: 0, busy: 0, done: 0, total: 0,
+      itemsTotal: 0, itemsDone: 0, itemsBusy: 0, itemsLost: 0,
+    });
     const b = bucketOf(r.status);
     if (b === 'done') m.done++;
     else if (b === 'busy') m.busy++;
     else m.toPrint++;
     m.total++;
+    // Item sums: a NULL items job is untracked and contributes nothing — not to
+    // the totals and not to the losses either. A loss only makes sense on a plate
+    // whose items are counted, so items_lost on an untracked job is ignored. This
+    // keeps losses ⊆ tracked items, so doneAdj/totalAdj can't be undercounted.
+    const it = Number.isInteger(r.items) ? r.items : null;
+    if (it != null) {
+      m.itemsTotal += it;
+      if (b === 'done') m.itemsDone += it;
+      else if (b === 'busy') m.itemsBusy += it;
+      m.itemsLost += Number.isInteger(r.items_lost) ? r.items_lost : 0;
+    }
   }
   return map;
 }
+
+// Zero-counts shape for a project with no (non-queued) jobs.
+const ZERO_COUNTS = {
+  toPrint: 0, busy: 0, done: 0, total: 0,
+  itemsTotal: 0, itemsDone: 0, itemsBusy: 0, itemsLost: 0,
+};
 
 // Which sort group a summary belongs to (lower = higher in the list):
 //   0 = open + active (has to-print or busy jobs)
@@ -93,9 +119,14 @@ function summaries(db) {
   const projects = db.prepare('SELECT id, label, status, created_at FROM projects').all();
   const counts = countsByProject(db);
   const list = projects.map(p => {
-    const c = counts[p.id] || { toPrint: 0, busy: 0, done: 0, total: 0 };
+    const c = counts[p.id] || ZERO_COUNTS;
+    // Losses subtract from BOTH done and total (Dirk's rule), floored at 0.
+    const doneAdj  = Math.max(0, c.itemsDone  - c.itemsLost);
+    const totalAdj = Math.max(0, c.itemsTotal - c.itemsLost);
     return { id: p.id, label: p.label, status: p.status, created_at: p.created_at,
              toPrint: c.toPrint, busy: c.busy, done: c.done, total: c.total,
+             itemsTotal: c.itemsTotal, itemsDone: c.itemsDone, itemsBusy: c.itemsBusy,
+             itemsLost: c.itemsLost, itemsDoneAdj: doneAdj, itemsTotalAdj: totalAdj,
              active: (c.toPrint + c.busy) > 0 };
   });
   list.sort((a, b) => {
