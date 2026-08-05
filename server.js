@@ -1261,14 +1261,26 @@ function findNextValidStart(candidate, durationMins, printerId) {
 // One-time item-count backfill from retained 3MFs. Guarded by a settings marker
 // (runs once, never re-parses on later boots) and only touches items-IS-NULL
 // jobs. Wrapped so a parse/IO error can never abort startup. See itemsMigration.js.
-try {
-  const r = itemsMigration.backfillItems({ db, uploadsDir: UPLOADS_DIR, parse3mf, fs, path });
-  if (r.ran) {
-    console.log(`[migration] items backfill: scanned ${r.stats.scanned}, backfilled ${r.stats.backfilled} `
-      + `(single ${r.stats.singlePlate}, multi ${r.stats.multiMatched}), ambiguous ${r.stats.ambiguous}, skipped ${r.stats.skipped}`);
+//
+// CRITICAL: this is a SYNCHRONOUS scan that shells out to `unzip` once per
+// retained 3MF. On a prod backlog of many jobs it blocks the event loop for
+// seconds — so it MUST run AFTER app.listen() has bound the port, never before.
+// Running it pre-listen delayed the port bind past the deploy health-check
+// window, so the new process never answered and the deploy auto-rolled back.
+// It is invoked from the app.listen callback below (so the port is already
+// bound) via backfillItemsAsync, which yields the event loop between jobs so the
+// scan never starves incoming HTTP. Wrapped so any throw (including a bad
+// require, if it ever reaches here) is logged and the server stays up.
+async function runItemsBackfill() {
+  try {
+    const r = await itemsMigration.backfillItemsAsync({ db, uploadsDir: UPLOADS_DIR, parse3mf, fs, path });
+    if (r.ran) {
+      console.log(`[migration] items backfill: scanned ${r.stats.scanned}, backfilled ${r.stats.backfilled} `
+        + `(single ${r.stats.singlePlate}, multi ${r.stats.multiMatched}), ambiguous ${r.stats.ambiguous}, skipped ${r.stats.skipped}`);
+    }
+  } catch (err) {
+    console.error('[migration] items backfill failed (non-fatal):', err.message);
   }
-} catch (err) {
-  console.error('[migration] items backfill failed (non-fatal):', err.message);
 }
 
 app.post('/api/find-slot', (req, res) => {
@@ -1432,6 +1444,11 @@ app.get('/api/uploads/:filename', (req, res) => {
 if (require.main === module) {
   app.listen(process.env.PORT || 3000, () => {
     console.log(`PrintFarm Planner running on port ${process.env.PORT || 3000}`);
+    // Kick the one-time items backfill only after the port is bound. It yields
+    // the event loop between jobs (backfillItemsAsync), so even a large retained
+    // -3MF backlog never blocks incoming HTTP — the port answers immediately and
+    // the backfill self-heals in the background. See runItemsBackfill above.
+    runItemsBackfill();
   });
 }
 

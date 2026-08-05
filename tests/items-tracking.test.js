@@ -254,6 +254,63 @@ describe('auto-migration backfill', () => {
     expect(db.prepare('SELECT items FROM jobs WHERE id=?').get(idBad).items).toBeNull();
     expect(db.prepare('SELECT items FROM jobs WHERE id=?').get(idGood).items).toBe(4);
   });
+
+  // --- backfillItemsAsync — the path server.js runs AFTER binding the port.
+  // Same behaviour as the sync version, but yields the event loop between jobs
+  // so a large retained-3MF backlog can never block the port bind / HTTP (the
+  // synchronous pre-listen scan is what made prod boot fail + auto-roll-back).
+  test('async backfill yields identical result to the sync version', async () => {
+    const seed = () => {
+      const db = makeDb();
+      addJob(db, { printFile: touch('as-a.3mf') });                       // single
+      addJob(db, { printFile: touch('as-b.3mf'), durationMins: 90 });     // multi unique
+      addJob(db, { printFile: 'gone.3mf' });                             // skip
+      return db;
+    };
+    const parse3mf = makeParser({
+      'as-a.3mf': { plates: [{ objectCount: 6, plateName: 'Dino', printTimeMinutes: 120 }] },
+      'as-b.3mf': { plates: [
+        { objectCount: 3, plateName: 'A', printTimeMinutes: 30 },
+        { objectCount: 8, plateName: 'B', printTimeMinutes: 90 },
+      ] },
+    });
+    const syncDb = seed();
+    const syncR = itemsMigration.backfillItems({ db: syncDb, uploadsDir: dir, parse3mf, fs, path });
+    const asyncDb = seed();
+    const asyncR = await itemsMigration.backfillItemsAsync({ db: asyncDb, uploadsDir: dir, parse3mf, fs, path });
+    expect(asyncR).toEqual(syncR);
+    const rows = (db) => db.prepare('SELECT items, plate_name FROM jobs ORDER BY id').all();
+    expect(rows(asyncDb)).toEqual(rows(syncDb));
+  });
+
+  test('async backfill actually yields the event loop between jobs', async () => {
+    const db = makeDb();
+    for (let i = 0; i < 6; i++) addJob(db, { printFile: touch(`y${i}.3mf`) });
+    const parse3mf = () => ({ plates: [{ objectCount: 1, printTimeMinutes: 10 }] });
+    let interleaved = false;
+    const p = itemsMigration.backfillItemsAsync({ db, uploadsDir: dir, parse3mf, fs, path });
+    // Scheduled after the async backfill's first per-job yield is queued; it must
+    // run BEFORE the backfill resolves, proving the loop is released mid-scan.
+    setImmediate(() => { interleaved = true; });
+    await p;
+    expect(interleaved).toBe(true);
+  });
+
+  test('async backfill swallows a throwing parser and still marks the migration done', async () => {
+    const db = makeDb();
+    const idBad  = addJob(db, { printFile: touch('abad.3mf') });
+    const idGood = addJob(db, { printFile: touch('agood.3mf') });
+    const parse3mf = (full) => {
+      if (path.basename(full) === 'abad.3mf') throw new Error('boom');
+      return { plates: [{ objectCount: 4, plateName: 'G', printTimeMinutes: 10 }] };
+    };
+    const r = await itemsMigration.backfillItemsAsync({ db, uploadsDir: dir, parse3mf, fs, path });
+    expect(r.ran).toBe(true);
+    expect(r.stats.skipped).toBe(1);
+    expect(db.prepare('SELECT items FROM jobs WHERE id=?').get(idBad).items).toBeNull();
+    expect(db.prepare('SELECT items FROM jobs WHERE id=?').get(idGood).items).toBe(4);
+    expect(db.prepare('SELECT value FROM settings WHERE key=?').get(itemsMigration.MARKER_KEY).value).toBe('1');
+  });
 });
 
 // ---------------------------------------------------------------------------
