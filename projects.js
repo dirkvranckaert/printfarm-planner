@@ -83,15 +83,17 @@ function countsByProject(db) {
     else if (b === 'busy') m.busy++;
     else m.toPrint++;
     m.total++;
-    // Item sums: a NULL items job is untracked and contributes nothing (but its
-    // items_lost, if any, still counts — a loss is a loss even on an untracked job).
+    // Item sums: a NULL items job is untracked and contributes nothing — not to
+    // the totals and not to the losses either. A loss only makes sense on a plate
+    // whose items are counted, so items_lost on an untracked job is ignored. This
+    // keeps losses ⊆ tracked items, so doneAdj/totalAdj can't be undercounted.
     const it = Number.isInteger(r.items) ? r.items : null;
     if (it != null) {
       m.itemsTotal += it;
       if (b === 'done') m.itemsDone += it;
       else if (b === 'busy') m.itemsBusy += it;
+      m.itemsLost += Number.isInteger(r.items_lost) ? r.items_lost : 0;
     }
-    m.itemsLost += Number.isInteger(r.items_lost) ? r.items_lost : 0;
   }
   return map;
 }

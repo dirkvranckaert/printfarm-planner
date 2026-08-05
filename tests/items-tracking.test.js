@@ -120,13 +120,25 @@ describe('projects aggregation — item counts + losses', () => {
     expect(s.itemsTotalAdj).toBe(0);
   });
 
-  test('items_lost on an untracked (items NULL) job still counts as a loss', () => {
+  test('items_lost on an untracked (items NULL) job is ignored (no loss counted)', () => {
     const db = makeDb();
     projects.resolveProject({ db, name: 'P' });
     addJob(db, { status: 'Done', items: null, lost: 2 });
     const c = projects.countsByProject(db)['p'];
     expect(c.itemsTotal).toBe(0);
-    expect(c.itemsLost).toBe(2);
+    expect(c.itemsLost).toBe(0); // a loss only counts on a tracked plate
+  });
+
+  test('untracked-job losses never subtract from a tracked total via summaries()', () => {
+    const db = makeDb();
+    projects.resolveProject({ db, name: 'P' });
+    addJob(db, { status: 'Done', items: 10, lost: 2 }); // tracked: 2 real losses
+    addJob(db, { status: 'Done', items: null, lost: 9 }); // untracked: ignored
+    const s = projects.summaries(db).find(x => x.id === 'p');
+    expect(s.itemsTotal).toBe(10);
+    expect(s.itemsLost).toBe(2);       // only the tracked loss
+    expect(s.itemsDoneAdj).toBe(8);    // 10 - 2, untracked 9 not subtracted
+    expect(s.itemsTotalAdj).toBe(8);   // 10 - 2
   });
 });
 
@@ -270,8 +282,9 @@ describe('item-count routes (integration)', () => {
   });
   afterAll(() => { try { appDb.exec('DELETE FROM jobs; DELETE FROM printers; DELETE FROM projects;'); } catch {} });
 
-  const post = (url, body) => request(app).post(url).set('Cookie', authCookie).send(body);
-  const put  = (url, body) => request(app).put(url).set('Cookie', authCookie).send(body);
+  const post  = (url, body) => request(app).post(url).set('Cookie', authCookie).send(body);
+  const put   = (url, body) => request(app).put(url).set('Cookie', authCookie).send(body);
+  const patch = (url, body) => request(app).patch(url).set('Cookie', authCookie).send(body);
 
   // --- C. Manual create + edit + items_lost validation ---
   test('POST /api/jobs stores items + items_lost', async () => {
@@ -297,6 +310,41 @@ describe('item-count routes (integration)', () => {
     const c = await post('/api/jobs', { printerId, name: 'J', start: '2026-08-04T08:00', end: '2026-08-04T09:00', items: 4 });
     await put(`/api/jobs/${c.body.id}`, { printerId, name: 'J', start: '2026-08-04T08:00', end: '2026-08-04T09:00', items: 9, items_lost: 1 });
     expect(appDb.prepare('SELECT items, items_lost FROM jobs WHERE id=?').get(c.body.id)).toMatchObject({ items: 9, items_lost: 1 });
+  });
+
+  test('POST /api/jobs with null items forces items_lost to 0 (untracked → no loss)', async () => {
+    const r = await post('/api/jobs', { printerId, name: 'J', start: '2026-08-04T08:00', end: '2026-08-04T09:00', items: null, items_lost: 5 });
+    const row = appDb.prepare('SELECT items, items_lost FROM jobs WHERE id=?').get(r.body.id);
+    expect(row.items).toBeNull();
+    expect(row.items_lost).toBe(0);
+  });
+
+  test('PATCH clamps items_lost to the job\'s current items', async () => {
+    const c = await post('/api/jobs', { printerId, name: 'J', start: '2026-08-04T08:00', end: '2026-08-04T09:00', items: 4, items_lost: 1 });
+    await patch(`/api/jobs/${c.body.id}`, { items_lost: 10 });
+    expect(appDb.prepare('SELECT items_lost FROM jobs WHERE id=?').get(c.body.id).items_lost).toBe(4);
+  });
+
+  test('PATCH clamps items_lost against incoming items in the same request', async () => {
+    const c = await post('/api/jobs', { printerId, name: 'J', start: '2026-08-04T08:00', end: '2026-08-04T09:00', items: 10, items_lost: 2 });
+    await patch(`/api/jobs/${c.body.id}`, { items: 3, items_lost: 8 });
+    expect(appDb.prepare('SELECT items, items_lost FROM jobs WHERE id=?').get(c.body.id)).toMatchObject({ items: 3, items_lost: 3 });
+  });
+
+  test('PATCH items → null zeroes items_lost (untracked plate)', async () => {
+    const c = await post('/api/jobs', { printerId, name: 'J', start: '2026-08-04T08:00', end: '2026-08-04T09:00', items: 4, items_lost: 2 });
+    await patch(`/api/jobs/${c.body.id}`, { items: null, items_lost: 2 });
+    const row = appDb.prepare('SELECT items, items_lost FROM jobs WHERE id=?').get(c.body.id);
+    expect(row.items).toBeNull();
+    expect(row.items_lost).toBe(0);
+  });
+
+  test('PATCH items → null zeroes stored items_lost even when items_lost is not in the patch', async () => {
+    const c = await post('/api/jobs', { printerId, name: 'J', start: '2026-08-04T08:00', end: '2026-08-04T09:00', items: 4, items_lost: 2 });
+    await patch(`/api/jobs/${c.body.id}`, { items: null });
+    const row = appDb.prepare('SELECT items, items_lost FROM jobs WHERE id=?').get(c.body.id);
+    expect(row.items).toBeNull();
+    expect(row.items_lost).toBe(0);
   });
 
   // --- B. Import passthrough ---

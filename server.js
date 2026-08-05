@@ -577,7 +577,8 @@ function resolveJobItems(rawItems, rawLost) {
     const n = Number(rawLost);
     if (Number.isInteger(n) && n >= 0) lost = n;
   }
-  if (items != null && lost > items) lost = items;
+  if (items == null) lost = 0;          // untracked plate → no losses counted
+  else if (lost > items) lost = items;  // clamp into [0, items]
   return { items, items_lost: lost };
 }
 // Resolve a free-text project name for a job, set jobs.project_id, and fire the
@@ -704,6 +705,25 @@ app.patch('/api/jobs/:id', (req, res) => {
       }
       return [k, v];
     });
+  // Clamp items_lost against the EFFECTIVE items whenever this PATCH touches items
+  // or items_lost. Effective items = the incoming items if present, else the job's
+  // currently stored items. Effective loss = incoming items_lost if present, else
+  // the stored items_lost. A loss only makes sense on a tracked plate, so effective
+  // items === null forces items_lost to 0 (including the case where this PATCH turns
+  // a tracked job untracked while leaving items_lost untouched); otherwise items_lost
+  // is capped at items. Never persist items_lost > items (the map above already
+  // floored a bad incoming value at 0).
+  const lostField  = fields.find(([k]) => k === 'items_lost');
+  const itemsField = fields.find(([k]) => k === 'items');
+  if (lostField || itemsField) {
+    const current = db.prepare('SELECT items, items_lost FROM jobs WHERE id=?').get(req.params.id);
+    const effectiveItems = itemsField ? itemsField[1] : (current?.items ?? null);
+    let lost = lostField ? lostField[1] : (current?.items_lost ?? 0);
+    if (effectiveItems == null) lost = 0;
+    else if (lost > effectiveItems) lost = effectiveItems;
+    if (lostField) lostField[1] = lost;
+    else if (lost !== (current?.items_lost ?? 0)) fields.push(['items_lost', lost]);
+  }
   if (!fields.length) return res.status(400).json({ error: 'no valid fields' });
   const setClauses = fields.map(([k]) => `${k}=?`).join(', ');
   const values = [...fields.map(([, v]) => v), req.params.id];
