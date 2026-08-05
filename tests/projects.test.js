@@ -118,6 +118,17 @@ describe('deleteIfEmpty — delete only an empty project', () => {
     expect(db.prepare('SELECT project_id FROM jobs WHERE id=?').get(jobId).project_id).toBe('linked');
   });
 
+  test('a queued-only project is NOT empty: still refuses (409)', () => {
+    // Queued jobs also hold a project_id, so they block the delete. The button
+    // gate mirrors this by counting data.jobs unfiltered (incl. queued).
+    const db = makeDb();
+    projects.resolveProject({ db, name: 'QueuedOnly' });
+    addJob(db, 'Planned', 'queuedonly', 1); // queued
+    const r = projects.deleteIfEmpty({ db, projectId: 'queuedonly' });
+    expect(r).toMatchObject({ ok: false, code: 409, jobs: 1 });
+    expect(db.prepare('SELECT COUNT(*) c FROM projects WHERE id=?').get('queuedonly').c).toBe(1);
+  });
+
   test('unknown id -> 404', () => {
     const db = makeDb();
     expect(projects.deleteIfEmpty({ db, projectId: 'ghost' })).toEqual({ ok: false, code: 404 });
@@ -417,8 +428,10 @@ describe('project push switch + UI wiring (index.html + app.js)', () => {
     expect(HTML).toContain('id="btn-delete-project"');
     expect(APP).toContain("getElementById('btn-delete-project').addEventListener");
     expect(APP).toContain('function deleteCurrentProject(');
-    // Delete control only surfaces when the project has no non-queued jobs.
-    expect(APP).toContain("classList.toggle('hidden', jobs.length > 0)");
+    // Delete control gated on the UNFILTERED job count (incl. queued) so it
+    // matches deleteIfEmpty's all-jobs guard — a queued-only project is not
+    // deletable and must not show the button.
+    expect(APP).toContain("classList.toggle('hidden', data.jobs.length > 0)");
     // Backend guards the delete: empty-only, never cascades.
     expect(APP).toContain("api('DELETE', `/api/projects/");
   });

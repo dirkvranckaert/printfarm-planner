@@ -4255,8 +4255,10 @@ function renderProjectDetail(data) {
   renderStatusGroups(document.getElementById('project-detail-body'), jobs, pdCollapsed);
   // Hide the "Close project" control for an already-closed project.
   document.getElementById('btn-close-project').classList.toggle('hidden', closed);
-  // "Verwijder project" only for an EMPTY project (no linked non-queued jobs).
-  document.getElementById('btn-delete-project').classList.toggle('hidden', jobs.length > 0);
+  // "Verwijder project" only for a truly EMPTY project: gate on the UNFILTERED
+  // job count so it matches deleteIfEmpty's all-jobs guard (queued jobs still
+  // hold a project_id and block the delete). `jobs` stays filtered for display.
+  document.getElementById('btn-delete-project').classList.toggle('hidden', data.jobs.length > 0);
 }
 
 // Re-fetch + re-render the project-detail modal in place when it is the open
