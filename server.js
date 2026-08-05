@@ -490,7 +490,9 @@ app.post('/api/jobs/:id/attach-3mf', express.raw({ type: '*/*', limit: '500mb' }
 
     const durationMins = plate ? Math.round(plate.printTimeMinutes) : job.durationMins;
     const colorsStr = colors.length ? JSON.stringify(colors) : job.colors;
-    const newEnd = new Date(new Date(job.start).getTime() + durationMins * 60 * 1000).toISOString();
+    // A queued job has no start (start=''), so a start-derived end would be
+    // `new Date('')` -> NaN -> throw. Keep end empty for queued jobs.
+    const newEnd = job.start ? new Date(new Date(job.start).getTime() + durationMins * 60 * 1000).toISOString() : '';
     const bedType = plate?.bedType || null;
 
     db.prepare('UPDATE jobs SET printFile=?, thumbFile=?, colors=?, durationMins=?, end=?, bedType=? WHERE id=?')
@@ -1321,7 +1323,10 @@ app.post('/api/import-3mf-schedule', express.raw({ type: '*/*', limit: '500mb' }
     const schedule = JSON.parse(decodeURIComponent(rawSchedule));
     const { plates, startISO, startDate, startTime, mode } = schedule;
     const isFirstAvailable = mode === 'first-available';
-    if (!plates?.length || (!isFirstAvailable && !startISO && !startDate)) return res.status(400).json({ error: 'plates and start time required' });
+    // Queue mode (the web default): jobs land on the queue with no fixed start.
+    const isQueue = mode === 'queue';
+    if (!plates?.length) return res.status(400).json({ error: 'plates required' });
+    if (!isQueue && !isFirstAvailable && !startISO && !startDate) return res.status(400).json({ error: 'plates and start time required' });
 
     // Resolve the (optional) batch project ONCE, so every imported job shares
     // the same project_id and the first-create push fires at most once.
@@ -1347,26 +1352,26 @@ app.post('/api/import-3mf-schedule', express.raw({ type: '*/*', limit: '500mb' }
       thumbMap[t.plateIndex] = imgId;
     }
 
-    // Schedule jobs sequentially, respecting silent hours/closed days/overlaps
+    // Schedule jobs sequentially, respecting silent hours/closed days/overlaps.
+    // Queue mode skips all time-slotting entirely: jobs are inserted with
+    // queued=1 and empty start/end, so no `new Date('')` is ever computed.
     const importTz = getSchedulingRestrictions().timezone || DEFAULT_TZ;
-    let currentStart;
-    if (isFirstAvailable) {
-      currentStart = new Date();
-    } else if (startISO) {
-      currentStart = new Date(startISO);
-    } else {
-      const [dy, dmo, dda] = startDate.split('-').map(Number);
-      const [sh, smi] = (startTime || '08:00').split(':').map(Number);
-      currentStart = zonedTimeToDate(dy, dmo, dda, sh, smi || 0, importTz);
+    let currentStart = null;
+    if (!isQueue) {
+      if (isFirstAvailable) {
+        currentStart = new Date();
+      } else if (startISO) {
+        currentStart = new Date(startISO);
+      } else {
+        const [dy, dmo, dda] = startDate.split('-').map(Number);
+        const [sh, smi] = (startTime || '08:00').split(':').map(Number);
+        currentStart = zonedTimeToDate(dy, dmo, dda, sh, smi || 0, importTz);
+      }
     }
     const createdJobs = [];
 
     for (const pl of expandedPlates) {
       const durationMins = pl.durationMins || 0;
-
-      // Run through smart scheduling to find valid start
-      const validStart = findNextValidStart(currentStart, durationMins, pl.printerId);
-      const endDate = new Date(validStart.getTime() + durationMins * 60000);
 
       // Get printer buffers for next-plate gap calculation
       const printer = pl.printerId ? db.prepare('SELECT warm_up_mins, cool_down_mins FROM printers WHERE id=?').get(pl.printerId) : null;
@@ -1382,6 +1387,18 @@ app.post('/api/import-3mf-schedule', express.raw({ type: '*/*', limit: '500mb' }
       const plItems = Number.isInteger(pl.items) && pl.items >= 0 ? pl.items : null;
       const plateName = pl.name || null;
 
+      // Time-slotted only when not queueing. Queue mode leaves start/end empty.
+      let startStr = '';
+      let endStr = '';
+      if (!isQueue) {
+        const validStart = findNextValidStart(currentStart, durationMins, pl.printerId);
+        const endDate = new Date(validStart.getTime() + durationMins * 60000);
+        startStr = validStart.toISOString();
+        endStr = endDate.toISOString();
+        // Next plate candidate: after this job's end + cool-down + warm-up
+        currentStart = new Date(endDate.getTime() + (coolDown + warmUp) * 60000);
+      }
+
       const result = db.prepare(
         'INSERT INTO jobs (printerId, name, customerName, orderNr, start, end, status, colors, printFile, remarks, queued, durationMins, thumbFile, bedType, cool_down_mins, warm_up_mins, items, plate_name) VALUES (?,?,?,?,?,?,?,?,?,?,?,?,?,?,?,?,?,?)'
       ).run(
@@ -1389,13 +1406,13 @@ app.post('/api/import-3mf-schedule', express.raw({ type: '*/*', limit: '500mb' }
         pl.name || `Plate ${pl.plateIndex}`,
         pl.customerName || null,
         pl.orderNr || null,
-        validStart.toISOString(),
-        endDate.toISOString(),
+        startStr,
+        endStr,
         'Planned',
         colorsStr,
         storedName,
         null,
-        0,
+        isQueue ? 1 : 0,
         durationMins,
         thumbFile || null,
         pl.bedType || null,
@@ -1411,14 +1428,12 @@ app.post('/api/import-3mf-schedule', express.raw({ type: '*/*', limit: '500mb' }
         id: result.lastInsertRowid,
         name: pl.name,
         printerId: pl.printerId,
-        start: validStart.toISOString(),
-        end: endDate.toISOString(),
+        start: startStr,
+        end: endStr,
         durationMins,
         thumbFile,
+        queued: isQueue ? 1 : 0,
       });
-
-      // Next plate candidate: after this job's end + cool-down + warm-up
-      currentStart = new Date(endDate.getTime() + (coolDown + warmUp) * 60000);
     }
 
     // First-create push (once per batch), behind the `project` toggle.

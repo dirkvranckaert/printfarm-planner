@@ -4779,14 +4779,12 @@ function show3mfSchedulePreview(parsed, filename) {
     const match = printers.find(pr => { const n = norm(pr.name); return pNorm.includes(n) || n.includes(pNorm); });
     if (match) matchedPrinterId = match.id;
   }
+  const matchedPrinter = printers.find(pr => pr.id == matchedPrinterId);
+  const matchedPrinterLabel = matchedPrinter
+    ? escHtml(matchedPrinter.name)
+    : (parsed.printerName ? `${escHtml(parsed.printerName)} — no farm match, pick per plate` : 'None matched — pick per plate');
 
-  const defaultDate = import3mfDefaultDate || new Date();
-  const today = `${defaultDate.getFullYear()}-${String(defaultDate.getMonth()+1).padStart(2,'0')}-${String(defaultDate.getDate()).padStart(2,'0')}`;
-  // Default the manual time field to "now" (HH:mm, padded), not 08:00.
-  // We use the wall clock at render time, regardless of any dragged-in date.
-  const nowForTime = new Date();
-  const nowHHMM = `${String(nowForTime.getHours()).padStart(2,'0')}:${String(nowForTime.getMinutes()).padStart(2,'0')}`;
-  import3mfDefaultDate = null; // reset
+  import3mfDefaultDate = null; // reset (drag-in date no longer used in queue mode)
   const totalMins = parsed.plates.reduce((s, pl) => s + (pl.printTimeMinutes || 0), 0);
 
   // Reset display order for this dialog (identity).
@@ -4868,17 +4866,12 @@ function show3mfSchedulePreview(parsed, filename) {
   document.getElementById('import3mf-body').innerHTML = `
     <div style="display:flex;flex-direction:column;gap:12px">
       <div style="padding:8px 0;border-bottom:1px solid var(--border)">
-        <div style="display:flex;gap:16px;align-items:center;margin-bottom:8px">
-          <label style="font-size:13px;cursor:pointer;margin:0"><input type="radio" name="sched-mode" value="manual" style="margin-right:4px"> Pick date/time</label>
-          <label style="font-size:13px;cursor:pointer;margin:0"><input type="radio" name="sched-mode" value="first-available" checked style="margin-right:4px"> First available slot</label>
+        <div style="display:flex;gap:16px;align-items:center;flex-wrap:wrap">
+          <div style="font-size:13px;color:var(--text-muted)">Target printer: <strong style="color:var(--text)">${matchedPrinterLabel}</strong></div>
           <div style="flex:1;text-align:right;font-size:13px;color:var(--text-muted)" id="sched-total-label">Total: ${Math.floor(totalMins / 60)}h ${Math.round(totalMins % 60)}m across ${parsed.plates.length} plate${parsed.plates.length > 1 ? 's' : ''}</div>
         </div>
-        <div id="sched-manual-fields" style="display:none;gap:12px;align-items:end">
-          <div><label style="font-size:12px;font-weight:600;color:var(--text-muted)">Start Date</label><input type="date" id="sched-start-date" value="${today}" style="padding:6px 10px;font-size:14px"></div>
-          <div><label style="font-size:12px;font-weight:600;color:var(--text-muted)">Start Time</label><input type="time" id="sched-start-time" value="${nowHHMM}" style="padding:6px 10px;font-size:14px"></div>
-        </div>
-        <div id="sched-auto-fields" style="display:block;font-size:13px;color:var(--text-muted);padding:6px 0">
-          Jobs will be scheduled at the first available moment per printer, respecting silent hours and closed days.
+        <div style="font-size:13px;color:var(--text-muted);padding:6px 0 0">
+          Jobs are added to the queue (no fixed start time). Set the printer per plate below.
         </div>
       </div>
       <div style="display:flex;justify-content:flex-end;font-size:12px;padding:0">
@@ -4928,15 +4921,6 @@ function show3mfSchedulePreview(parsed, filename) {
   }
 
   setTimeout(() => {
-    // Radio toggle for scheduling mode
-    document.querySelectorAll('input[name="sched-mode"]').forEach(r => {
-      r.addEventListener('change', () => {
-        const isAuto = r.value === 'first-available' && r.checked;
-        document.getElementById('sched-manual-fields').style.display = isAuto ? 'none' : 'flex';
-        document.getElementById('sched-auto-fields').style.display = isAuto ? '' : 'none';
-      });
-    });
-
     // Select all / Deselect all link
     document.getElementById('sched-toggle-all')?.addEventListener('click', e => {
       e.preventDefault();
@@ -4960,19 +4944,9 @@ async function confirm3mfSchedule() {
   if (!import3mfParsed) return;
   const btn = document.getElementById('btn-import3mf-save');
   btn.disabled = true;
-  btn.textContent = 'Scheduling...';
+  btn.textContent = 'Adding...';
 
   try {
-    const schedMode = document.querySelector('input[name="sched-mode"]:checked')?.value || 'manual';
-    const isFirstAvailable = schedMode === 'first-available';
-    let startISO = null;
-    if (!isFirstAvailable) {
-      const startDate = document.getElementById('sched-start-date').value;
-      const startTime = document.getElementById('sched-start-time').value;
-      if (!startDate) { alert('Start date required'); return; }
-      startISO = new Date(`${startDate}T${startTime || '08:00'}:00`).toISOString();
-    }
-
     // Best-effort: try to enrich color names from the filament-manager catalog.
     // Falls back to ntc names if filament-manager is unreachable.
     const filamentCatalog = await fetchFilamentCatalog().catch(() => []);
@@ -5005,6 +4979,7 @@ async function confirm3mfSchedule() {
         orderNr: document.querySelector(`[data-sched-ordernr="${i}"]`)?.value || null,
         durationMins: Math.round(pl.printTimeMinutes || 0),
         bedType: pl.bedType || null,
+        items: Number.isInteger(pl.objectCount) ? pl.objectCount : (pl.objects?.length ?? null),
         colors,
       };
     });
@@ -5016,7 +4991,7 @@ async function confirm3mfSchedule() {
       method: 'POST',
       headers: {
         'Content-Type': 'application/octet-stream',
-        'X-Schedule': encodeURIComponent(JSON.stringify({ plates: selectedPlates, startISO, mode: isFirstAvailable ? 'first-available' : 'manual' })),
+        'X-Schedule': encodeURIComponent(JSON.stringify({ plates: selectedPlates, mode: 'queue' })),
       },
       body: import3mfBuffer.buffer,
     });
@@ -5035,7 +5010,7 @@ async function confirm3mfSchedule() {
     await renderCalendar();
   } finally {
     btn.disabled = false;
-    btn.textContent = 'Schedule Jobs';
+    btn.textContent = 'Add to Queue';
   }
 }
 
