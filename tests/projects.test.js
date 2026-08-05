@@ -98,6 +98,32 @@ describe('assignExisting — context-menu assign (existing only)', () => {
   });
 });
 
+describe('deleteIfEmpty — delete only an empty project', () => {
+  test('deletes a project that has no linked jobs', () => {
+    const db = makeDb();
+    projects.resolveProject({ db, name: 'Empties' });
+    const r = projects.deleteIfEmpty({ db, projectId: 'Empties' });
+    expect(r).toEqual({ ok: true });
+    expect(db.prepare('SELECT COUNT(*) c FROM projects WHERE id=?').get('empties').c).toBe(0);
+  });
+
+  test('refuses (409) while a job still references it and leaves it intact', () => {
+    const db = makeDb();
+    projects.resolveProject({ db, name: 'Linked' });
+    const jobId = addJob(db, 'Planned', 'linked');
+    const r = projects.deleteIfEmpty({ db, projectId: 'linked' });
+    expect(r).toMatchObject({ ok: false, code: 409, jobs: 1 });
+    expect(db.prepare('SELECT COUNT(*) c FROM projects WHERE id=?').get('linked').c).toBe(1);
+    // never cascades: the job is untouched.
+    expect(db.prepare('SELECT project_id FROM jobs WHERE id=?').get(jobId).project_id).toBe('linked');
+  });
+
+  test('unknown id -> 404', () => {
+    const db = makeDb();
+    expect(projects.deleteIfEmpty({ db, projectId: 'ghost' })).toEqual({ ok: false, code: 404 });
+  });
+});
+
 describe('counts / buckets', () => {
   test('bucketOf maps statuses to to-print / busy / done', () => {
     for (const s of ['Planned', 'Awaiting', 'Awaiting Printer', 'Paused']) expect(projects.bucketOf(s)).toBe('toprint');
@@ -295,6 +321,29 @@ describe('project routes (integration)', () => {
     expect(p).toMatchObject({ total: 1, done: 0, busy: 0, active: true });
   });
 
+  test('DELETE /api/projects/:id removes an empty project', async () => {
+    const c = await post('/api/jobs', { printerId, name: 'W1', start: '2026-08-04T08:00', end: '2026-08-04T09:00', project: 'Emptyable' });
+    // Detach the only job so the project is empty, then delete it.
+    await post(`/api/jobs/${c.body.id}/assign-project`, { projectId: '__none__' });
+    const r = await request(app).delete('/api/projects/emptyable').set('Cookie', authCookie);
+    expect(r.status).toBe(204);
+    expect(appDb.prepare('SELECT COUNT(*) c FROM projects WHERE id=?').get('emptyable').c).toBe(0);
+  });
+
+  test('DELETE /api/projects/:id refuses (409) while a job still references it', async () => {
+    const c = await post('/api/jobs', { printerId, name: 'W2', start: '2026-08-04T08:00', end: '2026-08-04T09:00', project: 'Keepme' });
+    const r = await request(app).delete('/api/projects/keepme').set('Cookie', authCookie);
+    expect(r.status).toBe(409);
+    expect(appDb.prepare('SELECT COUNT(*) c FROM projects WHERE id=?').get('keepme').c).toBe(1);
+    // Never cascades: the job keeps its project link.
+    expect(appDb.prepare('SELECT project_id FROM jobs WHERE id=?').get(c.body.id).project_id).toBe('keepme');
+  });
+
+  test('DELETE /api/projects/:id on an unknown id is 404', async () => {
+    const r = await request(app).delete('/api/projects/ghost').set('Cookie', authCookie);
+    expect(r.status).toBe(404);
+  });
+
   test('POST /api/projects/:id/close sets status=closed', async () => {
     await post('/api/jobs', { printerId, name: 'Z1', start: '2026-08-04T08:00', end: '2026-08-04T09:00', project: 'Closable' });
     const r = await post('/api/projects/closable/close', {});
@@ -349,5 +398,28 @@ describe('project push switch + UI wiring (index.html + app.js)', () => {
   test('counter format done/total + busy badge is emitted', () => {
     expect(APP).toContain('bezig');
     expect(APP).toContain('${p.done}/${p.total}');
+  });
+
+  test('context-menu job mutations refresh whichever project modal is open, in place', () => {
+    // One shared helper drives both the detail modal and the Projecten list.
+    expect(APP).toContain('function refreshOpenProjectViews(');
+    expect(APP).toContain('function refreshProjectDetailIfOpen(');
+    expect(APP).toContain('function refreshProjectsModalIfOpen(');
+    // Routed from the desktop ctx-menu status handler, the tablet bottom-sheet
+    // status handler, and the assign-project confirm path (>= 3 call sites).
+    expect(APP.match(/refreshOpenProjectViews\(\)/g).length).toBeGreaterThanOrEqual(3);
+    // Each refresh is gated to its own modal being open.
+    expect(APP).toContain("getElementById('project-detail-modal')");
+    expect(APP).toContain("getElementById('projects-modal')");
+  });
+
+  test('empty project is deletable via a gated Verwijder project control', () => {
+    expect(HTML).toContain('id="btn-delete-project"');
+    expect(APP).toContain("getElementById('btn-delete-project').addEventListener");
+    expect(APP).toContain('function deleteCurrentProject(');
+    // Delete control only surfaces when the project has no non-queued jobs.
+    expect(APP).toContain("classList.toggle('hidden', jobs.length > 0)");
+    // Backend guards the delete: empty-only, never cascades.
+    expect(APP).toContain("api('DELETE', `/api/projects/");
   });
 });

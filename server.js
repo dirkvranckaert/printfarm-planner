@@ -1096,6 +1096,16 @@ app.post('/api/projects/:id/close', (req, res) => {
   db.prepare("UPDATE projects SET status='closed' WHERE id=?").run(id);
   res.json({ id, status: 'closed' });
 });
+// Delete an EMPTY project (no job references it). Never cascades — refuses with
+// 409 while any job still points at it.
+app.delete('/api/projects/:id', (req, res) => {
+  const result = projects.deleteIfEmpty({ db, projectId: req.params.id });
+  if (!result.ok) {
+    if (result.code === 404) return res.status(404).json({ error: 'Project not found' });
+    return res.status(409).json({ error: 'Project heeft nog jobs en kan niet verwijderd worden' });
+  }
+  res.status(204).end();
+});
 // Context-menu assign: attach a job to an EXISTING project only (never creates).
 app.post('/api/jobs/:id/assign-project', (req, res) => {
   const jobId = Number(req.params.id);
