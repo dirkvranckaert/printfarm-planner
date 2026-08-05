@@ -9,6 +9,7 @@ const push   = require('./push');
 const pause  = require('./pause');
 const projects = require('./projects');
 const awaitingPrinter = require('./awaiting-printer');
+const itemsMigration = require('./itemsMigration');
 const { parse3mf, extractThumbnails } = require('./parse3mf');
 const sharedAuth = require('./shared-auth');
 
@@ -506,6 +507,30 @@ app.get('/api/jobs/:id', (req, res) => {
   if (!row) return res.status(404).json(null);
   res.json(row);
 });
+// List the plates of a job's retained 3MF, for the "reload items from 3MF"
+// action in the edit dialog. Read-only: re-parses the existing on-disk file, no
+// writes. Returns [] (200) when the job has no valid/retained 3MF so the client
+// can show a friendly "no 3MF" message rather than an error.
+app.get('/api/jobs/:id/3mf-plates', (req, res) => {
+  const job = db.prepare('SELECT printFile FROM jobs WHERE id=?').get(req.params.id);
+  if (!job) return res.status(404).json({ error: 'Job not found' });
+  const pf = job.printFile;
+  // Only a bare `<hex>.3mf` under UPLOADS_DIR is one of our retained uploads.
+  if (!pf || pf.includes('/') || !pf.endsWith('.3mf')) return res.json([]);
+  const full = path.join(UPLOADS_DIR, pf);
+  if (!fs.existsSync(full)) return res.json([]);
+  try {
+    const parsed = parse3mf(full);
+    const plates = (parsed && parsed.plates) || [];
+    res.json(plates.map(p => ({
+      name: p.plateName ?? null,
+      objectCount: Number.isInteger(p.objectCount) ? p.objectCount : 0,
+      durationMins: Math.round(p.printTimeMinutes || 0),
+    })));
+  } catch (err) {
+    res.status(400).json({ error: 'Failed to parse 3MF: ' + err.message });
+  }
+});
 // Resolve the cool-down (minutes) to persist on a job. A valid explicit client
 // value (manual override) wins; otherwise fall back to `fallback` when given
 // (e.g. the job's existing snapshot on edit), else snapshot the printer's
@@ -534,6 +559,26 @@ function resolveJobWarmUp(explicit, printerId, fallback) {
   if (fallback != null) return fallback;
   const p = printerId ? db.prepare('SELECT warm_up_mins FROM printers WHERE id=?').get(printerId) : null;
   return p?.warm_up_mins ?? 5;
+}
+// Normalise the item-count fields for a create/edit. `items` is optional: a
+// valid non-negative integer means "tracked" (0 allowed); null / '' / undefined
+// / a bad value all mean "untracked" → stored NULL. `items_lost` defaults to 0
+// and is clamped into [0, items] when items is tracked, so losses can never
+// exceed the produced count (the client also rejects that up-front — see
+// public/app.js saveJob; the server clamp is defense-in-depth).
+function resolveJobItems(rawItems, rawLost) {
+  let items = null;
+  if (rawItems != null && rawItems !== '') {
+    const n = Number(rawItems);
+    if (Number.isInteger(n) && n >= 0) items = n;
+  }
+  let lost = 0;
+  if (rawLost != null && rawLost !== '') {
+    const n = Number(rawLost);
+    if (Number.isInteger(n) && n >= 0) lost = n;
+  }
+  if (items != null && lost > items) lost = items;
+  return { items, items_lost: lost };
 }
 // Resolve a free-text project name for a job, set jobs.project_id, and fire the
 // first-create push (behind the `project` toggle). `name` undefined = field not
@@ -565,9 +610,10 @@ app.post('/api/jobs', (req, res) => {
   const normEnd = isQueued ? '' : (normalizeJobTime(end) ?? '');
   const coolDownMins = resolveJobCoolDown(req.body.cool_down_mins, printerId);
   const warmUpMins = resolveJobWarmUp(req.body.warm_up_mins, printerId);
+  const { items, items_lost } = resolveJobItems(req.body.items, req.body.items_lost);
   const result = db.prepare(
-    'INSERT INTO jobs (printerId, name, customerName, orderNr, start, end, status, colors, printFile, remarks, queued, durationMins, bedType, cool_down_mins, warm_up_mins) VALUES (?,?,?,?,?,?,?,?,?,?,?,?,?,?,?)'
-  ).run(printerId, name, customerName, orderNr, normStart, normEnd, status ?? 'Planned', colors, printFile, remarks, isQueued, durationMins ?? 0, bedType ?? null, coolDownMins, warmUpMins);
+    'INSERT INTO jobs (printerId, name, customerName, orderNr, start, end, status, colors, printFile, remarks, queued, durationMins, bedType, cool_down_mins, warm_up_mins, items, items_lost, plate_name) VALUES (?,?,?,?,?,?,?,?,?,?,?,?,?,?,?,?,?,?)'
+  ).run(printerId, name, customerName, orderNr, normStart, normEnd, status ?? 'Planned', colors, printFile, remarks, isQueued, durationMins ?? 0, bedType ?? null, coolDownMins, warmUpMins, items, items_lost, req.body.plate_name ?? null);
   applyProjectToJob(result.lastInsertRowid, req.body.project);
   const projectId = db.prepare('SELECT project_id FROM jobs WHERE id=?').get(result.lastInsertRowid)?.project_id ?? null;
   res.status(201).json({ id: result.lastInsertRowid, ...req.body, start: normStart, end: normEnd, queued: isQueued, cool_down_mins: coolDownMins, warm_up_mins: warmUpMins, project_id: projectId });
@@ -589,9 +635,10 @@ app.put('/api/jobs/:id', (req, res) => {
   const normEnd = isQueued ? '' : (normalizeJobTime(end) ?? '');
   const coolDownMins = resolveJobCoolDown(req.body.cool_down_mins, printerId, existing?.cool_down_mins);
   const warmUpMins = resolveJobWarmUp(req.body.warm_up_mins, printerId, existing?.warm_up_mins);
+  const { items, items_lost } = resolveJobItems(req.body.items, req.body.items_lost);
   db.prepare(
-    'UPDATE jobs SET printerId=?, name=?, customerName=?, orderNr=?, start=?, end=?, status=?, colors=?, printFile=?, remarks=?, queued=?, durationMins=?, bedType=?, cool_down_mins=?, warm_up_mins=? WHERE id=?'
-  ).run(printerId, name, customerName, orderNr, normStart, normEnd, status, colors, printFile, remarks, isQueued, durationMins ?? 0, bedType ?? null, coolDownMins, warmUpMins, req.params.id);
+    'UPDATE jobs SET printerId=?, name=?, customerName=?, orderNr=?, start=?, end=?, status=?, colors=?, printFile=?, remarks=?, queued=?, durationMins=?, bedType=?, cool_down_mins=?, warm_up_mins=?, items=?, items_lost=? WHERE id=?'
+  ).run(printerId, name, customerName, orderNr, normStart, normEnd, status, colors, printFile, remarks, isQueued, durationMins ?? 0, bedType ?? null, coolDownMins, warmUpMins, items, items_lost, req.params.id);
   // If the user moves a job out of 'Paused' via the edit dialog, clear the
   // stale pause snapshot so it does not drift on the next tick.
   if (status !== 'Paused') pause.clearPauseFields({ db, jobId: Number(req.params.id) });
@@ -630,7 +677,7 @@ app.patch('/api/jobs/:id', (req, res) => {
     ? Number(req.body.locked) === 1
     : !!(lockRow && lockRow.locked);
   const MOVE_FIELDS = new Set(['start', 'end', 'printerId']);
-  const allowed = ['printerId', 'name', 'customerName', 'orderNr', 'start', 'end', 'status', 'colors', 'printFile', 'remarks', 'queued', 'durationMins', 'linked_printer_id', 'bedType', 'cool_down_mins', 'warm_up_mins', 'locked'];
+  const allowed = ['printerId', 'name', 'customerName', 'orderNr', 'start', 'end', 'status', 'colors', 'printFile', 'remarks', 'queued', 'durationMins', 'linked_printer_id', 'bedType', 'cool_down_mins', 'warm_up_mins', 'locked', 'items', 'items_lost', 'plate_name'];
   const fields = Object.entries(req.body)
     .filter(([k]) => allowed.includes(k))
     .filter(([k]) => !(willBeLocked && MOVE_FIELDS.has(k)))
@@ -644,6 +691,17 @@ app.patch('/api/jobs/:id', (req, res) => {
       if (k === 'cool_down_mins' || k === 'warm_up_mins') return [k, Number(v)];
       // Coerce lock to 0/1 — SQLite binds reject a raw boolean.
       if (k === 'locked') return [k, v ? 1 : 0];
+      // items: '' / null / bad value → NULL (untracked); a valid non-negative
+      // integer is stored as-is. items_lost: bad value → 0.
+      if (k === 'items') {
+        if (v == null || v === '') return [k, null];
+        const n = Number(v);
+        return [k, (Number.isInteger(n) && n >= 0) ? n : null];
+      }
+      if (k === 'items_lost') {
+        const n = Number(v);
+        return [k, (Number.isInteger(n) && n >= 0) ? n : 0];
+      }
       return [k, v];
     });
   if (!fields.length) return res.status(400).json({ error: 'no valid fields' });
@@ -1180,6 +1238,19 @@ function findNextValidStart(candidate, durationMins, printerId) {
   console.log(`[migration] normalized ${rows.length} job timestamp(s) to ISO format`);
 })();
 
+// One-time item-count backfill from retained 3MFs. Guarded by a settings marker
+// (runs once, never re-parses on later boots) and only touches items-IS-NULL
+// jobs. Wrapped so a parse/IO error can never abort startup. See itemsMigration.js.
+try {
+  const r = itemsMigration.backfillItems({ db, uploadsDir: UPLOADS_DIR, parse3mf, fs, path });
+  if (r.ran) {
+    console.log(`[migration] items backfill: scanned ${r.stats.scanned}, backfilled ${r.stats.backfilled} `
+      + `(single ${r.stats.singlePlate}, multi ${r.stats.multiMatched}), ambiguous ${r.stats.ambiguous}, skipped ${r.stats.skipped}`);
+  }
+} catch (err) {
+  console.error('[migration] items backfill failed (non-fatal):', err.message);
+}
+
 app.post('/api/find-slot', (req, res) => {
   const { printerId, durationMins } = req.body || {};
   if (!printerId || !durationMins) return res.status(400).json({ error: 'printerId and durationMins required' });
@@ -1263,8 +1334,14 @@ app.post('/api/import-3mf-schedule', express.raw({ type: '*/*', limit: '500mb' }
       const thumbFile = thumbMap[pl.plateIndex] || null;
       const colorsStr = pl.colors ? JSON.stringify(pl.colors) : null;
 
+      // Item count forwarded by the calculator (plate objectCount). Null-safe:
+      // a missing/invalid value leaves items NULL (untracked). plate_name
+      // remembers which plate this job came from for later display + reload.
+      const plItems = Number.isInteger(pl.items) && pl.items >= 0 ? pl.items : null;
+      const plateName = pl.name || null;
+
       const result = db.prepare(
-        'INSERT INTO jobs (printerId, name, customerName, orderNr, start, end, status, colors, printFile, remarks, queued, durationMins, thumbFile, bedType, cool_down_mins, warm_up_mins) VALUES (?,?,?,?,?,?,?,?,?,?,?,?,?,?,?,?)'
+        'INSERT INTO jobs (printerId, name, customerName, orderNr, start, end, status, colors, printFile, remarks, queued, durationMins, thumbFile, bedType, cool_down_mins, warm_up_mins, items, plate_name) VALUES (?,?,?,?,?,?,?,?,?,?,?,?,?,?,?,?,?,?)'
       ).run(
         pl.printerId || null,
         pl.name || `Plate ${pl.plateIndex}`,
@@ -1281,7 +1358,9 @@ app.post('/api/import-3mf-schedule', express.raw({ type: '*/*', limit: '500mb' }
         thumbFile || null,
         pl.bedType || null,
         coolDown,
-        warmUp
+        warmUp,
+        plItems,
+        plateName
       );
 
       if (proj) db.prepare('UPDATE jobs SET project_id=? WHERE id=?').run(proj.id, result.lastInsertRowid);

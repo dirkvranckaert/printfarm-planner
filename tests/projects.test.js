@@ -19,7 +19,8 @@ function makeDb() {
     CREATE TABLE jobs (
       id INTEGER PRIMARY KEY AUTOINCREMENT, name TEXT,
       status TEXT DEFAULT 'Planned', queued INTEGER NOT NULL DEFAULT 0,
-      project_id TEXT
+      project_id TEXT,
+      items INTEGER, items_lost INTEGER NOT NULL DEFAULT 0, plate_name TEXT
     );
     CREATE TABLE settings (key TEXT PRIMARY KEY, value TEXT);
     CREATE TABLE push_subscriptions (id INTEGER PRIMARY KEY AUTOINCREMENT, subscription TEXT NOT NULL);
@@ -113,7 +114,7 @@ describe('counts / buckets', () => {
     addJob(db, 'Planned', 'p');
     addJob(db, 'Awaiting Printer', 'p');
     const c = projects.countsByProject(db)['p'];
-    expect(c).toEqual({ toPrint: 2, busy: 1, done: 2, total: 5 });
+    expect(c).toMatchObject({ toPrint: 2, busy: 1, done: 2, total: 5 });
   });
 
   test('queued jobs are excluded from counts', () => {

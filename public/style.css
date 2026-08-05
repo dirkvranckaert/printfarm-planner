@@ -932,8 +932,11 @@ h3 { font-size: 14px; font-weight: 600; margin-bottom: 12px; }
 }
 .project-row:hover { background: var(--bg); }
 .project-row-label { font-weight: 600; font-size: 14px; }
-.project-row-counter { display: inline-flex; align-items: center; gap: 8px; white-space: nowrap; }
+.project-row-counter { display: inline-flex; flex-direction: column; align-items: flex-end; gap: 2px; white-space: nowrap; }
+.project-counter-line { display: inline-flex; align-items: center; gap: 8px; }
 .project-counter { font-weight: 600; font-size: 14px; }
+.project-items-counter { font-weight: 600; font-size: 12px; color: var(--text-muted); }
+.project-items-lost { font-size: 12px; color: var(--text-muted); }
 .project-busy-badge {
   font-size: 12px;
   font-weight: 600;

@@ -213,6 +213,19 @@
           <div id="job-3mf-attach" style="margin-top:6px">
             <button type="button" class="btn btn-sm" id="btn-attach-3mf" onclick="document.getElementById('attach-3mf-input').click()">Attach 3MF</button>
             <input type="file" id="attach-3mf-input" accept=".3mf" style="display:none">
+            <button type="button" class="btn btn-sm hidden" id="btn-reload-items-3mf">Herlaad items uit 3MF</button>
+          </div>
+        </div>
+        <div class="form-group">
+          <label>Items</label>
+          <div style="display:flex;gap:12px">
+            <div style="flex:1">
+              <input type="number" id="job-items" min="0" placeholder="Untracked (leeg = niet bijgehouden)">
+            </div>
+            <div style="flex:1;display:flex;align-items:center;gap:6px">
+              <label for="job-items-lost" style="margin:0;white-space:nowrap;font-size:13px;color:var(--text-muted)">Verlies</label>
+              <input type="number" id="job-items-lost" min="0" value="0" style="flex:1">
+            </div>
           </div>
         </div>
         <div class="form-group">
