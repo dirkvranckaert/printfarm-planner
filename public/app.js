@@ -2556,6 +2556,7 @@ function setupBottomSheet() {
         await api('PATCH', `/api/jobs/${bsJobId}`, { status: btn.dataset.status });
         await renderCalendar();
         refreshStatusOverviewIfOpen();
+        await refreshOpenProjectViews();
         const scr2 = document.getElementById('day-scroll');
         if (scr2) scr2.scrollTop = savedScroll;
       }
@@ -4214,21 +4215,75 @@ async function openProjectsModal() {
   document.getElementById('projects-modal').classList.remove('hidden');
 }
 
+// Re-fetch + re-render the Projecten list in place when it is open, so the
+// per-project counters stay live after a job status/project change.
+async function refreshProjectsModalIfOpen() {
+  const modal = document.getElementById('projects-modal');
+  if (modal && !modal.classList.contains('hidden')) await openProjectsModal();
+}
+
+// Single entry point after any context-menu / bottom-sheet job mutation that can
+// affect a project's view (status change, project reassign, project clear):
+// refresh whichever project modal is currently open. Each refresh is gated to
+// its own modal being open, so nothing renders that the user isn't looking at.
+async function refreshOpenProjectViews() {
+  await refreshProjectDetailIfOpen();
+  await refreshProjectsModalIfOpen();
+}
+
 async function openProjectDetail(projectId) {
   const data = await api('GET', `/api/projects/${encodeURIComponent(projectId)}`);
   if (!data) return;
   pdProjectId = data.project.id;
   // Reuse the same expand-default as the status overview.
   pdCollapsed = new Set(SO_STATUS_ORDER.filter(s => !SO_EXPAND_DEFAULT.includes(s)));
+  renderProjectDetail(data);
+  document.getElementById('project-detail-modal').classList.remove('hidden');
+}
+
+// Render the project-detail body + footer controls from a GET /api/projects/:id
+// payload. Shared by the open path and the in-place refresh path (keeps the
+// current pdCollapsed expand/collapse state intact). printers is already
+// populated by the app boot / overview.
+function renderProjectDetail(data) {
   const closed = data.project.status === 'closed';
+  const jobs = data.jobs.filter(j => !j.queued);
   const title = document.getElementById('project-detail-title');
   title.textContent = data.project.label + (closed ? ' (gesloten)' : '');
   // The detail view reuses the Job Status Overview rendering, filtered to this
-  // project's jobs. printers is already populated by the app boot / overview.
-  renderStatusGroups(document.getElementById('project-detail-body'), data.jobs.filter(j => !j.queued), pdCollapsed);
+  // project's jobs.
+  renderStatusGroups(document.getElementById('project-detail-body'), jobs, pdCollapsed);
   // Hide the "Close project" control for an already-closed project.
   document.getElementById('btn-close-project').classList.toggle('hidden', closed);
-  document.getElementById('project-detail-modal').classList.remove('hidden');
+  // "Verwijder project" only for a truly EMPTY project: gate on the UNFILTERED
+  // job count so it matches deleteIfEmpty's all-jobs guard (queued jobs still
+  // hold a project_id and block the delete). `jobs` stays filtered for display.
+  document.getElementById('btn-delete-project').classList.toggle('hidden', data.jobs.length > 0);
+}
+
+// Re-fetch + re-render the project-detail modal in place when it is the open
+// context, so a job whose status/project changed via the context menu updates
+// (moves bucket, drops out on reassign/clear) without a close+reopen.
+async function refreshProjectDetailIfOpen() {
+  const modal = document.getElementById('project-detail-modal');
+  if (!modal || modal.classList.contains('hidden') || pdProjectId === null) return;
+  const data = await api('GET', `/api/projects/${encodeURIComponent(pdProjectId)}`);
+  if (!data) return;
+  renderProjectDetail(data);
+}
+
+async function deleteCurrentProject() {
+  if (!pdProjectId) return;
+  if (!confirm('Dit lege project verwijderen? Dit kan niet ongedaan gemaakt worden.')) return;
+  try {
+    await api('DELETE', `/api/projects/${encodeURIComponent(pdProjectId)}`);
+    closeModal('project-detail-modal');
+    openProjectsModal();
+  } catch (err) {
+    let msg = err.message;
+    try { msg = JSON.parse(err.message).error || msg; } catch { /* raw */ }
+    alert(msg);
+  }
 }
 
 async function closeCurrentProject() {
@@ -4266,7 +4321,8 @@ async function confirmAssignProject() {
   try {
     await api('POST', `/api/jobs/${jobId}/assign-project`, { projectId });
     closeModal('assign-project-modal');
-    renderCalendar();
+    await renderCalendar();
+    await refreshOpenProjectViews();
   } catch (err) {
     let msg = err.message;
     try { msg = JSON.parse(err.message).error || msg; } catch { /* raw */ }
@@ -4309,6 +4365,7 @@ function setupListeners() {
         await api('PATCH', `/api/jobs/${ctxJobId}`, { status: btn.dataset.status });
         await renderCalendar();
         refreshStatusOverviewIfOpen();
+        await refreshOpenProjectViews();
         const scr2 = document.getElementById('day-scroll');
         if (scr2) scr2.scrollTop = savedScroll;
       }
@@ -4495,6 +4552,7 @@ function setupListeners() {
 
   document.getElementById('btn-projects').addEventListener('click', openProjectsModal);
   document.getElementById('btn-close-project').addEventListener('click', closeCurrentProject);
+  document.getElementById('btn-delete-project').addEventListener('click', deleteCurrentProject);
   document.getElementById('btn-assign-project').addEventListener('click', confirmAssignProject);
 
   document.getElementById('job-queued').addEventListener('change', e => {

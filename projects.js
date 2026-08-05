@@ -63,6 +63,20 @@ function assignExisting({ db, jobId, projectId }) {
   return { ok: true, id, label: row.label, reopened };
 }
 
+// Delete a project ONLY when no job references it. Never cascades. Returns:
+//   { ok:false, code:404 }         unknown project id
+//   { ok:false, code:409, jobs }   jobs still linked -> refuse, leave intact
+//   { ok:true }                    deleted
+function deleteIfEmpty({ db, projectId }) {
+  const id = normalizeId(projectId);
+  const row = db.prepare('SELECT id FROM projects WHERE id=?').get(id);
+  if (!row) return { ok: false, code: 404 };
+  const linked = db.prepare('SELECT COUNT(*) c FROM jobs WHERE project_id=?').get(id).c;
+  if (linked > 0) return { ok: false, code: 409, jobs: linked };
+  db.prepare('DELETE FROM projects WHERE id=?').run(id);
+  return { ok: true };
+}
+
 // Compute per-project counts keyed by project id. Job counts:
 // { toPrint, busy, done, total }. Item counts (only jobs with items NOT NULL
 // contribute): itemsTotal (Σ items), itemsDone (Σ items on Done jobs),
@@ -143,5 +157,5 @@ function summaries(db) {
 
 module.exports = {
   TO_PRINT_STATUSES, BUSY_STATUSES, bucketOf, normalizeId,
-  resolveProject, assignExisting, countsByProject, sortGroup, summaries,
+  resolveProject, assignExisting, deleteIfEmpty, countsByProject, sortGroup, summaries,
 };
