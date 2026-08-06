@@ -17,6 +17,26 @@ const sharedAuth = require('./shared-auth');
 const UPLOADS_DIR = path.join(__dirname, 'data', 'uploads');
 if (!fs.existsSync(UPLOADS_DIR)) fs.mkdirSync(UPLOADS_DIR, { recursive: true });
 
+// Remove upload artifacts (the imported `<hex>.3mf` and plate thumbnail PNGs)
+// for jobs that have just been deleted. A single 3MF backs every plate/copy
+// job from one import, and copies of a plate share one thumbnail, so a file is
+// only unlinked once NO surviving job row still references it. Must run AFTER
+// the job rows are deleted so the reference count reflects the post-delete
+// state. Never throws: a missing file (ENOENT) or any unlink failure is logged
+// and swallowed, so file cleanup can't turn a successful delete into a 500.
+function cleanupOrphanUploads(fileNames) {
+  const names = new Set(fileNames.filter(Boolean));
+  for (const name of names) {
+    const ref = db.prepare('SELECT COUNT(*) AS c FROM jobs WHERE printFile=? OR thumbFile=?').get(name, name);
+    if (ref.c > 0) continue; // still referenced by a surviving job — keep it
+    try {
+      fs.unlinkSync(path.join(UPLOADS_DIR, name));
+    } catch (err) {
+      if (err.code !== 'ENOENT') console.warn(`[job-delete] could not unlink ${name}: ${err.message}`);
+    }
+  }
+}
+
 const app = express();
 app.use(express.json());
 
@@ -444,8 +464,11 @@ app.put('/api/printers/:id', (req, res) => {
   res.json({ id: Number(req.params.id), name, color, brand: brand || 'other', bambu_serial: bambu_serial || null, pinned: pinned ? 1 : 0, warm_up_mins: wu, cool_down_mins: cd, favourite: fav });
 });
 app.delete('/api/printers/:id', (req, res) => {
+  // Deleting a printer cascades to its jobs — clean up their upload artifacts too.
+  const jobs = db.prepare('SELECT printFile, thumbFile FROM jobs WHERE printerId=?').all(req.params.id);
   db.prepare('DELETE FROM jobs WHERE printerId=?').run(req.params.id);
   db.prepare('DELETE FROM printers WHERE id=?').run(req.params.id);
+  cleanupOrphanUploads(jobs.flatMap(j => [j.printFile, j.thumbFile]));
   res.status(204).end();
 });
 
@@ -1118,17 +1141,11 @@ app.post('/api/admin/remap-colors', async (req, res) => {
 });
 
 app.delete('/api/jobs/:id', (req, res) => {
-  // Clean up uploaded files
+  // Capture the job's files, delete the row, then unlink any file no surviving
+  // job still references (shared 3MF across plates, shared thumbnail across copies).
   const job = db.prepare('SELECT printFile, thumbFile FROM jobs WHERE id=?').get(req.params.id);
-  if (job) {
-    if (job.thumbFile) { try { fs.unlinkSync(path.join(UPLOADS_DIR, job.thumbFile)); } catch {} }
-    // Only delete 3MF file if no other jobs reference it
-    if (job.printFile) {
-      const others = db.prepare('SELECT COUNT(*) as c FROM jobs WHERE printFile=? AND id!=?').get(job.printFile, req.params.id);
-      if (others.c === 0) { try { fs.unlinkSync(path.join(UPLOADS_DIR, job.printFile)); } catch {} }
-    }
-  }
   db.prepare('DELETE FROM jobs WHERE id=?').run(req.params.id);
+  if (job) cleanupOrphanUploads([job.printFile, job.thumbFile]);
   res.status(204).end();
 });
 
