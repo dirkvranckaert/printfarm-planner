@@ -1230,8 +1230,9 @@ async function renderQueuePanel() {
   // onto, so it gets no menu — set a printer (Edit) or drag it onto one instead.
   panel.querySelectorAll('.queue-item').forEach(item =>
     item.addEventListener('contextmenu', e => {
-      const printerId = parseInt(item.dataset.printer);
-      if (!printerId) return; // unassigned → no menu (native menu shows)
+      // data-printer is '' for an unassigned job, the printer id otherwise. Gate on
+      // presence (not truthiness) so a 0 id could never be mis-read as unassigned.
+      if (!item.dataset.printer) return; // unassigned → no menu (native menu shows)
       showQueueCtxMenu(e, parseInt(item.dataset.id));
     })
   );
