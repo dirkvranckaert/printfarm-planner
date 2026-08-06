@@ -592,6 +592,31 @@
     <button class="ctx-item ctx-item-danger" id="ctx-delete">🗑 Delete</button>
   </div>
 
+  <!-- Queue item context menu (desktop) — only shown for a printer-BOUND queue job -->
+  <div id="queue-ctx-menu" class="ctx-menu hidden">
+    <div class="ctx-label">Schedule on bound printer</div>
+    <button class="ctx-item" id="qctx-earliest">⏱ Earliest available slot</button>
+    <button class="ctx-item" id="qctx-now">▶️ Schedule to now</button>
+    <button class="ctx-item" id="qctx-at">📅 Schedule to date &amp; time…</button>
+  </div>
+
+  <!-- Queue "schedule to date & time" modal -->
+  <div id="queue-at-modal" class="modal-overlay hidden">
+    <div class="modal pushback-modal-content">
+      <h3 style="margin:0 0 12px;font-size:16px;font-weight:700">Schedule to date &amp; time</h3>
+      <p style="font-size:12px;color:var(--text-muted);margin:0 0 12px">
+        Places this job on its bound printer at the time you pick. If the slot is
+        taken you'll be asked to reshuffle the other jobs on that printer.
+      </p>
+      <label style="display:block;font-size:12px;color:var(--text-muted);margin-bottom:4px">Start time</label>
+      <input type="datetime-local" id="queue-at-datetime" style="width:100%;padding:6px 8px;font-size:14px">
+      <div style="display:flex;gap:8px;justify-content:flex-end;margin-top:16px">
+        <button type="button" id="queue-at-cancel" class="btn btn-secondary">Cancel</button>
+        <button type="button" id="queue-at-confirm" class="btn btn-primary">Schedule</button>
+      </div>
+    </div>
+  </div>
+
   <!-- Push-back modal -->
   <div id="pushback-modal" class="modal-overlay hidden">
     <div class="modal pushback-modal-content">

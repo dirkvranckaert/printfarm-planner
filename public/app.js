@@ -1225,6 +1225,18 @@ async function renderQueuePanel() {
     })
   );
 
+  // Right-click a queue item → scheduling menu, but ONLY when it is bound to a
+  // printer (data-printer set). An unassigned queue job has no lane to schedule
+  // onto, so it gets no menu — set a printer (Edit) or drag it onto one instead.
+  panel.querySelectorAll('.queue-item').forEach(item =>
+    item.addEventListener('contextmenu', e => {
+      // data-printer is '' for an unassigned job, the printer id otherwise. Gate on
+      // presence (not truthiness) so a 0 id could never be mis-read as unassigned.
+      if (!item.dataset.printer) return; // unassigned → no menu (native menu shows)
+      showQueueCtxMenu(e, parseInt(item.dataset.id));
+    })
+  );
+
   // Drag-to-schedule (day view only)
   if (isDayView) {
     panel.querySelectorAll('.queue-item-draggable').forEach(item => {
@@ -1588,7 +1600,15 @@ function onDragMove(e) {
         targetCol = col;
     });
 
-    if (targetCol) {
+    // A printer-bound queued job only accepts its OWN lane; hovering any other
+    // printer's column is treated as "no valid target" (no preview, no drop).
+    // Unassigned queue jobs (null printerId) keep the freedom to land on any lane
+    // — dropping one there is how a printer gets assigned.
+    const qJob = jobsCache[drag.jobId];
+    const blockedLane = targetCol && qJob && qJob.printerId != null
+      && parseInt(targetCol.dataset.printerId) !== qJob.printerId;
+
+    if (targetCol && !blockedLane) {
       const rect  = targetCol.getBoundingClientRect();
       const proposed = snap15(Math.max(0, Math.min(pxToMin(e.clientY - rect.top), DAY_MINS + 240 - drag.durationMins)));
       drag.printerId = parseInt(targetCol.dataset.printerId);
@@ -1647,12 +1667,23 @@ function onDragMove(e) {
     });
 
     if (hoveredCol !== drag.colEl) {
-      // Move the job element to the new column
-      hoveredCol.appendChild(drag.jobEl);
-      if (drag.warmUpEl)   hoveredCol.appendChild(drag.warmUpEl);
-      if (drag.coolDownEl) hoveredCol.appendChild(drag.coolDownEl);
-      drag.colEl = hoveredCol;
-      drag.printerId = parseInt(hoveredCol.dataset.printerId);
+      // A printer-bound job is LOCKED to its own lane: reject a cross-lane hover so
+      // an accidental sideways drag can't rebind it. Reassigning to another printer
+      // is deliberate — via the job editor's Printer field or the "Move to another
+      // printer" context-menu action, never a stray drag. Every scheduled job has a
+      // printerId, so this blocks cross-lane drag for all of them; unassigned QUEUE
+      // jobs (dragged in from the queue) still land on any lane. Flagged for Dirk.
+      const hoveredPrinterId = parseInt(hoveredCol.dataset.printerId);
+      if (drag.job.printerId != null && hoveredPrinterId !== drag.job.printerId) {
+        // stay locked — ignore the cross-lane hover, keep the job in its own column
+      } else {
+        // Move the job element to the new column
+        hoveredCol.appendChild(drag.jobEl);
+        if (drag.warmUpEl)   hoveredCol.appendChild(drag.warmUpEl);
+        if (drag.coolDownEl) hoveredCol.appendChild(drag.coolDownEl);
+        drag.colEl = hoveredCol;
+        drag.printerId = hoveredPrinterId;
+      }
     }
 
     const rect = drag.colEl.getBoundingClientRect();
@@ -2770,6 +2801,61 @@ function showCtxMenu(e, jobId) {
 function hideCtxMenu() {
   document.getElementById('ctx-menu').classList.add('hidden');
   ctxJobId = null;
+}
+
+// --- Queue item context menu (bound-printer scheduling) ---
+let queueCtxJobId = null;
+function showQueueCtxMenu(e, jobId) {
+  e.preventDefault();
+  e.stopPropagation();
+  queueCtxJobId = jobId;
+  const menu = document.getElementById('queue-ctx-menu');
+  menu.style.left = e.clientX + 'px';
+  menu.style.top  = e.clientY + 'px';
+  menu.classList.remove('hidden');
+  const rect = menu.getBoundingClientRect();
+  if (rect.right  > window.innerWidth)  menu.style.left = (e.clientX - rect.width)  + 'px';
+  if (rect.bottom > window.innerHeight) menu.style.top  = (e.clientY - rect.height) + 'px';
+}
+function hideQueueCtxMenu() {
+  document.getElementById('queue-ctx-menu').classList.add('hidden');
+  queueCtxJobId = null;
+}
+
+// Move a queued, printer-bound job onto its printer's timeline. `mode` is
+// 'earliest' (next free slot, never reshuffles) or 'at' (verbatim at `to`,
+// default now, reshuffling behind it). Reuses the SAME reshove confirm dialog as
+// push-back / pull-forward: a needsReshove response opens confirmReshove and, on
+// confirm, retries with reshove:true (pinning the server's target for to-now).
+async function scheduleQueueJob(jobId, mode, to) {
+  try {
+    const body = { mode };
+    if (mode === 'at' && to) body.to = to;
+    let res = await api('POST', `/api/jobs/${jobId}/schedule-from-queue`, body);
+    if (res && res.needsReshove) {
+      const ok = await confirmReshove();
+      if (!ok) return;
+      res = await api('POST', `/api/jobs/${jobId}/schedule-from-queue`,
+        { mode: 'at', to: to || res.target, reshove: true });
+    }
+    await renderCalendar();
+    notifyActiveConflict(res);
+  } catch (err) {
+    alert('Scheduling failed: ' + (err.message || 'Unknown error'));
+  }
+}
+
+let _queueAtJobId = null;
+function openQueueAtModal(jobId) {
+  _queueAtJobId = jobId;
+  const input = document.getElementById('queue-at-datetime');
+  input.value = toDatetimeLocal(new Date());
+  document.getElementById('queue-at-modal').classList.remove('hidden');
+  setTimeout(() => input.focus(), 50);
+}
+function closeQueueAtModal() {
+  document.getElementById('queue-at-modal').classList.add('hidden');
+  _queueAtJobId = null;
 }
 
 // =============================================================================
@@ -4433,6 +4519,28 @@ function setupListeners() {
   document.getElementById('reshove-cancel').addEventListener('click', () => closeReshoveModal(false));
   document.getElementById('reshove-confirm').addEventListener('click', () => closeReshoveModal(true));
 
+  // Queue item context menu
+  document.getElementById('qctx-earliest').addEventListener('click', async () => {
+    const id = queueCtxJobId; hideQueueCtxMenu();
+    if (id !== null) await scheduleQueueJob(id, 'earliest');
+  });
+  document.getElementById('qctx-now').addEventListener('click', async () => {
+    const id = queueCtxJobId; hideQueueCtxMenu();
+    if (id !== null) await scheduleQueueJob(id, 'at', null); // to=null → server "now"
+  });
+  document.getElementById('qctx-at').addEventListener('click', () => {
+    const id = queueCtxJobId; hideQueueCtxMenu();
+    if (id !== null) openQueueAtModal(id);
+  });
+  document.getElementById('queue-at-cancel').addEventListener('click', closeQueueAtModal);
+  document.getElementById('queue-at-confirm').addEventListener('click', async () => {
+    const val = document.getElementById('queue-at-datetime').value;
+    const id = _queueAtJobId;
+    if (!val || id == null) return closeQueueAtModal();
+    closeQueueAtModal();
+    await scheduleQueueJob(id, 'at', val);
+  });
+
   // Conflict resolution
   document.getElementById('ctx-move-after').addEventListener('click', async () => {
     const id = ctxJobId;
@@ -4488,10 +4596,12 @@ function setupListeners() {
       goToJob(parseInt(el.dataset.jobId));
     }
   });
-  document.addEventListener('click',       hideCtxMenu);
+  document.addEventListener('click',       () => { hideCtxMenu(); hideQueueCtxMenu(); });
   document.addEventListener('contextmenu', e => {
     // Hide if right-clicking outside a job element
     if (!e.target.closest('[data-job-id]')) hideCtxMenu();
+    // Hide the queue menu unless the right-click is on a queue item
+    if (!e.target.closest('.queue-item')) hideQueueCtxMenu();
   });
 
   // Drag events (document-level so mouse/touch can leave the column)
