@@ -132,6 +132,45 @@ describe('import-3mf-schedule — queue mode (real route via supertest)', () => 
     expect(row).toEqual({ printerId: null, queued: 1, start: '', items: 3 });
   });
 
+  test('auto-bind: null printerId + a 3MF whose printer matches a defined printer → job bound to it', async () => {
+    // beforeEach created a printer named 'P1S'; the fixture embeds "Bambu Lab P1S".
+    const res = await post({ mode: 'queue', plates: [
+      { plateIndex: 1, name: 'Headless', printerId: null, durationMins: 90, items: 2 },
+    ] }, fixtureBody);
+    if (res.body.file) createdFiles.push(res.body.file);
+    for (const j of res.body.jobs) if (j.thumbFile) createdFiles.push(j.thumbFile);
+    expect(res.status).toBe(201);
+    expect(res.body.jobs[0].printerId).toBe(printerId); // fuzzy-matched + bound
+    const row = appDb.prepare('SELECT printerId, queued, start FROM jobs WHERE id=?').get(res.body.jobs[0].id);
+    expect(row).toEqual({ printerId, queued: 1, start: '' }); // still queued, empty start preserved
+  });
+
+  test('auto-bind: null printerId + NO matching printer → job stays unassigned', async () => {
+    appDb.exec('DELETE FROM printers;');
+    appDb.prepare('INSERT INTO printers (name, color, warm_up_mins, cool_down_mins) VALUES (?,?,?,?)')
+      .run('Prusa MK4', '#00f', 5, 15); // does not match "Bambu Lab P1S"
+    const res = await post({ mode: 'queue', plates: [
+      { plateIndex: 1, name: 'Headless', printerId: null, durationMins: 90, items: 2 },
+    ] }, fixtureBody);
+    if (res.body.file) createdFiles.push(res.body.file);
+    for (const j of res.body.jobs) if (j.thumbFile) createdFiles.push(j.thumbFile);
+    expect(res.status).toBe(201);
+    expect(res.body.jobs[0].printerId).toBeNull(); // no confident match → left unassigned
+  });
+
+  test('auto-bind: an explicit printerId is never overridden by the 3MF embed', async () => {
+    // A second printer; pass IT explicitly even though the 3MF embeds "P1S".
+    const other = appDb.prepare('INSERT INTO printers (name, color, warm_up_mins, cool_down_mins) VALUES (?,?,?,?)')
+      .run('X1 Carbon', '#0a0', 5, 15).lastInsertRowid;
+    const res = await post({ mode: 'queue', plates: [
+      { plateIndex: 1, name: 'Manual', printerId: other, durationMins: 90, items: 2 },
+    ] }, fixtureBody);
+    if (res.body.file) createdFiles.push(res.body.file);
+    for (const j of res.body.jobs) if (j.thumbFile) createdFiles.push(j.thumbFile);
+    expect(res.status).toBe(201);
+    expect(res.body.jobs[0].printerId).toBe(other); // caller's pick wins, not the P1S embed
+  });
+
   test('an unknown printer is rejected up-front with NO partial import (transaction + validation)', async () => {
     const res = await post({ mode: 'queue', plates: [
       { plateIndex: 1, name: 'Good', printerId, durationMins: 60, items: 1 },

@@ -11,6 +11,7 @@ const projects = require('./projects');
 const awaitingPrinter = require('./awaiting-printer');
 const itemsMigration = require('./itemsMigration');
 const { parse3mf, extractThumbnails } = require('./parse3mf');
+const { matchPrinter } = require('./printer-match');
 const sharedAuth = require('./shared-auth');
 
 const UPLOADS_DIR = path.join(__dirname, 'data', 'uploads');
@@ -966,6 +967,63 @@ app.post('/api/jobs/:id/pull-forward', (req, res) => {
   return respondToReshovePlan(res, req, plan);
 });
 
+// Schedule a QUEUED, printer-bound job onto its printer's timeline. Only jobs
+// with a printerId are schedulable this way (an unassigned queue job has no lane
+// to go to — the caller must set a printer first or drag it onto one). Body:
+//   { mode: 'earliest' | 'at', to?: ISO/local, reshove?: boolean }
+//   - 'earliest': place at the next free, availability-aware slot on the printer
+//     (findNextValidStart) — never displaces another job, so no reshuffle.
+//   - 'at': place verbatim at `to` (default now) and reshove the movable jobs
+//     behind it, exactly like push-back. Returns { needsReshove } without writing
+//     when a movable job blocks the slot and `reshove` isn't set.
+// On success the job leaves the queue (queued=0) with a real start/end — the
+// empty-start invariant only ever held WHILE it was queued.
+app.post('/api/jobs/:id/schedule-from-queue', (req, res) => {
+  const id = Number(req.params.id);
+  const job = db.prepare('SELECT * FROM jobs WHERE id=?').get(id);
+  if (!job || !job.queued) return res.status(400).json({ error: 'Job is not queued' });
+  if (job.printerId == null) return res.status(400).json({ error: 'Job has no bound printer' });
+
+  const durationMins = job.durationMins || 0;
+  const restr = getSchedulingRestrictions();
+  const tz = restr.timezone || DEFAULT_TZ;
+  const printer = db.prepare('SELECT warm_up_mins, cool_down_mins FROM printers WHERE id=?').get(job.printerId);
+  const mode = req.body?.mode || 'earliest';
+
+  if (mode === 'earliest') {
+    const start = findNextValidStart(new Date(), durationMins, job.printerId);
+    const end = new Date(start.getTime() + durationMins * 60000);
+    db.prepare("UPDATE jobs SET start=?, end=?, queued=0 WHERE id=?")
+      .run(start.toISOString(), end.toISOString(), id);
+    return res.json({ updatedCount: 1, scheduled: true, start: start.toISOString(), end: end.toISOString(), printerId: job.printerId });
+  }
+
+  // mode === 'at' — verbatim placement + reshove cascade (reuses planReshove).
+  const toRaw = req.body?.to;
+  const toDate = toRaw ? parseJobTime(toRaw, tz) : new Date();
+  if (!toDate || isNaN(toDate.getTime())) return res.status(400).json({ error: 'Invalid "to" timestamp' });
+
+  const warmUpMs = (printer?.warm_up_mins ?? 5) * 60000;
+  const coolDownMs = (printer?.cool_down_mins ?? 15) * 60000;
+  const closures = db.prepare('SELECT startDate, endDate FROM closures').all();
+  const allSamePrinter = loadPrinterJobs(job.printerId, printer);
+  const { movable, fixed } = classifyForReshove(allSamePrinter, id);
+  // Synthetic anchor: the queued job spans durationMins from the target slot.
+  const anchorObj = {
+    id,
+    start: toDate.toISOString(),
+    end: new Date(toDate.getTime() + durationMins * 60000).toISOString(),
+    coolDownMs, warmUpMs,
+  };
+  const plan = scheduling.planReshove(anchorObj, toDate, restr, closures, movable, fixed, warmUpMs, coolDownMs);
+  if (plan.needsReshove && !req.body?.reshove) {
+    return res.json({ needsReshove: true, updatedCount: 0, updates: [], target: plan.anchorStart, activeConflict: plan.activeConflict });
+  }
+  applyJobUpdates(plan.updates);        // updates[0] is the anchor at its verbatim slot
+  db.prepare('UPDATE jobs SET queued=0 WHERE id=?').run(id); // and it leaves the queue
+  return res.json({ updatedCount: plan.updates.length, updates: plan.updates, reshoved: plan.needsReshove, activeConflict: plan.activeConflict, target: plan.anchorStart });
+});
+
 // Server-side proxy for the filament-manager catalog. The browser cannot fetch
 // the sibling app directly (cross-origin, no CORS, auth cookies don't travel).
 // This endpoint does a server-to-server fetch using shared-auth, just like
@@ -1337,6 +1395,23 @@ app.post('/api/import-3mf-schedule', express.raw({ type: '*/*', limit: '500mb' }
     // IO — copies are never silently dropped. Copies cascade back-to-back on
     // the plate's printer via the same loop that handles multiple plates.
     const expandedPlates = scheduling.expandPlateCopies(plates);
+
+    // Auto-bind unassigned plates to the printer embedded in the 3MF. The
+    // headless uploader always posts printerId:null (no printer is picked at
+    // slice time), so without this every headless job lands unassigned. Uses the
+    // SAME fuzzy match the import dialog shows (printer-match.js). Only a single,
+    // unambiguous match binds; no match or an ambiguous one leaves the job
+    // unassigned (a wrong bind is worse than an unassigned queue job). An
+    // explicit printerId from the caller (web user picked one) is never touched.
+    if (expandedPlates.some(pl => pl.printerId == null)) {
+      const embeddedName = parse3mf(req.body).printerName;
+      const bound = matchPrinter(embeddedName, db.prepare('SELECT id, name FROM printers').all());
+      if (bound) {
+        for (const pl of expandedPlates) {
+          if (pl.printerId == null) pl.printerId = bound.id;
+        }
+      }
+    }
 
     // Validate every plate's printer BEFORE any file IO or insert, so a bad
     // printer on a later plate can never leave a partial import behind (orphan
