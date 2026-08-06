@@ -29,6 +29,7 @@ Dirk (primary), potentially other Printseed users. Accessed via browser (PWA-cap
 | `pause.js` | Print pause/resume state tracking |
 | `filament-match.js` | Match job filament needs against spool inventory |
 | `parse3mf.js` | Extract metadata + thumbnails from .3mf print files |
+| `printer-match.js` | Shared resolver: 3MF `printerName` → printer row (used by import auto-bind + client) |
 | `shared-auth.js` | Validate cross-app JWT tokens (Printseed SSO pattern) |
 | `push.js` | Web push subscription CRUD + notification dispatch |
 | `awaiting-printer.js` | Pre-link job to idle/preparing printer ("Link when printer starts"): `STATUS`, `WINDOW_MS`, `isWithinStartWindow`, `assignPending` |
@@ -52,6 +53,18 @@ Dirk (primary), potentially other Printseed users. Accessed via browser (PWA-cap
   - Projects aggregate (`projects.js` `countsByProject`): `itemsDone`/`itemsBusy`/`itemsTotal`/`itemsLost`. `doneAdj = max(0, itemsDone - itemsLost)`, `totalAdj = max(0, itemsTotal - itemsLost)` — `items_lost` subtracted from BOTH done and total. `itemsLost` summed ONLY from tracked jobs (`items != null`).
   - Auto-migration `itemsMigration.js`: marker-guarded `migration.items_backfill_v1`; backfills `items IS NULL AND printFile != ''`; single-plate 3MF → `objectCount`; multi-plate → unique ±1min plate-duration match else stays NULL (permanently ambiguous, manual reload). Per-job try/catch (bad file → skip, never throw).
   - Projecten LIST modal (`public/app.js` `projectCounterHtml`): line1 `jobs X/Y`, line2 `items A/B · N bezig` / `· N verlies`.
+
+- **3MF import** (commits `c32afb3`, `b0b603e`, `e8810eb`) — import a Bambu 3MF as print jobs.
+  - **Wire format:** endpoints take **raw `application/octet-stream` body, NOT multipart**. Cookie auth only (`POST /login` → `pf_session`, no API tokens).
+    - `POST /api/parse-3mf` — raw bytes → `{plates, thumbnails, printerName, sliced}` (preview).
+    - `POST /api/import-3mf-schedule` — raw bytes + `X-Schedule` header (URI-encoded JSON). `mode:"queue"` = queue-only: `queued=1, start='', end='', status='Planned'`, skips the time-slot branch. Response `201 {jobs, file, project_id}`. `first-available`/`manual` modes kept for backward-compat; web always sends `queue`.
+  - **One job per plate** — every plate → separate job (auto-named, thumbnail carried, `items` = `plate.objectCount`).
+  - **Auto-bind printer** — on null `printerId`, resolve from 3MF `printerName` via shared `printer-match.js`. Binds ONLY on a single unambiguous match; 0 or 2+ matches → stays null/unassigned. Explicit `printerId` always wins.
+  - **Lane-lock** — a job WITH a `printerId` can only be dragged/scheduled onto that printer's lane (ALL jobs with a printer, not just 3MF-bound ones). Unassigned jobs free. Explicit "Move to another printer" still reassigns. Gate on `dataset.printer` **presence**, NOT `!printerId` (id `0` trap).
+  - **Queue-item menu** — bound queue jobs show a linked-printer chip + right-click menu (bound jobs only): earliest-available (`findNextValidStart`), schedule-to-now, specific date-time. To-now / picked-time reuse `planReshove` + existing `confirmReshove` warning. Endpoint `POST /api/jobs/:id/schedule-from-queue`.
+  - **`jobs.printerId` now NULLABLE** — guarded/idempotent table-rebuild migration in `db.js` (first boot; preserves rows + autoincrement). Queued jobs keep empty `start`/`end` — invariant honored across attach-3mf, conflict-detect, push query, awaiting-printer.
+
+- **Delete file cleanup** (commit `e8810eb`) — deleting a job (queued or scheduled) unlinks its `printFile` (`<hex>.3mf`) + `thumbFile` (`<hex>.png`) in `data/uploads` (UPLOADS_DIR). Ref-counted via `cleanupOrphanUploads()` — files shared across plates/copies, unlink only when no other job references it. Applied to `DELETE /api/jobs/:id` + `DELETE /api/printers/:id` cascade. ENOENT-safe. `POST /api/import` restore path untouched.
 
 ## Coding conventions
 
@@ -108,6 +121,7 @@ This deploy is **standing-authorised for the team** (Senne / release engineer) v
 - **Buffer blocks tinted with the job's colour** (was grey hatch): `hexRgba(p.color, 0.07 light / 0.22 dark)` fill + dashed left-border in the full colour, so a buffer visually belongs to its job. Job colour = its printer's colour, so same-printer jobs share a hue.
 - **SSE background-refresh: preserve scroll + skip no-op re-render.** Upcoming/Week/Month cache `lastUpcomingHtml`/`lastWeekHtml`/`lastMonthHtml` and skip the `innerHTML` swap when the markup is byte-identical (guard ALSO checks the `.<view>` container is present so a view-switch still forces a rebuild). Each restores its scroll container's `scrollTop` around the swap; Day view uses `#day-scroll` (`prevScrollTop` captured right before the swap). GOTCHA: any newly-displayed field MUST be included in the cached markup string `h`, else a real data change is byte-identical to the cache and wrongly skipped.
 - **Week/Month fill full height, equal printer rows** (fix was vertical, never a width cap): `.week-table tbody tr { height: calc(100% / var(--week-rows,1)) }` with `--week-rows` = printers.length passed inline from `renderWeek`; `.month-grid` uses `flex:1` + `grid-auto-rows:1fr`.
+- **Prod uploads path + cleanup discipline:** prod uploads live at `/var/www/printfarm-planner/shared/data/uploads`; retained files are bare `<hex>.3mf` / `<hex>.png` only. Prod file cleanup must be a committed script — never ad-hoc `ssh rm` (ref-counting is app-side via `cleanupOrphanUploads()`; a manual `rm` can orphan or wrongly delete a shared file).
 
 ## What NOT to do
 
