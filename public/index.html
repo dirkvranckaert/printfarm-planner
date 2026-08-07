@@ -172,7 +172,7 @@
         </div>
         <div class="form-group" id="job-thumb-group" style="display:none">
           <label>Preview</label>
-          <img id="job-thumb-img" style="max-width:120px;max-height:120px;border-radius:6px;border:1px solid var(--border)" alt="">
+          <img id="job-thumb-img" style="max-width:120px;max-height:120px;border-radius:6px;border:1px solid var(--border);cursor:zoom-in" alt="" title="Click to enlarge">
         </div>
         <div class="form-group">
           <label for="job-bedtype">Plate Type</label>
@@ -801,6 +801,11 @@
         <button class="btn btn-primary" id="btn-import3mf-save">Add to Queue</button>
       </div>
     </div>
+  </div>
+
+  <div id="img-lightbox" class="img-lightbox" style="display:none">
+    <button type="button" id="img-lightbox-close" class="img-lightbox-close" aria-label="Close">&times;</button>
+    <img id="img-lightbox-img" class="img-lightbox-img" alt="">
   </div>
 
   <script src="ntc.js"></script>

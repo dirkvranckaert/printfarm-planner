@@ -4750,6 +4750,9 @@ function setupListeners() {
   // Escape closes any open modal or context menu
   document.addEventListener('keydown', e => {
     if (e.key !== 'Escape') return;
+    // Lightbox sits on top of the job modal — dismiss it first, leave the modal open.
+    const lb = document.getElementById('img-lightbox');
+    if (lb && lb.style.display !== 'none') { closeImgLightbox(); return; }
     hideCtxMenu();
     if (!document.getElementById('pushback-modal').classList.contains('hidden')) closePushBackModal();
     if (!document.getElementById('pullforward-modal').classList.contains('hidden')) closePullForwardModal();
@@ -5260,6 +5263,28 @@ async function confirmAttachPlate(plateIndex) {
 }
 
 // =============================================================================
+// Preview image lightbox (click a job's preview thumbnail to view it full-size)
+// =============================================================================
+function openImgLightbox(src) {
+  const box = document.getElementById('img-lightbox');
+  document.getElementById('img-lightbox-img').src = src;
+  box.style.display = 'flex';
+}
+function closeImgLightbox() {
+  const box = document.getElementById('img-lightbox');
+  box.style.display = 'none';
+  document.getElementById('img-lightbox-img').src = '';
+}
+function initImgLightbox() {
+  const box = document.getElementById('img-lightbox');
+  const thumb = document.getElementById('job-thumb-img');
+  thumb.addEventListener('click', () => { if (thumb.src) openImgLightbox(thumb.src); });
+  // Click the backdrop (but not the image itself) or the close button to dismiss.
+  // Escape is handled by the shared keydown handler in init().
+  box.addEventListener('click', e => { if (e.target !== document.getElementById('img-lightbox-img')) closeImgLightbox(); });
+}
+
+// =============================================================================
 // Bootstrap
 // =============================================================================
-document.addEventListener('DOMContentLoaded', () => { init(); initImport3mf(); initAttach3mf(); });
+document.addEventListener('DOMContentLoaded', () => { init(); initImport3mf(); initAttach3mf(); initImgLightbox(); });

@@ -713,6 +713,38 @@ body {
   justify-content: center;
   z-index: 100;
 }
+.img-lightbox {
+  position: fixed;
+  inset: 0;
+  background: rgba(0,0,0,.8);
+  display: flex;
+  align-items: center;
+  justify-content: center;
+  padding: 32px;
+  z-index: 1200;
+  cursor: zoom-out;
+}
+.img-lightbox-img {
+  max-width: 95vw;
+  max-height: 95vh;
+  border-radius: 8px;
+  box-shadow: 0 20px 60px rgba(0,0,0,.5);
+  cursor: default;
+}
+.img-lightbox-close {
+  position: absolute;
+  top: 16px;
+  right: 20px;
+  background: none;
+  border: none;
+  font-size: 32px;
+  line-height: 1;
+  color: #fff;
+  cursor: pointer;
+  padding: 4px 10px;
+  border-radius: 6px;
+}
+.img-lightbox-close:hover { background: rgba(255,255,255,.15); }
 .modal {
   background: var(--surface);
   border-radius: 10px;
