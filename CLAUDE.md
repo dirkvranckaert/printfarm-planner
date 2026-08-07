@@ -89,6 +89,7 @@ npm test                 # jest
 ```
 
 - **Determinism:** run `npx jest --runInBand` for reliable green. Parallel jest flakes ~20% on a couple server tests — SQLite / port worker contention.
+- **Testing from a `.claude/worktrees/` checkout:** two traps. (1) jest config `testPathIgnorePatterns` includes `/.claude/` → worktree path contains `.claude/worktrees/` → **0 tests collected** (silent "No tests found"). Override: `jest --testPathIgnorePatterns=/node_modules/`. (2) worktree has no `node_modules` — symlink it: `ln -s ../../../node_modules node_modules`. Then `./node_modules/.bin/jest --runInBand --testPathIgnorePatterns=/node_modules/`.
 
 ## Deploy
 
