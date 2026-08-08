@@ -859,29 +859,77 @@ function renderColorDetail(colorsStr) {
 // =============================================================================
 function detectConflicts(jobs, printerMap) {
   const ids = new Set();
-  for (let i = 0; i < jobs.length; i++) {
-    for (let j = i + 1; j < jobs.length; j++) {
-      if (jobs[i].printerId !== jobs[j].printerId) continue;
-      const pi = printerMap?.[jobs[i].printerId];
-      const pj = printerMap?.[jobs[j].printerId];
-      // Cool-down is attributed to the finishing job: each job's trailing buffer
-      // uses its OWN snapshotted cool_down_mins (fall back printer scalar → 15),
-      // so the warning fires iff there's a real per-job overlap.
-      const iCd = jobs[i].cool_down_mins ?? pi?.cool_down_mins ?? 15;
-      const jCd = jobs[j].cool_down_mins ?? pj?.cool_down_mins ?? 15;
-      // Warm-up is per-job (snapshotted), same fallback chain as cool-down.
-      const iWu = jobs[i].warm_up_mins ?? pi?.warm_up_mins ?? 0;
-      const jWu = jobs[j].warm_up_mins ?? pj?.warm_up_mins ?? 0;
-      const iStart = new Date(jobs[i].start).getTime() - iWu * 60_000;
-      const iEnd   = new Date(jobs[i].end).getTime()   + iCd * 60_000;
-      const jStart = new Date(jobs[j].start).getTime() - jWu * 60_000;
-      const jEnd   = new Date(jobs[j].end).getTime()   + jCd * 60_000;
-      if (iStart < jEnd && iEnd > jStart) {
-        ids.add(jobs[i].id);
-        ids.add(jobs[j].id);
+
+  // Group by printer (jobs on different printers never conflict) and precompute
+  // each job's BUFFER-INCLUSIVE interval once. Cool-down is attributed to the
+  // finishing job: each job's trailing buffer uses its OWN snapshotted
+  // cool_down_mins (fall back printer scalar → 15); warm-up is per-job with the
+  // same fallback chain (→ 0). One Date parse per job instead of one per pair.
+  const byPrinter = new Map();
+  for (const job of jobs) {
+    const p  = printerMap?.[job.printerId];
+    const cd = job.cool_down_mins ?? p?.cool_down_mins ?? 15;
+    const wu = job.warm_up_mins   ?? p?.warm_up_mins   ?? 0;
+    const s  = new Date(job.start).getTime() - wu * 60_000;
+    const e  = new Date(job.end).getTime()   + cd * 60_000;
+    let arr = byPrinter.get(job.printerId);
+    if (!arr) { arr = []; byPrinter.set(job.printerId, arr); }
+    arr.push({ id: job.id, s, e });
+  }
+
+  // Overlap contract (kept identical to the old O(n²) pair scan): two intervals
+  // conflict iff aStart < bEnd && bStart < aEnd (open intervals — touching edges
+  // do NOT conflict). The set returned = every job in at least one such pair.
+  for (const arr of byPrinter.values()) {
+    // Split off intervals the running-max sweep can't reason about:
+    //   - Non-finite (unparseable start/end → NaN): every comparison against a
+    //     NaN is false, so the old pair scan never flagged such a job. They must
+    //     also be kept OUT of the comparator — a NaN returned from sort()
+    //     corrupts the whole ordering and can hide real conflicts (finding 1).
+    //   - Reversed (buffered end < buffered start): only arises from corrupt
+    //     data (raw end precedes raw start by more than the buffers). The sweep
+    //     assumes start <= end, so a reversed interval would both mis-seed maxEnd
+    //     and be mis-tested as `cur`; they take an exact both-inequality fallback
+    //     below (finding 2). Real data yields zero reversed intervals.
+    const finite = [];
+    const reversed = [];
+    for (const iv of arr) {
+      if (!Number.isFinite(iv.s) || !Number.isFinite(iv.e)) continue;
+      (iv.e < iv.s ? reversed : finite).push(iv);
+    }
+
+    // Normal (start <= end) intervals: one start-sorted pass with a running
+    // max-end + witness id. When `cur` opens, the greatest end among all earlier
+    // intervals is `maxEnd`; if maxEnd > cur.s the witness (its owner) overlaps
+    // cur — sorted by start, witness.s <= cur.s < cur.e gives the first
+    // inequality, maxEnd > cur.s the second. Flagging cur + witness also covers
+    // every OTHER interval overlapping cur: each of those conflicts with the
+    // witness too, so it is flagged at its own (or the witness's) step —
+    // transitive chains included. O(n log n): one sort, then O(1) amortized per
+    // job, no per-job rescan of an active set (finding 3).
+    finite.sort((a, b) => (a.s - b.s) || (a.e - b.e));
+    let maxEnd = -Infinity;
+    let witness = null;
+    for (const cur of finite) {
+      if (cur.s < maxEnd) { ids.add(cur.id); ids.add(witness.id); }
+      if (cur.e > maxEnd) { maxEnd = cur.e; witness = cur; }
+    }
+
+    // Reversed / corrupt intervals: exact both-inequality scan against every
+    // finite interval on this printer, matching the old all-pairs semantics for
+    // any pair that involves a reversed interval. Bounded by reversed.length,
+    // which is 0 for all real data, so the common path stays O(n log n).
+    if (reversed.length) {
+      const allFinite = finite.concat(reversed);
+      for (const r of reversed) {
+        for (const o of allFinite) {
+          if (o.id === r.id) continue;
+          if (r.s < o.e && o.s < r.e) { ids.add(r.id); ids.add(o.id); }
+        }
       }
     }
   }
+
   return ids;
 }
 
