@@ -165,6 +165,46 @@ describe('detectConflicts fires per-job: the ⚠ warning uses each job\'s own co
   });
 });
 
+// Guards the per-printer sweep-line implementation (multi-job clusters,
+// per-printer isolation, and a long disjoint history — the accumulation that
+// used to blow up the old O(n²) pair scan).
+describe('detectConflicts sweep: clusters, printer isolation, disjoint history', () => {
+  const at = (h, m) => { const d = new Date(NAV); d.setHours(h, m, 0, 0); return d.toISOString(); };
+  const noBuf = { cool_down_mins: 0, warm_up_mins: 0 };
+  let T;
+  beforeAll(() => { T = boot(); });
+
+  test('transitive cluster: A–B overlap, B–C overlap, A–C disjoint → all three flagged', () => {
+    const jobs = [
+      { id: 1, printerId: 5, queued: 0, start: at(5, 0),  end: at(6, 0),  cool_down_mins: 0, warm_up_mins: 0 },
+      { id: 2, printerId: 5, queued: 0, start: at(5, 30), end: at(6, 30), cool_down_mins: 0, warm_up_mins: 0 },
+      { id: 3, printerId: 5, queued: 0, start: at(6, 15), end: at(7, 0),  cool_down_mins: 0, warm_up_mins: 0 },
+    ];
+    const ids = T.detectConflicts(jobs, { 5: noBuf });
+    expect([...ids].sort()).toEqual([1, 2, 3]);
+  });
+
+  test('same time slot but different printers → no conflict', () => {
+    const jobs = [
+      { id: 1, printerId: 5, queued: 0, start: at(5, 0), end: at(6, 0), cool_down_mins: 0, warm_up_mins: 0 },
+      { id: 2, printerId: 6, queued: 0, start: at(5, 0), end: at(6, 0), cool_down_mins: 0, warm_up_mins: 0 },
+    ];
+    const ids = T.detectConflicts(jobs, { 5: noBuf, 6: noBuf });
+    expect(ids.size).toBe(0);
+  });
+
+  test('long back-to-back disjoint history flags nothing', () => {
+    const jobs = [];
+    for (let i = 0; i < 200; i++) {
+      const s = new Date(NAV); s.setHours(0, 0, 0, 0); s.setMinutes(i * 6);
+      const e = new Date(s.getTime() + 5 * 60000); // 5-min job, 1-min gap
+      jobs.push({ id: i + 1, printerId: 5, queued: 0, start: s.toISOString(), end: e.toISOString(), cool_down_mins: 0, warm_up_mins: 0 });
+    }
+    const ids = T.detectConflicts(jobs, { 5: noBuf });
+    expect(ids.size).toBe(0);
+  });
+});
+
 describe('resolveConflictMoveAfter targets a slot from the finishing job\'s own cool-down', () => {
   // Obstacle A 05:00–06:00 (own cool-down 60); moving job M 05:30–06:30 (dur 60)
   // overlaps A. New start must clear A.end + A.cool(60) = 07:00, not printer(10).

@@ -859,29 +859,44 @@ function renderColorDetail(colorsStr) {
 // =============================================================================
 function detectConflicts(jobs, printerMap) {
   const ids = new Set();
-  for (let i = 0; i < jobs.length; i++) {
-    for (let j = i + 1; j < jobs.length; j++) {
-      if (jobs[i].printerId !== jobs[j].printerId) continue;
-      const pi = printerMap?.[jobs[i].printerId];
-      const pj = printerMap?.[jobs[j].printerId];
-      // Cool-down is attributed to the finishing job: each job's trailing buffer
-      // uses its OWN snapshotted cool_down_mins (fall back printer scalar → 15),
-      // so the warning fires iff there's a real per-job overlap.
-      const iCd = jobs[i].cool_down_mins ?? pi?.cool_down_mins ?? 15;
-      const jCd = jobs[j].cool_down_mins ?? pj?.cool_down_mins ?? 15;
-      // Warm-up is per-job (snapshotted), same fallback chain as cool-down.
-      const iWu = jobs[i].warm_up_mins ?? pi?.warm_up_mins ?? 0;
-      const jWu = jobs[j].warm_up_mins ?? pj?.warm_up_mins ?? 0;
-      const iStart = new Date(jobs[i].start).getTime() - iWu * 60_000;
-      const iEnd   = new Date(jobs[i].end).getTime()   + iCd * 60_000;
-      const jStart = new Date(jobs[j].start).getTime() - jWu * 60_000;
-      const jEnd   = new Date(jobs[j].end).getTime()   + jCd * 60_000;
-      if (iStart < jEnd && iEnd > jStart) {
-        ids.add(jobs[i].id);
-        ids.add(jobs[j].id);
+
+  // Group by printer (jobs on different printers never conflict) and precompute
+  // each job's BUFFER-INCLUSIVE interval once. Cool-down is attributed to the
+  // finishing job: each job's trailing buffer uses its OWN snapshotted
+  // cool_down_mins (fall back printer scalar → 15); warm-up is per-job with the
+  // same fallback chain (→ 0). One Date parse per job instead of one per pair.
+  const byPrinter = new Map();
+  for (const job of jobs) {
+    const p  = printerMap?.[job.printerId];
+    const cd = job.cool_down_mins ?? p?.cool_down_mins ?? 15;
+    const wu = job.warm_up_mins   ?? p?.warm_up_mins   ?? 0;
+    const s  = new Date(job.start).getTime() - wu * 60_000;
+    const e  = new Date(job.end).getTime()   + cd * 60_000;
+    let arr = byPrinter.get(job.printerId);
+    if (!arr) { arr = []; byPrinter.set(job.printerId, arr); }
+    arr.push({ id: job.id, s, e });
+  }
+
+  // Per-printer sweep line: sort by buffered start, keep the set of still-open
+  // intervals. Two intervals overlap iff aStart < bEnd && aEnd > bStart; for any
+  // interval still "active" when `cur` opens (active.e > cur.s), that condition
+  // holds both ways, so `cur` conflicts with every active interval. Same result
+  // set as the old O(n²) pair scan, but O(n log n) for the realistic case of a
+  // long, mostly-disjoint job history (the accumulation that made the day view
+  // block the main thread → Chrome "Page Unresponsive").
+  for (const arr of byPrinter.values()) {
+    arr.sort((a, b) => (a.s - b.s) || (a.e - b.e));
+    let active = [];
+    for (const cur of arr) {
+      if (active.length) active = active.filter(a => a.e > cur.s);
+      if (active.length) {
+        ids.add(cur.id);
+        for (const a of active) ids.add(a.id);
       }
+      active.push(cur);
     }
   }
+
   return ids;
 }
 
