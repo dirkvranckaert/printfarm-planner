@@ -223,6 +223,14 @@ if (!jobColsItems.some(c => c.name === 'plate_name')) {
 //     runtime guard uses — so the backfill and the guard can never drift.
 //   - Cheap single UPDATE (no file IO), so it is safe synchronously here, unlike
 //     the items backfill which shells out to unzip and must run post-listen.
+//
+// ⚠ MARKER VERSION IS COUPLED TO LINK_ACTIVE_STATUSES. The `_v1` marker is
+// permanent: once written, this backfill never runs again on that DB. So ANY
+// change to LINK_ACTIVE_STATUSES (link-transition.js) — adding a status, and
+// especially REMOVING one — REQUIRES bumping the marker key to `_v2` (`_v3`, …)
+// here, otherwise rows that became stale under the new set keep their link
+// forever. `tests/awaiting-printer.test.js` pins the current status set and
+// fails with that instruction if the set changes without a bump.
 const staleLinkMarker = db.prepare("SELECT value FROM settings WHERE key='migration.stale_link_backfill_v1'").get();
 if (!staleLinkMarker) {
   const activeStatuses = [...LINK_ACTIVE_STATUSES];

@@ -416,12 +416,23 @@ describe('db.js stale linked_printer_id backfill (migration.stale_link_backfill_
     `);
     s.prepare('INSERT INTO printers (name,color) VALUES (?,?)').run('P1', '#fff'); // id 1
     const ins = s.prepare('INSERT INTO jobs (printerId,name,status,linked_printer_id) VALUES (?,?,?,?)');
-    ins.run(1, 'stale-post', 'Post Printing', 1); // stale -> must be cleared
-    ins.run(1, 'stale-done', 'Done', 1);          // stale -> must be cleared
-    ins.run(1, 'active-print', 'Printing', 1);    // active -> must be retained
-    ins.run(1, 'active-pause', 'Paused', 1);      // active -> must be retained
+    ins.run(1, 'stale-post', 'Post Printing', 1);       // stale -> must be cleared
+    ins.run(1, 'stale-done', 'Done', 1);                // stale -> must be cleared
+    ins.run(1, 'stale-null', null, 1);                  // NULL status -> stale, must be cleared
+    ins.run(1, 'active-print', 'Printing', 1);          // active -> must be retained
+    ins.run(1, 'active-pause', 'Paused', 1);            // active -> must be retained
+    ins.run(1, 'active-awaiting', STATUS, 1);           // 'Awaiting Printer' -> active, must be retained
     s.close();
   }
+
+  // Insert a row straight into the seeded file, bypassing db.js. Used to drop a
+  // fresh stale row AFTER the migration has already run + marked itself done.
+  const insertRaw = (name, status, link) => {
+    const raw = new Database(tmpPath);
+    raw.prepare('INSERT INTO jobs (printerId,name,status,linked_printer_id) VALUES (?,?,?,?)')
+      .run(1, name, status, link);
+    raw.close();
+  };
 
   const requireDbFresh = () => {
     let fresh;
@@ -446,20 +457,51 @@ describe('db.js stale linked_printer_id backfill (migration.stale_link_backfill_
     const linkOf = n => db.prepare('SELECT linked_printer_id FROM jobs WHERE name=?').get(n).linked_printer_id;
     expect(linkOf('stale-post')).toBeNull();
     expect(linkOf('stale-done')).toBeNull();
+    expect(linkOf('stale-null')).toBeNull();       // NULL status is outside the active set
     expect(linkOf('active-print')).toBe(1);
     expect(linkOf('active-pause')).toBe(1);
+    expect(linkOf('active-awaiting')).toBe(1);     // 'Awaiting Printer' is the pending-link state
     expect(db.prepare("SELECT value FROM settings WHERE key='migration.stale_link_backfill_v1'").get()).toBeTruthy();
     db.close();
   });
 
-  test('re-running init on the same DB is a no-op (idempotent, marker guards it)', () => {
+  // The marker must actually SHORT-CIRCUIT the backfill on a second boot. Merely
+  // re-asserting the first boot's rows proves nothing: re-running the same UPDATE
+  // over already-healed rows is a no-op regardless. So this drops a FRESH stale row
+  // (inactive status + live link) into the file after the first boot marked itself
+  // done — if the migration re-ran unconditionally it would clear that row too.
+  // FAILS (link becomes null) if the `if (!staleLinkMarker)` guard in db.js is removed.
+  test('marker short-circuits the backfill: a stale row added after the first boot is left untouched', () => {
     const db1 = requireDbFresh();
+    expect(db1.prepare("SELECT value FROM settings WHERE key='migration.stale_link_backfill_v1'").get()).toBeTruthy();
     db1.close();
-    // Second boot: marker present -> backfill skipped, links unchanged, marker still single.
+
+    insertRaw('stale-added-after-migration', 'Post Printing', 1);
+
     const db2 = requireDbFresh();
+    expect(
+      db2.prepare('SELECT linked_printer_id FROM jobs WHERE name=?').get('stale-added-after-migration').linked_printer_id
+    ).toBe(1);
+    // First-boot outcome is still intact and the marker was not re-inserted.
     expect(db2.prepare('SELECT linked_printer_id FROM jobs WHERE name=?').get('active-print').linked_printer_id).toBe(1);
     expect(db2.prepare('SELECT linked_printer_id FROM jobs WHERE name=?').get('stale-post').linked_printer_id).toBeNull();
     expect(db2.prepare("SELECT COUNT(*) c FROM settings WHERE key='migration.stale_link_backfill_v1'").get().c).toBe(1);
     db2.close();
+  });
+});
+
+// Guard the coupling flagged in review: `migration.stale_link_backfill_v1` is a
+// PERMANENT marker, so a DB that already booted never re-runs the backfill. If
+// LINK_ACTIVE_STATUSES changes, rows that become stale under the NEW set are
+// never healed unless the marker version is bumped. Pin the set so that change
+// cannot land silently.
+describe('LINK_ACTIVE_STATUSES ↔ backfill marker version coupling', () => {
+  test('the link-active status set is pinned to the shipped _v1 backfill', () => {
+    expect([...linkTransition.LINK_ACTIVE_STATUSES].sort()).toEqual(
+      ['Awaiting Printer', 'Paused', 'Printing']
+    );
+    // If this assertion fails you changed LINK_ACTIVE_STATUSES. Bump the backfill
+    // marker in db.js ('migration.stale_link_backfill_v1' -> '..._v2') so existing
+    // databases re-run the stale-link heal under the new set, then update this list.
   });
 });

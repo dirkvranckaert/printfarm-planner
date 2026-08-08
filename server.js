@@ -666,20 +666,24 @@ app.put('/api/jobs/:id', (req, res) => {
   const coolDownMins = resolveJobCoolDown(req.body.cool_down_mins, printerId, existing?.cool_down_mins);
   const warmUpMins = resolveJobWarmUp(req.body.warm_up_mins, printerId, existing?.warm_up_mins);
   const { items, items_lost } = resolveJobItems(req.body.items, req.body.items_lost);
-  db.prepare(
-    'UPDATE jobs SET printerId=?, name=?, customerName=?, orderNr=?, start=?, end=?, status=?, colors=?, printFile=?, remarks=?, queued=?, durationMins=?, bedType=?, cool_down_mins=?, warm_up_mins=?, items=?, items_lost=? WHERE id=?'
-  ).run(printerId, name, customerName, orderNr, normStart, normEnd, status, colors, printFile, remarks, isQueued, durationMins ?? 0, bedType ?? null, coolDownMins, warmUpMins, items, items_lost, req.params.id);
-  // If the user moves a job out of 'Paused' via the edit dialog, clear the
-  // stale pause snapshot so it does not drift on the next tick.
-  if (status !== 'Paused') pause.clearPauseFields({ db, jobId: Number(req.params.id) });
   // An explicit status change that leaves the link-active set (Awaiting Printer
   // / Printing / Paused) — i.e. moves to Post Printing / Done / Planned — clears
   // any stale linked_printer_id, so the printer stops being shown busy and the
   // SSE/pause paths never re-grab the job. Keeps the manual path consistent with
   // the SSE finish and pause.finishFromPause (both already null the link).
-  if (status !== undefined && !linkTransition.LINK_ACTIVE_STATUSES.has(status)) {
-    db.prepare('UPDATE jobs SET linked_printer_id=NULL WHERE id=?').run(req.params.id);
-  }
+  // ATOMIC: the unlink is folded into the SAME UPDATE as the status change, never
+  // a follow-up autocommit write. A crash between two separate statements would
+  // strand a stale link that the one-time migration.stale_link_backfill_v1 can no
+  // longer heal (its marker is already set after the first boot).
+  const clearLink = status !== undefined && !linkTransition.LINK_ACTIVE_STATUSES.has(status);
+  db.prepare(
+    'UPDATE jobs SET printerId=?, name=?, customerName=?, orderNr=?, start=?, end=?, status=?, colors=?, printFile=?, remarks=?, queued=?, durationMins=?, bedType=?, cool_down_mins=?, warm_up_mins=?, items=?, items_lost=?'
+    + (clearLink ? ', linked_printer_id=NULL' : '')
+    + ' WHERE id=?'
+  ).run(printerId, name, customerName, orderNr, normStart, normEnd, status, colors, printFile, remarks, isQueued, durationMins ?? 0, bedType ?? null, coolDownMins, warmUpMins, items, items_lost, req.params.id);
+  // If the user moves a job out of 'Paused' via the edit dialog, clear the
+  // stale pause snapshot so it does not drift on the next tick.
+  if (status !== 'Paused') pause.clearPauseFields({ db, jobId: Number(req.params.id) });
   applyProjectToJob(Number(req.params.id), req.body.project);
   const projectId = db.prepare('SELECT project_id FROM jobs WHERE id=?').get(req.params.id)?.project_id ?? null;
   res.json({ id: Number(req.params.id), ...req.body, start: normStart, end: normEnd, queued: isQueued, cool_down_mins: coolDownMins, warm_up_mins: warmUpMins, project_id: projectId });
@@ -761,21 +765,30 @@ app.patch('/api/jobs/:id', (req, res) => {
     if (lostField) lostField[1] = lost;
     else if (lost !== (current?.items_lost ?? 0)) fields.push(['items_lost', lost]);
   }
+  // An explicit status change that leaves the link-active set (Awaiting Printer
+  // / Printing / Paused) clears any stale linked_printer_id — same rule as the
+  // PUT edit path — so a job finished via a manual status change no longer marks
+  // its printer busy or gets re-grabbed by the SSE/pause paths.
+  // ATOMIC: the unlink is merged into the field list, so it lands in the SAME
+  // UPDATE as the status change instead of a follow-up autocommit write. A crash
+  // between two separate statements would strand a stale link that the one-time
+  // migration.stale_link_backfill_v1 can no longer heal (marker already set).
+  // A linked_printer_id sent in the same body is overwritten, not duplicated —
+  // same end state as the old two-statement order, and the echoed response now
+  // reports the NULL the row actually holds.
+  const patchedStatus = Object.fromEntries(fields).status;
+  if (patchedStatus !== undefined && !linkTransition.LINK_ACTIVE_STATUSES.has(patchedStatus)) {
+    const linkField = fields.find(([k]) => k === 'linked_printer_id');
+    if (linkField) linkField[1] = null;
+    else fields.push(['linked_printer_id', null]);
+  }
   if (!fields.length) return res.status(400).json({ error: 'no valid fields' });
   const setClauses = fields.map(([k]) => `${k}=?`).join(', ');
   const values = [...fields.map(([, v]) => v), req.params.id];
   db.prepare(`UPDATE jobs SET ${setClauses} WHERE id=?`).run(...values);
   // Status moving out of 'Paused' via a PATCH: clear the pause snapshot.
-  const patchedStatus = Object.fromEntries(fields).status;
   if (patchedStatus !== undefined && patchedStatus !== 'Paused') {
     pause.clearPauseFields({ db, jobId: Number(req.params.id) });
-  }
-  // An explicit status change that leaves the link-active set (Awaiting Printer
-  // / Printing / Paused) clears any stale linked_printer_id — same rule as the
-  // PUT edit path — so a job finished via a manual status change no longer marks
-  // its printer busy or gets re-grabbed by the SSE/pause paths.
-  if (patchedStatus !== undefined && !linkTransition.LINK_ACTIVE_STATUSES.has(patchedStatus)) {
-    db.prepare('UPDATE jobs SET linked_printer_id=NULL WHERE id=?').run(req.params.id);
   }
   res.json({ id: Number(req.params.id), ...req.body, ...Object.fromEntries(fields) });
 });
