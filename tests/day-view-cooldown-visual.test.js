@@ -184,6 +184,55 @@ describe('detectConflicts sweep: clusters, printer isolation, disjoint history',
     expect([...ids].sort()).toEqual([1, 2, 3]);
   });
 
+  test('non-immediate retention: long A spans B and C (A–B, A–C overlap; B–C disjoint), fed UNSORTED', () => {
+    // A 05:00–08:00 stays the max-end witness across B, so the sweep must retain
+    // A (not the immediately-preceding B) to flag the A–C overlap. Feeding these
+    // out of start-order also guards the internal sort.
+    const jobs = [
+      { id: 3, printerId: 5, queued: 0, start: at(7, 0), end: at(7, 30), cool_down_mins: 0, warm_up_mins: 0 }, // C
+      { id: 1, printerId: 5, queued: 0, start: at(5, 0), end: at(8, 0),  cool_down_mins: 0, warm_up_mins: 0 }, // A
+      { id: 2, printerId: 5, queued: 0, start: at(6, 0), end: at(6, 30), cool_down_mins: 0, warm_up_mins: 0 }, // B
+    ];
+    const ids = T.detectConflicts(jobs, { 5: noBuf });
+    expect([...ids].sort()).toEqual([1, 2, 3]); // A–B and A–C overlap; B–C disjoint but both share A
+  });
+
+  test('non-finite (unparseable) interval is excluded and cannot hide a real conflict', () => {
+    // Finding 1: A 09:00–12:00 and B 10:00–13:00 overlap; X has unparseable
+    // start/end (NaN). A NaN in the comparator would corrupt the sort and could
+    // hide {A,B}. X must be dropped BEFORE sorting; result is exactly {A,B}.
+    const jobs = [
+      { id: 1, printerId: 5, queued: 0, start: at(9, 0),  end: at(12, 0), cool_down_mins: 0, warm_up_mins: 0 },
+      { id: 2, printerId: 5, queued: 0, start: '',         end: '',        cool_down_mins: 0, warm_up_mins: 0 },
+      { id: 3, printerId: 5, queued: 0, start: at(10, 0), end: at(13, 0), cool_down_mins: 0, warm_up_mins: 0 },
+    ];
+    const ids = T.detectConflicts(jobs, { 5: noBuf });
+    expect([...ids].sort()).toEqual([1, 3]);
+  });
+
+  test('reversed interval (end before start) does not raise a false conflict', () => {
+    // Finding 2: A 09:00–12:00, B 10:00–08:00 (end before start). The old pair
+    // scan finds {} (A.s < B.e is false); the sweep must not falsely flag {A,B}.
+    const jobs = [
+      { id: 1, printerId: 5, queued: 0, start: at(9, 0),  end: at(12, 0), cool_down_mins: 0, warm_up_mins: 0 },
+      { id: 2, printerId: 5, queued: 0, start: at(10, 0), end: at(8, 0),  cool_down_mins: 0, warm_up_mins: 0 },
+    ];
+    const ids = T.detectConflicts(jobs, { 5: noBuf });
+    expect(ids.size).toBe(0);
+  });
+
+  test('reversed interval that genuinely conflicts is still flagged (exact all-pairs contract)', () => {
+    // A reversed interval CAN conflict when a normal interval spans its gap:
+    // P 07:00–13:00 (normal), R 12:00–08:00 (reversed). Old pair scan:
+    // R.s(12:00) < P.e(13:00) && P.s(07:00) < R.e(08:00) → {P,R}. Must match.
+    const jobs = [
+      { id: 1, printerId: 5, queued: 0, start: at(7, 0),  end: at(13, 0), cool_down_mins: 0, warm_up_mins: 0 },
+      { id: 2, printerId: 5, queued: 0, start: at(12, 0), end: at(8, 0),  cool_down_mins: 0, warm_up_mins: 0 },
+    ];
+    const ids = T.detectConflicts(jobs, { 5: noBuf });
+    expect([...ids].sort()).toEqual([1, 2]);
+  });
+
   test('same time slot but different printers → no conflict', () => {
     const jobs = [
       { id: 1, printerId: 5, queued: 0, start: at(5, 0), end: at(6, 0), cool_down_mins: 0, warm_up_mins: 0 },
@@ -193,15 +242,28 @@ describe('detectConflicts sweep: clusters, printer isolation, disjoint history',
     expect(ids.size).toBe(0);
   });
 
-  test('long back-to-back disjoint history flags nothing', () => {
+  test('long back-to-back disjoint history: flags nothing AND reads each field once (no O(n²) re-reads)', () => {
+    // start/end are getters with read counters. The O(n log n) sweep parses each
+    // job's interval exactly once up front; an O(n²) pair scan would re-read the
+    // same fields many times over, so per-field read counts guard the perf claim
+    // (finding 5) in a way a disjoint-set-size assertion alone cannot.
+    const N = 200;
+    let startReads = 0, endReads = 0;
     const jobs = [];
-    for (let i = 0; i < 200; i++) {
+    for (let i = 0; i < N; i++) {
       const s = new Date(NAV); s.setHours(0, 0, 0, 0); s.setMinutes(i * 6);
       const e = new Date(s.getTime() + 5 * 60000); // 5-min job, 1-min gap
-      jobs.push({ id: i + 1, printerId: 5, queued: 0, start: s.toISOString(), end: e.toISOString(), cool_down_mins: 0, warm_up_mins: 0 });
+      const sIso = s.toISOString(), eIso = e.toISOString();
+      jobs.push({
+        id: i + 1, printerId: 5, queued: 0, cool_down_mins: 0, warm_up_mins: 0,
+        get start() { startReads++; return sIso; },
+        get end()   { endReads++;   return eIso; },
+      });
     }
     const ids = T.detectConflicts(jobs, { 5: noBuf });
     expect(ids.size).toBe(0);
+    expect(startReads).toBe(N); // exactly one start read per job
+    expect(endReads).toBe(N);   // exactly one end read per job
   });
 });
 
