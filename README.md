@@ -421,7 +421,9 @@ Printer body fields: `name`, `color` (hex), `brand`, `bambu_serial?`, `pinned?` 
 
 Job body fields: `printerId` (int), `name`, `customerName`, `orderNr`, `start` (datetime-local string), `end` (datetime-local string), `queued` (bool), `status` (`Planned` / `Printing` / `Post Printing` / `Done`), `colors`, `printFile`, `remarks`
 
-`Paused` and `Awaiting Printer` are system-managed statuses — set by the server (pause pipeline / link-when-printer-starts), not user-selectable via this field. PATCH with `status: 'Awaiting Printer'` triggers the pre-link flow (see the "Link when printer starts" feature): 409 if another job is already pending on that printer, 400/404 if the start time is ineligible (empty/queued, or more than 1h in the future).
+`Paused` and `Awaiting Printer` are system-managed statuses — set by the server (pause pipeline / link-when-printer-starts), not user-selectable via this field. PATCH with `status: 'Awaiting Printer'` triggers the pre-link flow (see the "Link when printer starts" feature): 409 if another job is already pending on that printer, 400/404 if the start time is ineligible (empty/queued, or more than 24h away from now in either direction).
+
+`PUT` is a **full-row replace**: any field you omit is nulled — send the whole row, or use `PATCH` for partial edits. Both PUT and PATCH clear `linked_printer_id` when the resulting status is not one of `Awaiting Printer` / `Printing` / `Paused`, so a job that leaves the print cycle never stays linked to the printer.
 
 Queued jobs have `queued = 1`; scheduled jobs have `queued = 0` with real datetime values.
 
@@ -588,14 +590,9 @@ The project ships with a Jest test suite covering core DB logic and utility func
 npm test
 ```
 
-Test files live in `tests/`:
+Test files live in `tests/`, one file per feature area (server routes, scheduling, realign, pause, printer links, 3MF import, projects/items, day-view client behaviour, utils). Everything runs against in-memory SQLite or jsdom — no server process is needed.
 
-| File | What it covers |
-|------|---------------|
-| `tests/server.test.js` | Printer CRUD, job CRUD, cascading deletes, session validity logic, push notification message formats, push DB schema — all against in-memory SQLite |
-| `tests/utils.test.js` | `snap15`, `toDatetimeLocal`, interval overlap detection, `snapAvoidingJobs` logic |
-
-Tests are run automatically by Jest; no server process is needed. Add new tests alongside any non-trivial logic change.
+Add tests alongside any non-trivial logic change, and **revert-confirm every regression test**: temporarily revert the guard it protects and check the test actually fails. Import the production module under test — never assert against a copied mirror of its logic.
 
 ---
 
