@@ -1,6 +1,7 @@
 const Database = require('better-sqlite3');
 const path = require('path');
 const fs = require('fs');
+const { LINK_ACTIVE_STATUSES } = require('./link-transition');
 
 const dataDir = path.join(__dirname, 'data');
 fs.mkdirSync(dataDir, { recursive: true });
@@ -205,6 +206,33 @@ if (!jobColsItems.some(c => c.name === 'items_lost')) {
 }
 if (!jobColsItems.some(c => c.name === 'plate_name')) {
   db.exec('ALTER TABLE jobs ADD COLUMN plate_name TEXT');
+}
+
+// One-time backfill: heal jobs left with a STALE linked_printer_id from before
+// the forward-clearing fix (server.js PUT/PATCH now null the link when a status
+// change leaves LINK_ACTIVE_STATUSES). Rows already in a status OUTSIDE that set
+// — e.g. a 'Post Printing' / 'Done' job carrying a link from a manual finish
+// before the fix — would otherwise still count as the printer's busy/current
+// link (server.js:195/258, public/app.js). Clear every such link once.
+//   - Idempotent by construction: the UPDATE only touches rows with a non-NULL
+//     link in a non-active status; once cleared, the WHERE matches nothing.
+//   - Marker-guarded (same pattern as favouriteMigrated / migration.items_backfill_v1)
+//     so it runs at most once; a crash before the marker write just re-runs the
+//     same idempotent UPDATE next boot.
+//   - LINK_ACTIVE_STATUSES is imported from link-transition.js — the SAME set the
+//     runtime guard uses — so the backfill and the guard can never drift.
+//   - Cheap single UPDATE (no file IO), so it is safe synchronously here, unlike
+//     the items backfill which shells out to unzip and must run post-listen.
+const staleLinkMarker = db.prepare("SELECT value FROM settings WHERE key='migration.stale_link_backfill_v1'").get();
+if (!staleLinkMarker) {
+  const activeStatuses = [...LINK_ACTIVE_STATUSES];
+  const placeholders = activeStatuses.map(() => '?').join(',');
+  db.prepare(
+    `UPDATE jobs SET linked_printer_id=NULL
+       WHERE linked_printer_id IS NOT NULL
+         AND (status IS NULL OR status NOT IN (${placeholders}))`
+  ).run(...activeStatuses);
+  db.prepare("INSERT OR REPLACE INTO settings (key, value) VALUES ('migration.stale_link_backfill_v1', '1')").run();
 }
 
 // One-time migration: if the favourite column was previously added with DEFAULT 0

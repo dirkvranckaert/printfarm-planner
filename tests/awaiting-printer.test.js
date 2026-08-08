@@ -346,4 +346,120 @@ describe('PATCH /api/jobs/:id — "Link when printer starts" entry (real route)'
     expect(r2.status).toBe(409);
     expect(appDb.prepare('SELECT status FROM jobs WHERE id=?').get(b).status).toBe('Planned');
   });
+
+  // Stale-link clearing via the REAL PUT / PATCH handlers. Each job starts linked
+  // (linked_printer_id set) in an ACTIVE status; a status change decides the link's
+  // fate. FAILS if the clear at server.js:680 (PUT) / server.js:777 (PATCH) is
+  // removed — the pure link-transition tests above stay green even then, so these
+  // route tests are the ones that pin the clear to the shipped handler.
+  const linkJob = (startMs, status) => {
+    const id = insertJob(startMs);
+    appDb.prepare('UPDATE jobs SET status=?, linked_printer_id=? WHERE id=?').run(status, printerId, id);
+    return id;
+  };
+  const linkOf = id => appDb.prepare('SELECT linked_printer_id FROM jobs WHERE id=?').get(id).linked_printer_id;
+
+  test('PUT: status change to an INACTIVE status (Post Printing) clears linked_printer_id', async () => {
+    const id = linkJob(Date.now(), 'Printing');
+    const res = await request(app).put(`/api/jobs/${id}`).set('Cookie', authCookie)
+      .send({ printerId, name: 'Job', start: iso(Date.now()), end: iso(Date.now() + 3_600_000), status: 'Post Printing' });
+    expect(res.status).toBe(200);
+    expect(linkOf(id)).toBeNull();
+  });
+
+  test('PUT: status change to an ACTIVE status (Paused) retains linked_printer_id', async () => {
+    const id = linkJob(Date.now(), 'Printing');
+    const res = await request(app).put(`/api/jobs/${id}`).set('Cookie', authCookie)
+      .send({ printerId, name: 'Job', start: iso(Date.now()), end: iso(Date.now() + 3_600_000), status: 'Paused' });
+    expect(res.status).toBe(200);
+    expect(linkOf(id)).toBe(printerId);
+  });
+
+  test('PATCH: status change to an INACTIVE status (Done) clears linked_printer_id', async () => {
+    const id = linkJob(Date.now(), 'Printing');
+    const res = await request(app).patch(`/api/jobs/${id}`).set('Cookie', authCookie).send({ status: 'Done' });
+    expect(res.status).toBe(200);
+    expect(linkOf(id)).toBeNull();
+  });
+
+  test('PATCH: status change to an ACTIVE status (Printing) retains linked_printer_id', async () => {
+    const id = linkJob(Date.now(), 'Paused');
+    const res = await request(app).patch(`/api/jobs/${id}`).set('Cookie', authCookie).send({ status: 'Printing' });
+    expect(res.status).toBe(200);
+    expect(linkOf(id)).toBe(printerId);
+  });
+});
+
+// The db.js one-time backfill that HEALS pre-existing stale links (rows already
+// in a non-active status carrying a linked_printer_id from before the forward-
+// clearing fix). A throwaway DB is pre-seeded with stale + active linked rows,
+// then db.js is required in isolation so its startup migrations — including the
+// backfill — run against that seed. FAILS if the backfill in db.js is removed.
+describe('db.js stale linked_printer_id backfill (migration.stale_link_backfill_v1)', () => {
+  let tmpPath, savedEnv;
+
+  function seed() {
+    tmpPath = path.join(os.tmpdir(), `printfarm-backfill-${process.pid}-${Date.now()}-${Math.random().toString(36).slice(2)}.db`);
+    const s = new Database(tmpPath);
+    // printerId nullable so db.js's NOT-NULL-relax table rebuild does NOT fire.
+    s.exec(`
+      CREATE TABLE printers (id INTEGER PRIMARY KEY AUTOINCREMENT, name TEXT NOT NULL, color TEXT NOT NULL);
+      CREATE TABLE jobs (
+        id INTEGER PRIMARY KEY AUTOINCREMENT,
+        printerId INTEGER,
+        name TEXT NOT NULL,
+        status TEXT DEFAULT 'Planned',
+        start TEXT,
+        end TEXT,
+        linked_printer_id INTEGER
+      );
+    `);
+    s.prepare('INSERT INTO printers (name,color) VALUES (?,?)').run('P1', '#fff'); // id 1
+    const ins = s.prepare('INSERT INTO jobs (printerId,name,status,linked_printer_id) VALUES (?,?,?,?)');
+    ins.run(1, 'stale-post', 'Post Printing', 1); // stale -> must be cleared
+    ins.run(1, 'stale-done', 'Done', 1);          // stale -> must be cleared
+    ins.run(1, 'active-print', 'Printing', 1);    // active -> must be retained
+    ins.run(1, 'active-pause', 'Paused', 1);      // active -> must be retained
+    s.close();
+  }
+
+  const requireDbFresh = () => {
+    let fresh;
+    jest.isolateModules(() => { fresh = require('../db'); });
+    return fresh;
+  };
+
+  beforeEach(() => {
+    savedEnv = process.env.PLANNER_DB_PATH;
+    seed();
+    process.env.PLANNER_DB_PATH = tmpPath;
+  });
+
+  afterEach(() => {
+    if (savedEnv === undefined) delete process.env.PLANNER_DB_PATH;
+    else process.env.PLANNER_DB_PATH = savedEnv;
+    try { fs.unlinkSync(tmpPath); } catch { /* ignore */ }
+  });
+
+  test('nulls links on inactive-status rows, retains them on active-status rows, sets marker', () => {
+    const db = requireDbFresh();
+    const linkOf = n => db.prepare('SELECT linked_printer_id FROM jobs WHERE name=?').get(n).linked_printer_id;
+    expect(linkOf('stale-post')).toBeNull();
+    expect(linkOf('stale-done')).toBeNull();
+    expect(linkOf('active-print')).toBe(1);
+    expect(linkOf('active-pause')).toBe(1);
+    expect(db.prepare("SELECT value FROM settings WHERE key='migration.stale_link_backfill_v1'").get()).toBeTruthy();
+    db.close();
+  });
+
+  test('re-running init on the same DB is a no-op (idempotent, marker guards it)', () => {
+    const db1 = requireDbFresh();
+    db1.close();
+    // Second boot: marker present -> backfill skipped, links unchanged, marker still single.
+    const db2 = requireDbFresh();
+    expect(db2.prepare('SELECT linked_printer_id FROM jobs WHERE name=?').get('active-print').linked_printer_id).toBe(1);
+    expect(db2.prepare('SELECT linked_printer_id FROM jobs WHERE name=?').get('stale-post').linked_printer_id).toBeNull();
+    expect(db2.prepare("SELECT COUNT(*) c FROM settings WHERE key='migration.stale_link_backfill_v1'").get().c).toBe(1);
+    db2.close();
+  });
 });
