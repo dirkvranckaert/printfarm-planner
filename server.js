@@ -197,6 +197,17 @@ brands.onUpdate((brandKey, status) => {
 
     linked.forEach(job => {
       if (curr === 'RUNNING' && job.status !== 'Printing') {
+        // Auto-link ONLY a job still eligible to (re)start printing: a pending
+        // 'Awaiting Printer' job, or a 'Paused' job resuming. A job that has
+        // already finished its print ('Post Printing' or any later state) but
+        // still carries a stale linked_printer_id must NEVER be re-grabbed when
+        // the printer starts its NEXT print — the printer has moved on to a new
+        // job. Without this guard a job left in 'Post Printing' with its link
+        // intact (e.g. finished manually, which does not clear the link) got
+        // re-selected and overwritten back to 'Printing' by the next print.
+        if (job.status !== awaitingPrinter.STATUS && job.status !== 'Paused') {
+          return;
+        }
         // 'Awaiting Printer' = pre-linked via "Link when printer starts". Only
         // auto-link if the job's start is still within the window at THIS
         // moment; a printer starting a far-ahead job's sibling must not sweep

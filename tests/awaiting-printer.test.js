@@ -157,6 +157,11 @@ function simulateRunningTransition(db, printerId, now) {
   const linked = db.prepare("SELECT * FROM jobs WHERE linked_printer_id=? AND status != 'Done'").all(printerId);
   for (const job of linked) {
     if (job.status !== 'Printing') {
+      // Mirror server.js: only a pending 'Awaiting Printer' job (or a resuming
+      // 'Paused' job) may auto-link to 'Printing'. A job that already finished
+      // its print ('Post Printing' or later) with a stale link is never
+      // re-grabbed by the next print.
+      if (job.status !== STATUS && job.status !== 'Paused') continue;
       if (job.status === STATUS && !isWithinStartWindow(job.start, now)) continue;
       db.prepare("UPDATE jobs SET status='Printing' WHERE id=?").run(job.id);
     }
@@ -195,6 +200,46 @@ describe('auto-link on RUNNING transition (shipped guard)', () => {
     const id = addJob(db, printerId, { status: STATUS, start: iso(now.getTime() - 25 * 60 * 60 * 1000), linked_printer_id: printerId });
     simulateRunningTransition(db, printerId, now);
     expect(getJob(db, id).status).toBe(STATUS);
+  });
+
+  // Regression: a job left in 'Post Printing' with a STALE linked_printer_id
+  // (e.g. finished manually, which does not clear the link) must never be
+  // re-grabbed and overwritten to 'Printing' when the printer's NEXT print
+  // starts. Fails against the old code (query matched 'status != Done' and the
+  // RUNNING branch flipped any non-Printing linked job), passes with the
+  // eligibility guard.
+  test('finished Post Printing job with a stale link is NOT re-grabbed when the printer restarts', () => {
+    const stale = addJob(db, printerId, {
+      status: 'Post Printing',
+      start: iso(now.getTime() - 60 * 60 * 1000),
+      linked_printer_id: printerId,
+    });
+    simulateRunningTransition(db, printerId, now);
+    expect(getJob(db, stale).status).toBe('Post Printing');
+  });
+
+  test('printer starting its next print links the NEW job, never the previous Post Printing one', () => {
+    // Job A: printed, then finished manually -> 'Post Printing' but link left intact.
+    const a = addJob(db, printerId, {
+      status: STATUS,
+      start: iso(now.getTime() - 30 * 60 * 1000),
+      linked_printer_id: printerId,
+    });
+    simulateRunningTransition(db, printerId, now);       // A starts -> Printing
+    expect(getJob(db, a).status).toBe('Printing');
+    // Manual finish path leaves linked_printer_id set (the bug's precondition).
+    db.prepare("UPDATE jobs SET status='Post Printing' WHERE id=?").run(a);
+
+    // Job B: the new print, pre-linked to the same printer.
+    const b = addJob(db, printerId, {
+      status: STATUS,
+      start: iso(now.getTime() + 5 * 60 * 1000),
+      linked_printer_id: printerId,
+    });
+    simulateRunningTransition(db, printerId, now);        // next print starts
+
+    expect(getJob(db, b).status).toBe('Printing');        // new job linked
+    expect(getJob(db, a).status).toBe('Post Printing');   // old job untouched
   });
 });
 
