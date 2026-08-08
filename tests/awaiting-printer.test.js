@@ -19,6 +19,7 @@ process.env.PLANNER_DB_PATH =
 
 const Database = require('better-sqlite3');
 const awaitingPrinter = require('../awaiting-printer');
+const linkTransition = require('../link-transition');
 
 const { STATUS, WINDOW_MS, isWithinStartWindow, assignPending } = awaitingPrinter;
 
@@ -37,7 +38,9 @@ function makeDb() {
       status TEXT DEFAULT 'Planned',
       start TEXT NOT NULL,
       end TEXT NOT NULL,
-      linked_printer_id INTEGER
+      linked_printer_id INTEGER,
+      paused_at TEXT,
+      paused_remaining_ms INTEGER
     );
   `);
   return db;
@@ -149,21 +152,17 @@ describe('awaitingPrinter.assignPending', () => {
   });
 });
 
-// Reproduces the server.js SSE branch: on a printer's RUNNING transition, a
-// linked non-Printing job is flipped to 'Printing' UNLESS it is an out-of-window
-// 'Awaiting Printer' job, in which case it is left pending. Uses the shipped
-// guard so this stays in lockstep with the real handler.
-function simulateRunningTransition(db, printerId, now) {
-  const linked = db.prepare("SELECT * FROM jobs WHERE linked_printer_id=? AND status != 'Done'").all(printerId);
-  for (const job of linked) {
-    if (job.status !== 'Printing') {
-      if (job.status === STATUS && !isWithinStartWindow(job.start, now)) continue;
-      db.prepare("UPDATE jobs SET status='Printing' WHERE id=?").run(job.id);
-    }
-  }
-}
+// Drive the ACTUAL production transition appliers (link-transition.js) that the
+// server.js SSE stage-transition handler calls — NOT a hand-copied mirror. So a
+// guard reverted in the real module fails these tests. The MQTT/SSE plumbing and
+// push/realign side-effects stay in server.js; the eligibility + status flips
+// under test are exactly the production code path.
+const runRunning = (db, printerId, now) =>
+  linkTransition.applyRunningTransition({ db, printerId, now });
+const runPause = (db, printerId, now) =>
+  linkTransition.applyPauseTransition({ db, printerId, now });
 
-describe('auto-link on RUNNING transition (shipped guard)', () => {
+describe('auto-link on RUNNING transition (production applier)', () => {
   let db, printerId, now;
   beforeEach(() => {
     db = makeDb();
@@ -173,28 +172,120 @@ describe('auto-link on RUNNING transition (shipped guard)', () => {
 
   test('in-window pending job flips to Printing when the printer starts', () => {
     const id = addJob(db, printerId, { status: STATUS, start: iso(now.getTime() + 20 * 60 * 1000), linked_printer_id: printerId });
-    simulateRunningTransition(db, printerId, now);
+    runRunning(db, printerId, now);
     expect(getJob(db, id).status).toBe('Printing');
   });
 
   test('past-start pending job flips to Printing when the printer starts', () => {
     const id = addJob(db, printerId, { status: STATUS, start: iso(now.getTime() - 10 * 60 * 1000), linked_printer_id: printerId });
-    simulateRunningTransition(db, printerId, now);
+    runRunning(db, printerId, now);
     expect(getJob(db, id).status).toBe('Printing');
   });
 
   test('far-ahead pending job is NOT swept up when the printer starts', () => {
     // start became far-future relative to the actual moment the printer started
     const id = addJob(db, printerId, { status: STATUS, start: iso(now.getTime() + 25 * 60 * 60 * 1000), linked_printer_id: printerId });
-    simulateRunningTransition(db, printerId, now);
+    runRunning(db, printerId, now);
     expect(getJob(db, id).status).toBe(STATUS);
   });
 
   test('stale pending job (>24h in the past) is NOT swept up when the printer starts', () => {
     // start fell outside the now-WINDOW_MS lower bound by the time the printer started
     const id = addJob(db, printerId, { status: STATUS, start: iso(now.getTime() - 25 * 60 * 60 * 1000), linked_printer_id: printerId });
-    simulateRunningTransition(db, printerId, now);
+    runRunning(db, printerId, now);
     expect(getJob(db, id).status).toBe(STATUS);
+  });
+
+  // Regression: a job left in 'Post Printing' with a STALE linked_printer_id
+  // (e.g. finished manually, which does not clear the link) must never be
+  // re-grabbed and overwritten to 'Printing' when the printer's NEXT print
+  // starts. FAILS if link-transition.eligibleToStart is reverted to admit a
+  // non-pending/non-paused job.
+  test('finished Post Printing job with a stale link is NOT re-grabbed when the printer restarts', () => {
+    const stale = addJob(db, printerId, {
+      status: 'Post Printing',
+      start: iso(now.getTime() - 60 * 60 * 1000),
+      linked_printer_id: printerId,
+    });
+    runRunning(db, printerId, now);
+    expect(getJob(db, stale).status).toBe('Post Printing');
+  });
+
+  test('printer starting its next print links the NEW job, never the previous Post Printing one', () => {
+    // Job A: printed, then finished manually -> 'Post Printing' but link left intact.
+    const a = addJob(db, printerId, {
+      status: STATUS,
+      start: iso(now.getTime() - 30 * 60 * 1000),
+      linked_printer_id: printerId,
+    });
+    runRunning(db, printerId, now);                      // A starts -> Printing
+    expect(getJob(db, a).status).toBe('Printing');
+    // Manual finish path leaves linked_printer_id set (the bug's precondition).
+    db.prepare("UPDATE jobs SET status='Post Printing' WHERE id=?").run(a);
+
+    // Job B: the new print, pre-linked to the same printer.
+    const b = addJob(db, printerId, {
+      status: STATUS,
+      start: iso(now.getTime() + 5 * 60 * 1000),
+      linked_printer_id: printerId,
+    });
+    runRunning(db, printerId, now);                       // next print starts
+
+    expect(getJob(db, b).status).toBe('Printing');        // new job linked
+    expect(getJob(db, a).status).toBe('Post Printing');   // old job untouched
+  });
+});
+
+describe('PAUSE / resume transition (production applier)', () => {
+  let db, printerId, now;
+  beforeEach(() => {
+    db = makeDb();
+    printerId = addPrinter(db);
+    now = new Date('2026-07-29T12:00:00Z');
+  });
+
+  // A genuinely-printing job pauses, then resumes cleanly on the next RUNNING.
+  test('a Printing job pauses on PAUSE and resumes to Printing on RUNNING', () => {
+    const id = addJob(db, printerId, {
+      status: 'Printing',
+      start: iso(now.getTime() - 10 * 60 * 1000),
+      end: iso(now.getTime() + 20 * 60 * 1000),
+      linked_printer_id: printerId,
+    });
+    runPause(db, printerId, now);
+    expect(getJob(db, id).status).toBe('Paused');
+    expect(getJob(db, id).paused_at).not.toBeNull();
+    runRunning(db, printerId, now);
+    expect(getJob(db, id).status).toBe('Printing');
+    expect(getJob(db, id).paused_at).toBeNull();
+  });
+
+  // CRITICAL regression (Codex round 1, server.js PAUSE route): a stale
+  // 'Post Printing' job A with an intact link must NOT be paused on the PAUSE
+  // edge — otherwise the PAUSE->RUNNING resume re-admits it to 'Printing'. The
+  // genuinely-printing new job B must pause+resume normally. FAILS if
+  // link-transition.eligibleToPause is reverted to pause any linked job.
+  test('stale-A / printing-B: printer RUNNING->PAUSE->RUNNING leaves A Post Printing, B pauses+resumes', () => {
+    const a = addJob(db, printerId, {
+      status: 'Post Printing',
+      start: iso(now.getTime() - 60 * 60 * 1000),
+      end: iso(now.getTime() - 30 * 60 * 1000),
+      linked_printer_id: printerId,          // stale link left intact
+    });
+    const b = addJob(db, printerId, {
+      status: 'Printing',
+      start: iso(now.getTime() - 5 * 60 * 1000),
+      end: iso(now.getTime() + 25 * 60 * 1000),
+      linked_printer_id: printerId,
+    });
+
+    runPause(db, printerId, now);            // RUNNING -> PAUSE
+    expect(getJob(db, a).status).toBe('Post Printing');   // A untouched
+    expect(getJob(db, b).status).toBe('Paused');          // only B paused
+
+    runRunning(db, printerId, now);          // PAUSE -> RUNNING
+    expect(getJob(db, a).status).toBe('Post Printing');   // A still untouched
+    expect(getJob(db, b).status).toBe('Printing');        // B resumed
   });
 });
 
@@ -254,5 +345,183 @@ describe('PATCH /api/jobs/:id — "Link when printer starts" entry (real route)'
       .send({ status: STATUS, linked_printer_id: printerId });
     expect(r2.status).toBe(409);
     expect(appDb.prepare('SELECT status FROM jobs WHERE id=?').get(b).status).toBe('Planned');
+  });
+
+  // Stale-link clearing via the REAL PUT / PATCH handlers. Each job starts linked
+  // (linked_printer_id set) in an ACTIVE status; a status change decides the link's
+  // fate. FAILS if the clear at server.js:680 (PUT) / server.js:777 (PATCH) is
+  // removed — the pure link-transition tests above stay green even then, so these
+  // route tests are the ones that pin the clear to the shipped handler.
+  const linkJob = (startMs, status) => {
+    const id = insertJob(startMs);
+    appDb.prepare('UPDATE jobs SET status=?, linked_printer_id=? WHERE id=?').run(status, printerId, id);
+    return id;
+  };
+  const linkOf = id => appDb.prepare('SELECT linked_printer_id FROM jobs WHERE id=?').get(id).linked_printer_id;
+
+  test('PUT: status change to an INACTIVE status (Post Printing) clears linked_printer_id', async () => {
+    const id = linkJob(Date.now(), 'Printing');
+    const res = await request(app).put(`/api/jobs/${id}`).set('Cookie', authCookie)
+      .send({ printerId, name: 'Job', start: iso(Date.now()), end: iso(Date.now() + 3_600_000), status: 'Post Printing' });
+    expect(res.status).toBe(200);
+    expect(linkOf(id)).toBeNull();
+  });
+
+  test('PUT: status change to an ACTIVE status (Paused) retains linked_printer_id', async () => {
+    const id = linkJob(Date.now(), 'Printing');
+    const res = await request(app).put(`/api/jobs/${id}`).set('Cookie', authCookie)
+      .send({ printerId, name: 'Job', start: iso(Date.now()), end: iso(Date.now() + 3_600_000), status: 'Paused' });
+    expect(res.status).toBe(200);
+    expect(linkOf(id)).toBe(printerId);
+  });
+
+  test('PATCH: status change to an INACTIVE status (Done) clears linked_printer_id', async () => {
+    const id = linkJob(Date.now(), 'Printing');
+    const res = await request(app).patch(`/api/jobs/${id}`).set('Cookie', authCookie).send({ status: 'Done' });
+    expect(res.status).toBe(200);
+    expect(linkOf(id)).toBeNull();
+  });
+
+  test('PATCH: status change to an ACTIVE status (Printing) retains linked_printer_id', async () => {
+    const id = linkJob(Date.now(), 'Paused');
+    const res = await request(app).patch(`/api/jobs/${id}`).set('Cookie', authCookie).send({ status: 'Printing' });
+    expect(res.status).toBe(200);
+    expect(linkOf(id)).toBe(printerId);
+  });
+
+  // PUT is a full-row replace: its UPDATE always writes `status`, so a body that
+  // omits the field binds SQL NULL — an inactive status. The unlink must fire on
+  // that path too, otherwise the row lands inactive while still holding a live
+  // linked_printer_id, and migration.stale_link_backfill_v1 can no longer heal it
+  // (its marker is set after the first boot). FAILS if the clear at server.js:678
+  // is gated on `status !== undefined`.
+  test('PUT without a status field leaves no inactive row holding a live link', async () => {
+    const id = linkJob(Date.now(), 'Printing');
+    const res = await request(app).put(`/api/jobs/${id}`).set('Cookie', authCookie)
+      .send({ printerId, name: 'Job', start: iso(Date.now()), end: iso(Date.now() + 3_600_000) });
+    expect(res.status).toBe(200);
+    const row = appDb.prepare('SELECT status, linked_printer_id FROM jobs WHERE id=?').get(id);
+    // Invariant: a link is only meaningful while the status is link-active.
+    if (!linkTransition.LINK_ACTIVE_STATUSES.has(row.status)) {
+      expect(row.linked_printer_id).toBeNull();
+    } else {
+      expect(row.linked_printer_id).toBe(printerId);
+    }
+  });
+});
+
+// The db.js one-time backfill that HEALS pre-existing stale links (rows already
+// in a non-active status carrying a linked_printer_id from before the forward-
+// clearing fix). A throwaway DB is pre-seeded with stale + active linked rows,
+// then db.js is required in isolation so its startup migrations — including the
+// backfill — run against that seed. FAILS if the backfill in db.js is removed.
+describe('db.js stale linked_printer_id backfill (migration.stale_link_backfill_v1)', () => {
+  let tmpPath, savedEnv;
+
+  function seed() {
+    tmpPath = path.join(os.tmpdir(), `printfarm-backfill-${process.pid}-${Date.now()}-${Math.random().toString(36).slice(2)}.db`);
+    const s = new Database(tmpPath);
+    // printerId nullable so db.js's NOT-NULL-relax table rebuild does NOT fire.
+    s.exec(`
+      CREATE TABLE printers (id INTEGER PRIMARY KEY AUTOINCREMENT, name TEXT NOT NULL, color TEXT NOT NULL);
+      CREATE TABLE jobs (
+        id INTEGER PRIMARY KEY AUTOINCREMENT,
+        printerId INTEGER,
+        name TEXT NOT NULL,
+        status TEXT DEFAULT 'Planned',
+        start TEXT,
+        end TEXT,
+        linked_printer_id INTEGER
+      );
+    `);
+    s.prepare('INSERT INTO printers (name,color) VALUES (?,?)').run('P1', '#fff'); // id 1
+    const ins = s.prepare('INSERT INTO jobs (printerId,name,status,linked_printer_id) VALUES (?,?,?,?)');
+    ins.run(1, 'stale-post', 'Post Printing', 1);       // stale -> must be cleared
+    ins.run(1, 'stale-done', 'Done', 1);                // stale -> must be cleared
+    ins.run(1, 'stale-null', null, 1);                  // NULL status -> stale, must be cleared
+    ins.run(1, 'active-print', 'Printing', 1);          // active -> must be retained
+    ins.run(1, 'active-pause', 'Paused', 1);            // active -> must be retained
+    ins.run(1, 'active-awaiting', STATUS, 1);           // 'Awaiting Printer' -> active, must be retained
+    s.close();
+  }
+
+  // Insert a row straight into the seeded file, bypassing db.js. Used to drop a
+  // fresh stale row AFTER the migration has already run + marked itself done.
+  const insertRaw = (name, status, link) => {
+    const raw = new Database(tmpPath);
+    raw.prepare('INSERT INTO jobs (printerId,name,status,linked_printer_id) VALUES (?,?,?,?)')
+      .run(1, name, status, link);
+    raw.close();
+  };
+
+  const requireDbFresh = () => {
+    let fresh;
+    jest.isolateModules(() => { fresh = require('../db'); });
+    return fresh;
+  };
+
+  beforeEach(() => {
+    savedEnv = process.env.PLANNER_DB_PATH;
+    seed();
+    process.env.PLANNER_DB_PATH = tmpPath;
+  });
+
+  afterEach(() => {
+    if (savedEnv === undefined) delete process.env.PLANNER_DB_PATH;
+    else process.env.PLANNER_DB_PATH = savedEnv;
+    try { fs.unlinkSync(tmpPath); } catch { /* ignore */ }
+  });
+
+  test('nulls links on inactive-status rows, retains them on active-status rows, sets marker', () => {
+    const db = requireDbFresh();
+    const linkOf = n => db.prepare('SELECT linked_printer_id FROM jobs WHERE name=?').get(n).linked_printer_id;
+    expect(linkOf('stale-post')).toBeNull();
+    expect(linkOf('stale-done')).toBeNull();
+    expect(linkOf('stale-null')).toBeNull();       // NULL status is outside the active set
+    expect(linkOf('active-print')).toBe(1);
+    expect(linkOf('active-pause')).toBe(1);
+    expect(linkOf('active-awaiting')).toBe(1);     // 'Awaiting Printer' is the pending-link state
+    expect(db.prepare("SELECT value FROM settings WHERE key='migration.stale_link_backfill_v1'").get()).toBeTruthy();
+    db.close();
+  });
+
+  // The marker must actually SHORT-CIRCUIT the backfill on a second boot. Merely
+  // re-asserting the first boot's rows proves nothing: re-running the same UPDATE
+  // over already-healed rows is a no-op regardless. So this drops a FRESH stale row
+  // (inactive status + live link) into the file after the first boot marked itself
+  // done — if the migration re-ran unconditionally it would clear that row too.
+  // FAILS (link becomes null) if the `if (!staleLinkMarker)` guard in db.js is removed.
+  test('marker short-circuits the backfill: a stale row added after the first boot is left untouched', () => {
+    const db1 = requireDbFresh();
+    expect(db1.prepare("SELECT value FROM settings WHERE key='migration.stale_link_backfill_v1'").get()).toBeTruthy();
+    db1.close();
+
+    insertRaw('stale-added-after-migration', 'Post Printing', 1);
+
+    const db2 = requireDbFresh();
+    expect(
+      db2.prepare('SELECT linked_printer_id FROM jobs WHERE name=?').get('stale-added-after-migration').linked_printer_id
+    ).toBe(1);
+    // First-boot outcome is still intact and the marker was not re-inserted.
+    expect(db2.prepare('SELECT linked_printer_id FROM jobs WHERE name=?').get('active-print').linked_printer_id).toBe(1);
+    expect(db2.prepare('SELECT linked_printer_id FROM jobs WHERE name=?').get('stale-post').linked_printer_id).toBeNull();
+    expect(db2.prepare("SELECT COUNT(*) c FROM settings WHERE key='migration.stale_link_backfill_v1'").get().c).toBe(1);
+    db2.close();
+  });
+});
+
+// Guard the coupling flagged in review: `migration.stale_link_backfill_v1` is a
+// PERMANENT marker, so a DB that already booted never re-runs the backfill. If
+// LINK_ACTIVE_STATUSES changes, rows that become stale under the NEW set are
+// never healed unless the marker version is bumped. Pin the set so that change
+// cannot land silently.
+describe('LINK_ACTIVE_STATUSES ↔ backfill marker version coupling', () => {
+  test('the link-active status set is pinned to the shipped _v1 backfill', () => {
+    expect([...linkTransition.LINK_ACTIVE_STATUSES].sort()).toEqual(
+      ['Awaiting Printer', 'Paused', 'Printing']
+    );
+    // If this assertion fails you changed LINK_ACTIVE_STATUSES. Bump the backfill
+    // marker in db.js ('migration.stale_link_backfill_v1' -> '..._v2') so existing
+    // databases re-run the stale-link heal under the new set, then update this list.
   });
 });
