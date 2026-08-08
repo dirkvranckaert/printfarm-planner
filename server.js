@@ -675,7 +675,13 @@ app.put('/api/jobs/:id', (req, res) => {
   // a follow-up autocommit write. A crash between two separate statements would
   // strand a stale link that the one-time migration.stale_link_backfill_v1 can no
   // longer heal (its marker is already set after the first boot).
-  const clearLink = status !== undefined && !linkTransition.LINK_ACTIVE_STATUSES.has(status);
+  // Derived from the status the row will actually HAVE after this UPDATE, not
+  // from whether the body carried one. PUT is a full-row replace and the UPDATE
+  // below always writes `status`, so an omitted field binds SQL NULL — which is
+  // not link-active. Gating on `status !== undefined` therefore left such a row
+  // inactive while still holding a live linked_printer_id, unreachable for the
+  // backfill. (The web client always sends a status; this covers the raw door.)
+  const clearLink = !linkTransition.LINK_ACTIVE_STATUSES.has(status);
   db.prepare(
     'UPDATE jobs SET printerId=?, name=?, customerName=?, orderNr=?, start=?, end=?, status=?, colors=?, printFile=?, remarks=?, queued=?, durationMins=?, bedType=?, cool_down_mins=?, warm_up_mins=?, items=?, items_lost=?'
     + (clearLink ? ', linked_printer_id=NULL' : '')

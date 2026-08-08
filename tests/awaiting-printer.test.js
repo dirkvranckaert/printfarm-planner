@@ -388,6 +388,26 @@ describe('PATCH /api/jobs/:id — "Link when printer starts" entry (real route)'
     expect(res.status).toBe(200);
     expect(linkOf(id)).toBe(printerId);
   });
+
+  // PUT is a full-row replace: its UPDATE always writes `status`, so a body that
+  // omits the field binds SQL NULL — an inactive status. The unlink must fire on
+  // that path too, otherwise the row lands inactive while still holding a live
+  // linked_printer_id, and migration.stale_link_backfill_v1 can no longer heal it
+  // (its marker is set after the first boot). FAILS if the clear at server.js:678
+  // is gated on `status !== undefined`.
+  test('PUT without a status field leaves no inactive row holding a live link', async () => {
+    const id = linkJob(Date.now(), 'Printing');
+    const res = await request(app).put(`/api/jobs/${id}`).set('Cookie', authCookie)
+      .send({ printerId, name: 'Job', start: iso(Date.now()), end: iso(Date.now() + 3_600_000) });
+    expect(res.status).toBe(200);
+    const row = appDb.prepare('SELECT status, linked_printer_id FROM jobs WHERE id=?').get(id);
+    // Invariant: a link is only meaningful while the status is link-active.
+    if (!linkTransition.LINK_ACTIVE_STATUSES.has(row.status)) {
+      expect(row.linked_printer_id).toBeNull();
+    } else {
+      expect(row.linked_printer_id).toBe(printerId);
+    }
+  });
 });
 
 // The db.js one-time backfill that HEALS pre-existing stale links (rows already
