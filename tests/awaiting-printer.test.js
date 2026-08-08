@@ -19,6 +19,7 @@ process.env.PLANNER_DB_PATH =
 
 const Database = require('better-sqlite3');
 const awaitingPrinter = require('../awaiting-printer');
+const linkTransition = require('../link-transition');
 
 const { STATUS, WINDOW_MS, isWithinStartWindow, assignPending } = awaitingPrinter;
 
@@ -37,7 +38,9 @@ function makeDb() {
       status TEXT DEFAULT 'Planned',
       start TEXT NOT NULL,
       end TEXT NOT NULL,
-      linked_printer_id INTEGER
+      linked_printer_id INTEGER,
+      paused_at TEXT,
+      paused_remaining_ms INTEGER
     );
   `);
   return db;
@@ -149,26 +152,17 @@ describe('awaitingPrinter.assignPending', () => {
   });
 });
 
-// Reproduces the server.js SSE branch: on a printer's RUNNING transition, a
-// linked non-Printing job is flipped to 'Printing' UNLESS it is an out-of-window
-// 'Awaiting Printer' job, in which case it is left pending. Uses the shipped
-// guard so this stays in lockstep with the real handler.
-function simulateRunningTransition(db, printerId, now) {
-  const linked = db.prepare("SELECT * FROM jobs WHERE linked_printer_id=? AND status != 'Done'").all(printerId);
-  for (const job of linked) {
-    if (job.status !== 'Printing') {
-      // Mirror server.js: only a pending 'Awaiting Printer' job (or a resuming
-      // 'Paused' job) may auto-link to 'Printing'. A job that already finished
-      // its print ('Post Printing' or later) with a stale link is never
-      // re-grabbed by the next print.
-      if (job.status !== STATUS && job.status !== 'Paused') continue;
-      if (job.status === STATUS && !isWithinStartWindow(job.start, now)) continue;
-      db.prepare("UPDATE jobs SET status='Printing' WHERE id=?").run(job.id);
-    }
-  }
-}
+// Drive the ACTUAL production transition appliers (link-transition.js) that the
+// server.js SSE stage-transition handler calls — NOT a hand-copied mirror. So a
+// guard reverted in the real module fails these tests. The MQTT/SSE plumbing and
+// push/realign side-effects stay in server.js; the eligibility + status flips
+// under test are exactly the production code path.
+const runRunning = (db, printerId, now) =>
+  linkTransition.applyRunningTransition({ db, printerId, now });
+const runPause = (db, printerId, now) =>
+  linkTransition.applyPauseTransition({ db, printerId, now });
 
-describe('auto-link on RUNNING transition (shipped guard)', () => {
+describe('auto-link on RUNNING transition (production applier)', () => {
   let db, printerId, now;
   beforeEach(() => {
     db = makeDb();
@@ -178,43 +172,42 @@ describe('auto-link on RUNNING transition (shipped guard)', () => {
 
   test('in-window pending job flips to Printing when the printer starts', () => {
     const id = addJob(db, printerId, { status: STATUS, start: iso(now.getTime() + 20 * 60 * 1000), linked_printer_id: printerId });
-    simulateRunningTransition(db, printerId, now);
+    runRunning(db, printerId, now);
     expect(getJob(db, id).status).toBe('Printing');
   });
 
   test('past-start pending job flips to Printing when the printer starts', () => {
     const id = addJob(db, printerId, { status: STATUS, start: iso(now.getTime() - 10 * 60 * 1000), linked_printer_id: printerId });
-    simulateRunningTransition(db, printerId, now);
+    runRunning(db, printerId, now);
     expect(getJob(db, id).status).toBe('Printing');
   });
 
   test('far-ahead pending job is NOT swept up when the printer starts', () => {
     // start became far-future relative to the actual moment the printer started
     const id = addJob(db, printerId, { status: STATUS, start: iso(now.getTime() + 25 * 60 * 60 * 1000), linked_printer_id: printerId });
-    simulateRunningTransition(db, printerId, now);
+    runRunning(db, printerId, now);
     expect(getJob(db, id).status).toBe(STATUS);
   });
 
   test('stale pending job (>24h in the past) is NOT swept up when the printer starts', () => {
     // start fell outside the now-WINDOW_MS lower bound by the time the printer started
     const id = addJob(db, printerId, { status: STATUS, start: iso(now.getTime() - 25 * 60 * 60 * 1000), linked_printer_id: printerId });
-    simulateRunningTransition(db, printerId, now);
+    runRunning(db, printerId, now);
     expect(getJob(db, id).status).toBe(STATUS);
   });
 
   // Regression: a job left in 'Post Printing' with a STALE linked_printer_id
   // (e.g. finished manually, which does not clear the link) must never be
   // re-grabbed and overwritten to 'Printing' when the printer's NEXT print
-  // starts. Fails against the old code (query matched 'status != Done' and the
-  // RUNNING branch flipped any non-Printing linked job), passes with the
-  // eligibility guard.
+  // starts. FAILS if link-transition.eligibleToStart is reverted to admit a
+  // non-pending/non-paused job.
   test('finished Post Printing job with a stale link is NOT re-grabbed when the printer restarts', () => {
     const stale = addJob(db, printerId, {
       status: 'Post Printing',
       start: iso(now.getTime() - 60 * 60 * 1000),
       linked_printer_id: printerId,
     });
-    simulateRunningTransition(db, printerId, now);
+    runRunning(db, printerId, now);
     expect(getJob(db, stale).status).toBe('Post Printing');
   });
 
@@ -225,7 +218,7 @@ describe('auto-link on RUNNING transition (shipped guard)', () => {
       start: iso(now.getTime() - 30 * 60 * 1000),
       linked_printer_id: printerId,
     });
-    simulateRunningTransition(db, printerId, now);       // A starts -> Printing
+    runRunning(db, printerId, now);                      // A starts -> Printing
     expect(getJob(db, a).status).toBe('Printing');
     // Manual finish path leaves linked_printer_id set (the bug's precondition).
     db.prepare("UPDATE jobs SET status='Post Printing' WHERE id=?").run(a);
@@ -236,10 +229,63 @@ describe('auto-link on RUNNING transition (shipped guard)', () => {
       start: iso(now.getTime() + 5 * 60 * 1000),
       linked_printer_id: printerId,
     });
-    simulateRunningTransition(db, printerId, now);        // next print starts
+    runRunning(db, printerId, now);                       // next print starts
 
     expect(getJob(db, b).status).toBe('Printing');        // new job linked
     expect(getJob(db, a).status).toBe('Post Printing');   // old job untouched
+  });
+});
+
+describe('PAUSE / resume transition (production applier)', () => {
+  let db, printerId, now;
+  beforeEach(() => {
+    db = makeDb();
+    printerId = addPrinter(db);
+    now = new Date('2026-07-29T12:00:00Z');
+  });
+
+  // A genuinely-printing job pauses, then resumes cleanly on the next RUNNING.
+  test('a Printing job pauses on PAUSE and resumes to Printing on RUNNING', () => {
+    const id = addJob(db, printerId, {
+      status: 'Printing',
+      start: iso(now.getTime() - 10 * 60 * 1000),
+      end: iso(now.getTime() + 20 * 60 * 1000),
+      linked_printer_id: printerId,
+    });
+    runPause(db, printerId, now);
+    expect(getJob(db, id).status).toBe('Paused');
+    expect(getJob(db, id).paused_at).not.toBeNull();
+    runRunning(db, printerId, now);
+    expect(getJob(db, id).status).toBe('Printing');
+    expect(getJob(db, id).paused_at).toBeNull();
+  });
+
+  // CRITICAL regression (Codex round 1, server.js PAUSE route): a stale
+  // 'Post Printing' job A with an intact link must NOT be paused on the PAUSE
+  // edge — otherwise the PAUSE->RUNNING resume re-admits it to 'Printing'. The
+  // genuinely-printing new job B must pause+resume normally. FAILS if
+  // link-transition.eligibleToPause is reverted to pause any linked job.
+  test('stale-A / printing-B: printer RUNNING->PAUSE->RUNNING leaves A Post Printing, B pauses+resumes', () => {
+    const a = addJob(db, printerId, {
+      status: 'Post Printing',
+      start: iso(now.getTime() - 60 * 60 * 1000),
+      end: iso(now.getTime() - 30 * 60 * 1000),
+      linked_printer_id: printerId,          // stale link left intact
+    });
+    const b = addJob(db, printerId, {
+      status: 'Printing',
+      start: iso(now.getTime() - 5 * 60 * 1000),
+      end: iso(now.getTime() + 25 * 60 * 1000),
+      linked_printer_id: printerId,
+    });
+
+    runPause(db, printerId, now);            // RUNNING -> PAUSE
+    expect(getJob(db, a).status).toBe('Post Printing');   // A untouched
+    expect(getJob(db, b).status).toBe('Paused');          // only B paused
+
+    runRunning(db, printerId, now);          // PAUSE -> RUNNING
+    expect(getJob(db, a).status).toBe('Post Printing');   // A still untouched
+    expect(getJob(db, b).status).toBe('Printing');        // B resumed
   });
 });
 

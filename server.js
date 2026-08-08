@@ -9,6 +9,7 @@ const push   = require('./push');
 const pause  = require('./pause');
 const projects = require('./projects');
 const awaitingPrinter = require('./awaiting-printer');
+const linkTransition = require('./link-transition');
 const itemsMigration = require('./itemsMigration');
 const { parse3mf, extractThumbnails } = require('./parse3mf');
 const { matchPrinter } = require('./printer-match');
@@ -195,32 +196,14 @@ brands.onUpdate((brandKey, status) => {
       "SELECT * FROM jobs WHERE linked_printer_id=? AND status != 'Done'"
     ).all(printer.id);
 
-    linked.forEach(job => {
-      if (curr === 'RUNNING' && job.status !== 'Printing') {
-        // Auto-link ONLY a job still eligible to (re)start printing: a pending
-        // 'Awaiting Printer' job, or a 'Paused' job resuming. A job that has
-        // already finished its print ('Post Printing' or any later state) but
-        // still carries a stale linked_printer_id must NEVER be re-grabbed when
-        // the printer starts its NEXT print — the printer has moved on to a new
-        // job. Without this guard a job left in 'Post Printing' with its link
-        // intact (e.g. finished manually, which does not clear the link) got
-        // re-selected and overwritten back to 'Printing' by the next print.
-        if (job.status !== awaitingPrinter.STATUS && job.status !== 'Paused') {
-          return;
-        }
-        // 'Awaiting Printer' = pre-linked via "Link when printer starts". Only
-        // auto-link if the job's start is still within the window at THIS
-        // moment; a printer starting a far-ahead job's sibling must not sweep
-        // it up. Out-of-window pending jobs stay pending (user resolves them).
-        if (job.status === awaitingPrinter.STATUS
-            && !awaitingPrinter.isWithinStartWindow(job.start, new Date())) {
-          return;
-        }
-        // First RUNNING tick after linking, or resume from PAUSE. Mark as
-        // Printing, clear any pause snapshot, and snap start/end to reflect
-        // the actual reported remaining (may differ from scheduled end).
-        if (job.status === 'Paused') pause.endPause({ db, jobId: job.id });
-        db.prepare("UPDATE jobs SET status='Printing', paused_at=NULL, paused_remaining_ms=NULL WHERE id=?").run(job.id);
+    // RUNNING edge: flip every eligible linked job to 'Printing'. Eligibility +
+    // the DB flip live in link-transition.applyRunningTransition (single source
+    // of truth, shared with the Jest suite); here we layer realign + push on
+    // the jobs it started. A finished 'Post Printing' job with a stale link is
+    // never re-grabbed — that guard is inside the applier.
+    if (curr === 'RUNNING') {
+      const { started } = linkTransition.applyRunningTransition({ db, printerId: printer.id, now: new Date() });
+      for (const job of started) {
         const refreshed = db.prepare('SELECT * FROM jobs WHERE id=?').get(job.id);
         tryRealign(printer, refreshed, status.remaining, { snapStart: true });
         broadcastJobsUpdated();
@@ -228,6 +211,9 @@ brands.onUpdate((brandKey, status) => {
           push.sendToAll({ title: 'PrintFarm', body: `Printer ${printer.name} has started printing`, tag: `started-${printer.id}`, url: `/#job/${job.id}` });
         }
       }
+    }
+
+    linked.forEach(job => {
       if ((curr === 'FINISH' || curr === 'IDLE')
           && (prev === 'RUNNING' || prev === 'PAUSE')
           && (job.status === 'Printing' || job.status === 'Paused')) {
@@ -249,10 +235,16 @@ brands.onUpdate((brandKey, status) => {
           push.sendToAll({ title: 'PrintFarm', body, tag: `done-${printer.id}`, url: `/#job/${job.id}` });
         }
       }
-      if (curr === 'PAUSE' && prev === 'RUNNING') {
-        // Paused mid-print — snapshot remaining time, flip status to
-        // 'Paused', and let the periodic pauseTick drift the bar forward.
-        pause.beginPause({ db, jobId: job.id, now: new Date() });
+    });
+
+    // PAUSE edge: snapshot + flip ONLY genuinely-'Printing' jobs to 'Paused'
+    // (eligibility + DB write in link-transition.applyPauseTransition, shared
+    // with the Jest suite). A stale 'Post Printing' job is left untouched — it
+    // must never become 'Paused' and then be re-admitted to 'Printing' on
+    // resume. Push notifications layer on the jobs it paused.
+    if (curr === 'PAUSE' && prev === 'RUNNING') {
+      const { paused } = linkTransition.applyPauseTransition({ db, printerId: printer.id, now: new Date() });
+      for (const job of paused) {
         broadcastJobsUpdated();
         if (push.isEnabled('paused')) {
           let body = `Printer ${printer.name} PAUSED`;
@@ -260,7 +252,7 @@ brands.onUpdate((brandKey, status) => {
           push.sendToAll({ title: 'PrintFarm', body, tag: `paused-${printer.id}`, requireInteraction: true, url: `/#job/${job.id}` });
         }
       }
-    });
+    }
 
     // No linked job: push for stage transitions
     if (linked.length === 0) {
@@ -680,6 +672,14 @@ app.put('/api/jobs/:id', (req, res) => {
   // If the user moves a job out of 'Paused' via the edit dialog, clear the
   // stale pause snapshot so it does not drift on the next tick.
   if (status !== 'Paused') pause.clearPauseFields({ db, jobId: Number(req.params.id) });
+  // An explicit status change that leaves the link-active set (Awaiting Printer
+  // / Printing / Paused) — i.e. moves to Post Printing / Done / Planned — clears
+  // any stale linked_printer_id, so the printer stops being shown busy and the
+  // SSE/pause paths never re-grab the job. Keeps the manual path consistent with
+  // the SSE finish and pause.finishFromPause (both already null the link).
+  if (status !== undefined && !linkTransition.LINK_ACTIVE_STATUSES.has(status)) {
+    db.prepare('UPDATE jobs SET linked_printer_id=NULL WHERE id=?').run(req.params.id);
+  }
   applyProjectToJob(Number(req.params.id), req.body.project);
   const projectId = db.prepare('SELECT project_id FROM jobs WHERE id=?').get(req.params.id)?.project_id ?? null;
   res.json({ id: Number(req.params.id), ...req.body, start: normStart, end: normEnd, queued: isQueued, cool_down_mins: coolDownMins, warm_up_mins: warmUpMins, project_id: projectId });
@@ -769,6 +769,13 @@ app.patch('/api/jobs/:id', (req, res) => {
   const patchedStatus = Object.fromEntries(fields).status;
   if (patchedStatus !== undefined && patchedStatus !== 'Paused') {
     pause.clearPauseFields({ db, jobId: Number(req.params.id) });
+  }
+  // An explicit status change that leaves the link-active set (Awaiting Printer
+  // / Printing / Paused) clears any stale linked_printer_id — same rule as the
+  // PUT edit path — so a job finished via a manual status change no longer marks
+  // its printer busy or gets re-grabbed by the SSE/pause paths.
+  if (patchedStatus !== undefined && !linkTransition.LINK_ACTIVE_STATUSES.has(patchedStatus)) {
+    db.prepare('UPDATE jobs SET linked_printer_id=NULL WHERE id=?').run(req.params.id);
   }
   res.json({ id: Number(req.params.id), ...req.body, ...Object.fromEntries(fields) });
 });
