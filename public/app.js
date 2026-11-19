@@ -292,7 +292,8 @@ function renderStatusPanel(connectedPrinters) {
   const badge  = document.getElementById('printer-status-badge');
   if (!panel || !btn || !badge) return;
 
-  const list = connectedPrinters ?? printers.filter(p => printerStatusKey(p));
+  // Respect the same favourite (visibility) setting as the day-view columns
+  const list = (connectedPrinters ?? printers.filter(p => printerStatusKey(p))).filter(p => p.favourite);
 
   // Hide the button only when there are no connected printers at all
   btn.classList.toggle('hidden', list.length === 0);
@@ -1329,6 +1330,16 @@ function rebuildJobsCache(allJobs) {
   allJobs.forEach(j => { jobsCache[j.id] = j; });
 }
 
+// The body (#day-scroll) loses its vertical scrollbar width from the shared
+// column space; the sticky header has no scrollbar. Reserve the same width in
+// the header so header borders and body column lines share one column template.
+function syncDayHeaderScrollbar() {
+  const scroll = document.getElementById('day-scroll');
+  const header = document.querySelector('.day-view-header');
+  if (!scroll || !header) return;
+  header.style.setProperty('--day-sbw', `${Math.max(0, scroll.offsetWidth - scroll.clientWidth)}px`);
+}
+
 async function renderDay() {
   const container = document.getElementById('calendar-container');
   if (!printers.length) { renderEmpty(container); return; }
@@ -1517,6 +1528,7 @@ async function renderDay() {
   const prevScrollTop = document.getElementById('day-scroll')?.scrollTop ?? 0;
 
   container.innerHTML = h;
+  syncDayHeaderScrollbar();
 
   // On the very first render #day-scroll didn't exist yet, so computeDayScale()
   // used an estimate. Now that it's in the DOM we can measure it exactly; if the
