@@ -68,7 +68,7 @@ function boot() {
   T.neutralize();
   const nav = new Date(); nav.setHours(0, 0, 0, 0);
   T.setEnv({
-    printers: [{ id: 5, name: 'Bambulab H2C', color: '#0088cc', brand: 'bambulab' }],
+    printers: [{ id: 5, name: 'Bambulab H2C', color: '#0088cc', brand: 'bambulab', favourite: 1 }],
     closures: [],
     navDate: nav,
   });

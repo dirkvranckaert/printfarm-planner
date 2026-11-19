@@ -292,10 +292,16 @@ function renderStatusPanel(connectedPrinters) {
   const badge  = document.getElementById('printer-status-badge');
   if (!panel || !btn || !badge) return;
 
-  const list = connectedPrinters ?? printers.filter(p => printerStatusKey(p));
+  // Respect the same favourite (visibility) setting as the day-view columns
+  const list = (connectedPrinters ?? printers.filter(p => printerStatusKey(p))).filter(p => p.favourite);
 
   // Hide the button only when there are no connected printers at all
   btn.classList.toggle('hidden', list.length === 0);
+  if (list.length === 0) {
+    // Nothing to show: never leave an empty panel open
+    panel.classList.add('hidden');
+    btn.setAttribute('aria-expanded', 'false');
+  }
 
   // Badge dot: green if any printer is RUNNING, grey otherwise
   const anyRunning = list.some(p => getPrinterLiveStatus(p)?.stage === 'RUNNING');
@@ -327,6 +333,7 @@ function toggleStatusPanel() {
     btn.setAttribute('aria-expanded', 'false');
   } else {
     renderStatusPanel(); // always rebuild with latest data before showing
+    if (btn.classList.contains('hidden')) return; // no visible printers
     panel.classList.remove('hidden');
     btn.setAttribute('aria-expanded', 'true');
   }
@@ -1155,7 +1162,7 @@ async function renderTodayPanel() {
 
   // Utilization per printer
   h += '<div>';
-  printers.forEach(p => {
+  printers.filter(p => p.favourite).forEach(p => {
     const pJobs = todayJobs.filter(j => j.printerId === p.id);
     const busyMins = pJobs.reduce((sum, j) => sum + minutesOnDay(j, today), 0);
     const pct = Math.min(100, Math.round(busyMins / 1440 * 100));
@@ -1329,6 +1336,29 @@ function rebuildJobsCache(allJobs) {
   allJobs.forEach(j => { jobsCache[j.id] = j; });
 }
 
+// The body (#day-scroll) loses its vertical scrollbar width from the shared
+// column space; the sticky header has no scrollbar. Reserve the same width in
+// the header so header borders and body column lines share one column template.
+function syncDayHeaderScrollbar() {
+  const scroll = document.getElementById('day-scroll');
+  const header = document.querySelector('.day-view-header');
+  if (!scroll || !header) return;
+  header.style.setProperty('--day-sbw', `${Math.max(0, scroll.offsetWidth - scroll.clientWidth)}px`);
+}
+
+// Keep the header in step with later geometry changes (drag-expanded body,
+// today/queue panel toggles, window resize) that don't go through renderDay().
+let _dayScrollObserver = null;
+function observeDayScroll() {
+  if (_dayScrollObserver) { _dayScrollObserver.disconnect(); _dayScrollObserver = null; }
+  const scroll = document.getElementById('day-scroll');
+  if (!scroll || typeof ResizeObserver === 'undefined') return;
+  _dayScrollObserver = new ResizeObserver(() => syncDayHeaderScrollbar());
+  _dayScrollObserver.observe(scroll);
+  const body = scroll.firstElementChild; // body height change adds/removes the scrollbar
+  if (body) _dayScrollObserver.observe(body);
+}
+
 async function renderDay() {
   const container = document.getElementById('calendar-container');
   if (!printers.length) { renderEmpty(container); return; }
@@ -1352,13 +1382,7 @@ async function renderDay() {
   const visiblePrinters = printers.filter(p => p.favourite);
 
   if (!visiblePrinters.length) {
-    container.innerHTML = `
-      <div class="empty-state">
-        <div style="font-size:52px">📅</div>
-        <h2>No printers shown in day view</h2>
-        <p>Open Printer Settings and check <strong>Show in day view</strong> for the printers you want to schedule here.</p>
-        <button class="btn btn-primary" onclick="openPrintersModal()">Open Printer Settings</button>
-      </div>`;
+    renderNoVisiblePrinters(container);
     return;
   }
 
@@ -1371,7 +1395,7 @@ async function renderDay() {
   visiblePrinters.forEach(p => {
     h += `<div class="day-printer-header" style="color:${p.color}">${escHtml(p.name)}</div>`;
   });
-  h += '<button class="day-settings-btn" onclick="openPrintersModal()" title="Printer settings (choose favourites for day view)">⚙</button>';
+  h += '<button class="day-settings-btn" onclick="openPrintersModal()" title="Printer settings (choose which printers show in the planner)">⚙</button>';
   h += '</div>';
 
   // Closure banner
@@ -1517,6 +1541,8 @@ async function renderDay() {
   const prevScrollTop = document.getElementById('day-scroll')?.scrollTop ?? 0;
 
   container.innerHTML = h;
+  syncDayHeaderScrollbar();
+  observeDayScroll();
 
   // On the very first render #day-scroll didn't exist yet, so computeDayScale()
   // used an estimate. Now that it's in the DOM we can measure it exactly; if the
@@ -2075,6 +2101,7 @@ function updateNowLine() {
 async function renderWeek() {
   const container = document.getElementById('calendar-container');
   if (!printers.length) { renderEmpty(container); return; }
+  if (!printers.some(p => p.favourite)) { renderNoVisiblePrinters(container); return; }
 
   const ws   = weekStart(navDate);
   const days = Array.from({length:7}, (_,i) => addDays(ws,i));
@@ -2100,7 +2127,7 @@ async function renderWeek() {
   });
   h += '</tr></thead><tbody>';
 
-  printers.forEach(p => {
+  printers.filter(p => p.favourite).forEach(p => {
     h += '<tr>';
     h += `<td class="week-printer-label">
             <span style="display:inline-flex;align-items:center;gap:6px">
@@ -2384,6 +2411,16 @@ async function renderUpcoming() {
 // =============================================================================
 // Empty state
 // =============================================================================
+function renderNoVisiblePrinters(container) {
+  container.innerHTML = `
+    <div class="empty-state">
+      <div style="font-size:52px">📅</div>
+      <h2>No printers shown in the planner</h2>
+      <p>Open Printer Settings and check <strong>Show in planner</strong> for the printers you want to schedule here.</p>
+      <button class="btn btn-primary" onclick="openPrintersModal()">Open Printer Settings</button>
+    </div>`;
+}
+
 function renderEmpty(container) {
   container.innerHTML = `
     <div class="empty-state">
@@ -3430,7 +3467,7 @@ async function refreshPrinterList() {
       <div class="printer-color-dot" style="background:${p.color}"></div>
       <span class="printer-item-name">${escHtml(p.name)}${printerStatusPillHtml(p)}${bambuIcon}</span>
       <div class="printer-item-actions">
-        <button class="btn-icon fav-btn${p.favourite ? ' fav-active' : ''}" onclick="togglePrinterFavourite(${p.id}, ${p.favourite ? 0 : 1})" title="${p.favourite ? 'Hide in day view' : 'Show in day view'}">👁</button>
+        <button class="btn-icon fav-btn${p.favourite ? ' fav-active' : ''}" onclick="togglePrinterFavourite(${p.id}, ${p.favourite ? 0 : 1})" title="${p.favourite ? 'Hide in planner' : 'Show in planner'}">👁</button>
         <button class="btn-icon pin-btn${p.pinned ? ' pinned' : ''}" onclick="togglePrinterPinned(${p.id}, ${p.pinned ? 0 : 1})" title="${p.pinned ? 'Unpin from topbar' : (pinnedCount >= topbarLimit ? `Max ${topbarLimit} pinned` : 'Pin to topbar')}">⭐</button>
         <button class="btn-icon" onclick="openPrinterDialog(${p.id})" title="Edit">✏️</button>
         <button class="btn-icon danger" onclick="deletePrinter(${p.id})" title="Delete">🗑</button>
@@ -3444,6 +3481,7 @@ async function togglePrinterFavourite(id, newVal) {
   if (!p) return;
   await api('PUT', `/api/printers/${id}`, { ...p, favourite: newVal });
   await refreshPrinterList();
+  renderTopbarStatus(); // status panel/button depend on favourite
   renderCalendar();
 }
 

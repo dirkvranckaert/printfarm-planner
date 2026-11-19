@@ -12,7 +12,7 @@ Built with Node.js + Express + SQLite. Protected by session-based cookie auth. D
 - Multiple printers, each with a custom color and brand
 - Print jobs with customer name, order number, filament colors, print file, status, and remarks
 - **Drag to move or resize jobs in day view** — including across printer columns; buffer blocks (warm-up / cool-down) follow visually during drag; snaps to adjacent job boundaries to prevent overlap
-- **Favourite printers** — mark printers as favourites; only they are shown in day view (all printers still appear in week/month/upcoming). A ⚙ button in the day view header links to printer settings.
+- **Favourite printers** — mark printers as favourites; only they are shown in day view (also hidden from the week view, today overview and status cards). A ⚙ button in the day view header links to printer settings.
 - Queue panel — park jobs with no date yet, schedule them later
 - Closure periods (holidays, breaks) that block scheduling
 - Configurable status colors, default view, queue auto-expand, and topbar display mode on startup
@@ -405,7 +405,7 @@ Printer body fields: `name`, `color` (hex), `brand`, `bambu_serial?`, `pinned?` 
 
 `brand` is a slug string. Known values: `bambulab`, `prusa`, `creality`, `klipper`, `octoprint`, `other`. `bambu_serial` is only relevant when `brand === 'bambulab'`.
 
-`favourite = 1` causes the printer to appear in the day view. If no printers are marked as favourite, all printers are shown.
+`favourite = 1` causes the printer to appear in the planner (day, week, today overview, status cards). If no printers are marked as favourite, all printers are shown.
 `pinned = 1` makes the printer appear in the topbar status chips (subject to `TOPBAR_PRINTER_LIMIT`).
 
 ### Jobs
@@ -505,7 +505,7 @@ CREATE TABLE printers (
   pinned         INTEGER NOT NULL DEFAULT 0,   -- 1 = show in topbar chips
   warm_up_mins   INTEGER NOT NULL DEFAULT 5,
   cool_down_mins INTEGER NOT NULL DEFAULT 15,
-  favourite      INTEGER NOT NULL DEFAULT 1    -- 1 = show in day view
+  favourite      INTEGER NOT NULL DEFAULT 1    -- 1 = show in planner
 );
 
 CREATE TABLE jobs (
