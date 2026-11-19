@@ -60,8 +60,8 @@ describe('week view fills the calendar area', () => {
     expect(ruleBlock('.week-table tbody tr')).toMatch(/height:\s*calc\(100%\s*\/\s*var\(--week-rows/);
   });
 
-  test('renderWeek passes the printer count to CSS via --week-rows', () => {
+  test('renderWeek passes the visible printer count to CSS via --week-rows', () => {
     const APP = fs.readFileSync(path.join(__dirname, '..', 'public', 'app.js'), 'utf8');
-    expect(APP).toMatch(/--week-rows:\$\{printers\.length\}/);
+    expect(APP).toMatch(/--week-rows:\$\{weekPrinters\.length\}/);
   });
 });
