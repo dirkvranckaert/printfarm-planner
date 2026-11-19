@@ -35,3 +35,6 @@ deploy.sh
 .idea/
 *.swp
 *.swo
+
+# One-off local artefacts (screenshots, scratch)
+.context/
