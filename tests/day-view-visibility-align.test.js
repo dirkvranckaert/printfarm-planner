@@ -42,7 +42,7 @@ function boot() {
   window.countAttentionJobs = () => 0;
   window.eval(APP + `
     ;window.__T__ = {
-      renderStatusPanel, renderTopbarStatus, toggleStatusPanel, togglePrinterFavourite,
+      renderStatusPanel, renderTopbarStatus, toggleStatusPanel, togglePrinterFavourite, renderCalendar, savePrinter, deletePrinter, getJobsCache(){ return jobsCache; }, setView(v){ view = v; }, setEditPrintId(i){ editPrintId = i; },
       renderDay, renderWeek, renderTodayPanel,
       setEnv(o){ if(o.printers) printers = o.printers; if(o.navDate) navDate = o.navDate; if('showTodayPanel' in o) showTodayPanel = o.showTodayPanel; closures = []; },
       neutralize(){
@@ -190,5 +190,70 @@ describe('day header / body column template', () => {
     await T.renderDay();
     expect(first.disconnected).toBe(true);
     expect(observers.filter(o => !o.disconnected).length).toBe(1);
+  });
+
+  test('observer is torn down when leaving the day view', async () => {
+    const T = boot(); fakeScrollbar();
+    await T.renderDay();
+    expect(observers.filter(o => !o.disconnected).length).toBe(1);
+    T.setView('week');
+    await T.renderCalendar();
+    expect(observers.filter(o => !o.disconnected).length).toBe(0);
+  });
+
+  test('observer is torn down when day view has zero visible printers', async () => {
+    const T = boot(); fakeScrollbar();
+    await T.renderDay();
+    T.setEnv({ printers: PRINTERS().map(p => ({ ...p, favourite: 0 })) });
+    await T.renderDay();
+    expect(observers.filter(o => !o.disconnected).length).toBe(0);
+    expect(document.querySelector('#calendar-container .empty-state')).not.toBeNull();
+  });
+});
+
+describe('week view follow-ups', () => {
+  test('all printers hidden: jobsCache still refreshed, then empty state', async () => {
+    const T = boot();
+    fetchData['/api/jobs'] = [{ id: 9, printerId: 1, name: 'J', start: '2026-11-19T08:00:00', end: '2026-11-19T10:00:00', status: 'Planned' }];
+    T.setEnv({ printers: PRINTERS().map(p => ({ ...p, favourite: 0 })) });
+    await T.renderWeek();
+    expect(T.getJobsCache()[9]).toBeDefined();
+    expect(document.querySelector('#calendar-container .empty-state')).not.toBeNull();
+  });
+
+  test('--week-rows counts visible printers only', async () => {
+    const T = boot();
+    await T.renderWeek();
+    expect(document.querySelector('.week-table').getAttribute('style')).toContain('--week-rows:2');
+  });
+});
+
+describe('printer dialog save / delete refresh the status UI', () => {
+  test('saving "Show in planner" off hides status button and closes panel', async () => {
+    const T = boot();
+    const visible = [mk(1, 'Bambulab P1S', 1)];
+    T.setEnv({ printers: visible });
+    T.setEditPrintId(1);
+    document.getElementById('printer-name').value = 'Bambulab P1S';
+    document.getElementById('printer-favourite').checked = false;
+    const panel = document.getElementById('printer-status-panel');
+    const btn = document.getElementById('btn-printer-status');
+    T.renderStatusPanel(visible);
+    panel.classList.remove('hidden');
+    fetchData['/api/printers'] = [mk(1, 'Bambulab P1S', 0)];
+    await T.savePrinter();
+    expect(btn.classList.contains('hidden')).toBe(true);
+    expect(panel.classList.contains('hidden')).toBe(true);
+  });
+
+  test('deleting the last visible printer hides status button', async () => {
+    const T = boot();
+    const visible = [mk(1, 'Bambulab P1S', 1)];
+    T.setEnv({ printers: visible });
+    window.confirm = () => true;
+    T.renderStatusPanel(visible);
+    fetchData['/api/printers'] = [];
+    await T.deletePrinter(1);
+    expect(document.getElementById('btn-printer-status').classList.contains('hidden')).toBe(true);
   });
 });

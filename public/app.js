@@ -1079,6 +1079,7 @@ async function renderCalendar() {
   updateHeader();
   await renderTodayPanel();
   await renderQueuePanel();
+  if (view !== 'day') disconnectDayScroll();
   if      (view === 'day')      await renderDay();
   else if (view === 'week')     await renderWeek();
   else if (view === 'upcoming') await renderUpcoming();
@@ -1349,8 +1350,11 @@ function syncDayHeaderScrollbar() {
 // Keep the header in step with later geometry changes (drag-expanded body,
 // today/queue panel toggles, window resize) that don't go through renderDay().
 let _dayScrollObserver = null;
-function observeDayScroll() {
+function disconnectDayScroll() {
   if (_dayScrollObserver) { _dayScrollObserver.disconnect(); _dayScrollObserver = null; }
+}
+function observeDayScroll() {
+  disconnectDayScroll();
   const scroll = document.getElementById('day-scroll');
   if (!scroll || typeof ResizeObserver === 'undefined') return;
   _dayScrollObserver = new ResizeObserver(() => syncDayHeaderScrollbar());
@@ -1360,6 +1364,7 @@ function observeDayScroll() {
 }
 
 async function renderDay() {
+  disconnectDayScroll(); // re-attached by observeDayScroll() only when a day grid is rendered
   const container = document.getElementById('calendar-container');
   if (!printers.length) { renderEmpty(container); return; }
 
@@ -2101,7 +2106,6 @@ function updateNowLine() {
 async function renderWeek() {
   const container = document.getElementById('calendar-container');
   if (!printers.length) { renderEmpty(container); return; }
-  if (!printers.some(p => p.favourite)) { renderNoVisiblePrinters(container); return; }
 
   const ws   = weekStart(navDate);
   const days = Array.from({length:7}, (_,i) => addDays(ws,i));
@@ -2110,11 +2114,13 @@ async function renderWeek() {
   const allJobs  = await api('GET', '/api/jobs');
   const weekJobs = allJobs.filter(j => !j.queued && overlapsRange(j, ws, re));
   rebuildJobsCache(allJobs);
+  const weekPrinters = printers.filter(p => p.favourite);
+  if (!weekPrinters.length) { renderNoVisiblePrinters(container); return; } // after the cache refresh
   const today    = todayMidnight();
 
   const DAY_NAMES = ['Sun','Mon','Tue','Wed','Thu','Fri','Sat'];
 
-  let h = `<div class="week-view"><table class="week-table" style="--week-rows:${printers.length}"><thead><tr>`;
+  let h = `<div class="week-view"><table class="week-table" style="--week-rows:${weekPrinters.length}"><thead><tr>`;
   h += '<th></th>';
   days.forEach(d => {
     const closed = isDayClosed(d);
@@ -2127,7 +2133,7 @@ async function renderWeek() {
   });
   h += '</tr></thead><tbody>';
 
-  printers.filter(p => p.favourite).forEach(p => {
+  weekPrinters.forEach(p => {
     h += '<tr>';
     h += `<td class="week-printer-label">
             <span style="display:inline-flex;align-items:center;gap:6px">
@@ -3586,6 +3592,7 @@ async function savePrinter() {
 
   document.getElementById('printer-dialog').classList.add('hidden');
   await refreshPrinterList();
+  renderTopbarStatus(); // status button/cards depend on favourite
   renderCalendar();
 }
 
@@ -3598,6 +3605,7 @@ async function deletePrinter(id) {
   if (!confirm(msg)) return;
   await api('DELETE', `/api/printers/${id}`);
   await refreshPrinterList();
+  renderTopbarStatus();
   renderCalendar();
 }
 

@@ -405,7 +405,7 @@ Printer body fields: `name`, `color` (hex), `brand`, `bambu_serial?`, `pinned?` 
 
 `brand` is a slug string. Known values: `bambulab`, `prusa`, `creality`, `klipper`, `octoprint`, `other`. `bambu_serial` is only relevant when `brand === 'bambulab'`.
 
-`favourite = 1` causes the printer to appear in the planner (day, week, today overview, status cards). If no printers are marked as favourite, all printers are shown.
+`favourite = 1` causes the printer to appear in the planner (day, week, today overview, status cards). If no printers are marked as favourite, the day and week views show an empty state pointing to Printer Settings, status cards disappear and the today overview lists no printers.
 `pinned = 1` makes the printer appear in the topbar status chips (subject to `TOPBAR_PRINTER_LIMIT`).
 
 ### Jobs
