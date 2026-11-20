@@ -255,15 +255,15 @@ body {
 .schip-wrap:hover .schip-popup { display: block; }
 
 /* Printer status panel — multi-column on wide screens */
+/* One equal-width card per visible printer (--ps-cols is set by renderStatusPanel),
+   filling the full row; starts at the day-column edge (past the time gutter) so
+   card N sits roughly above day column N. Each track is at least 220px, so when
+   n cards do not fit they wrap instead of squashing the AMS slot grid. */
 @media (min-width: 761px) {
   .printer-status-panel {
     display: grid;
-    grid-template-columns: repeat(3, 1fr);
-  }
-}
-@media (min-width: 1200px) {
-  .printer-status-panel {
-    grid-template-columns: repeat(4, 1fr);
+    grid-template-columns: repeat(auto-fit, minmax(max(220px, calc(100% / var(--ps-cols, 3) - 10px)), 1fr));
+    padding-left: var(--time-col-w);
   }
 }
 .spopup-name { font-weight: 600; font-size: 13px; color: var(--text); margin-bottom: 3px; }

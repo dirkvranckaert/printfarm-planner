@@ -307,7 +307,8 @@ function renderStatusPanel(connectedPrinters) {
   const anyRunning = list.some(p => getPrinterLiveStatus(p)?.stage === 'RUNNING');
   badge.innerHTML  = list.length ? `<span class="status-badge" style="background:${anyRunning ? '#22c55e' : '#94a3b8'}"></span>` : '';
 
-  // Build cards
+  // Build cards (one equal-width grid track per visible printer, see style.css)
+  panel.style.setProperty('--ps-cols', String(Math.max(1, list.length)));
   panel.innerHTML = list.map(p => {
     const s   = getPrinterLiveStatus(p);
     const label = printerStatusLabel(s);
