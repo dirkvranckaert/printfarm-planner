@@ -63,7 +63,7 @@ Dirk (primary), potentially other Printseed users. Accessed via browser (PWA-cap
   - Projecten LIST modal (`public/app.js` `projectCounterHtml`): line1 `jobs X/Y`, line2 `items A/B · N bezig` / `· N verlies`.
 
 - **3MF import** (commits `c32afb3`, `b0b603e`, `e8810eb`) — import a Bambu 3MF as print jobs.
-  - **Wire format:** endpoints take **raw `application/octet-stream` body, NOT multipart**. Cookie auth only (`POST /login` → `pf_session`, no API tokens).
+  - **Wire format:** endpoints take **raw `application/octet-stream` body, NOT multipart**. Uploader auths with `Authorization: Bearer pf_...` API token (Settings → API Tokens, `api-tokens.js`, table `api_tokens`, hash-only, no expiry); browsers use cookie (`POST /login` → `pf_session`). Bearer header present but invalid → always 401 `{"error":"invalid_token"}`, never falls back to cookie. Tokens can't manage tokens (403 `token_management_requires_session`). Endpoints: see README REST section.
     - `POST /api/parse-3mf` — raw bytes → `{plates, thumbnails, printerName, sliced}` (preview).
     - `POST /api/import-3mf-schedule` — raw bytes + `X-Schedule` header (URI-encoded JSON). `mode:"queue"` = queue-only: `queued=1, start='', end='', status='Planned'`, skips the time-slot branch. Response `201 {jobs, file, project_id}`. `first-available`/`manual` modes kept for backward-compat; web always sends `queue`.
   - **One job per plate** — every plate → separate job (auto-named, thumbnail carried, `items` = `plate.objectCount`).
@@ -122,6 +122,7 @@ This deploy is **standing-authorised for the team** (Senne / release engineer) v
 
 ## Gotchas
 
+- **Browser session = fixed 7-day `SESSION_TTL`, NOT sliding:** `expires_at` set at login, never renewed; SQLite-backed, survives restarts. Was root cause of uploader relogins; API tokens are the fix for non-browser clients.
 - **Deploy WARN is normal:** infra `deploy.sh` does pm2 delete+start, so "not running, starting" WARN is expected and the pm2 id changes every deploy.
 - **pm2 cwd caching:** pm2 caches cwd at first start. Delete + restart if you change ecosystem.config.js.
 - **Service worker:** `public/sw.js` shell assets (`/`, `index.html`, `style.css`, `statusCount.js`, `app.js`) are **network-first** since v8 (cache = offline fallback only). Current `CACHE_NAME`: `printfarm-v8`. Effect: future JS fixes reach browsers on next load WITHOUT a manual cache bump (previously cache-first, so every shell-asset change needed a `CACHE_NAME` bump in the same commit). Intended tradeoffs: no fetch timeout; a server 5xx surfaces instead of falling back to the cached shell. `skipWaiting()`, activate-time cache purge and `clients.claim()` still wired.
