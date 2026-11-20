@@ -40,6 +40,20 @@ function cleanupOrphanUploads(fileNames) {
 }
 
 const app = express();
+
+// --- API token (Bearer) resolution: the FIRST middleware, ahead of body
+// parsing, CORS and every route (incl. anonymous ones), so a bad/revoked/empty
+// token is always 401 JSON and never a 400/413 parse error, redirect, anonymous
+// 200, or silent fall-through to cookie auth.
+app.use((req, res, next) => {
+  const bearer = apiTokens.parseBearer(req);
+  if (bearer === null) return next();
+  const row = apiTokens.authenticate(db, bearer);
+  if (!row) return res.status(401).json({ error: 'invalid_token' });
+  req.apiToken = row;
+  next();
+});
+
 app.use(express.json());
 
 // --- CORS for cross-app requests (optional, only when sibling URLs configured) ---
@@ -76,18 +90,6 @@ function isValidSession(token) {
   if (Date.now() > row.expires_at) { db.prepare('DELETE FROM sessions WHERE token=?').run(token); return false; }
   return true;
 }
-
-// --- API token (Bearer) resolution: runs before EVERY route, incl. the
-// anonymous ones, so a bad/revoked/empty token is always 401 JSON and never a
-// redirect, an anonymous 200, or a silent fall-through to cookie auth.
-app.use((req, res, next) => {
-  const bearer = apiTokens.parseBearer(req);
-  if (bearer === null) return next();
-  const row = apiTokens.authenticate(db, bearer);
-  if (!row) return res.status(401).json({ error: 'invalid_token' });
-  req.apiToken = row;
-  next();
-});
 
 // --- Auth routes (bypass middleware) ---
 app.get('/login', (req, res) => {

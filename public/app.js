@@ -3914,9 +3914,14 @@ async function createApiToken() {
   if (!name) { nameEl.focus(); return; }
   const t = await api('POST', '/api/tokens', { name });
   nameEl.value = '';
+  loadApiTokens();
+  // User navigated away (other tab / closed Settings) while the request was in
+  // flight: the secret is never shown; they can revoke and recreate.
+  const visible = !document.getElementById('settings-modal').classList.contains('hidden')
+    && !document.querySelector('.settings-panel[data-panel="tokens"]').classList.contains('hidden');
+  if (!visible) return;
   document.getElementById('token-new-value').value = t.token;
   document.getElementById('token-new').classList.remove('hidden');
-  loadApiTokens();
 }
 
 async function loadConnectedApps() {
@@ -4112,6 +4117,7 @@ async function importData(file) {
 // =============================================================================
 function closeModal(id) {
   document.getElementById(id).classList.add('hidden');
+  if (id === 'settings-modal') clearNewApiToken();
 }
 
 function toDateKey(date) {

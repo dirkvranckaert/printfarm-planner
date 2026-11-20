@@ -71,6 +71,13 @@ describe('API tokens (real routes via supertest)', () => {
     }
   });
 
+  test('bad Bearer + malformed JSON body -> 401, not 400 parse error', async () => {
+    const res = await request(app).post('/api/jobs')
+      .set('Authorization', 'Bearer pf_nope').set('Content-Type', 'application/json').send('{bad json');
+    expect(res.status).toBe(401);
+    expect(res.body).toEqual({ error: 'invalid_token' });
+  });
+
   test('empty Bearer credential -> 401, not cookie fall-through', async () => {
     for (const h of ['Bearer', 'Bearer ', 'bearer   ']) {
       const res = await request(app).get('/api/jobs').set('Cookie', cookie).set('Authorization', h);
