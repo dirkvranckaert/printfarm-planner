@@ -396,6 +396,7 @@
           <button class="tab" data-stab="notifications">Notifications</button>
           <button class="tab" data-stab="data">Data</button>
           <button class="tab" data-stab="apps">Connected Apps</button>
+          <button class="tab" data-stab="tokens">API Tokens</button>
         </div>
 
         <!-- General -->
@@ -513,6 +514,23 @@
         <!-- Connected Apps -->
         <div class="settings-panel hidden" data-panel="apps">
           <div id="connected-apps-panel" style="font-size:13px;color:var(--text-muted)">Loading...</div>
+        </div>
+
+        <!-- API Tokens -->
+        <div class="settings-panel hidden" data-panel="tokens">
+          <p style="font-size:12px;color:var(--text-muted);margin:0 0 8px">Tokens let tools such as the macOS uploader sign in without a password. They do not expire; revoke one to cut access.</p>
+          <div style="display:flex;gap:8px">
+            <input type="text" id="token-name" placeholder="Token name (e.g. Uploader Mac)" maxlength="100" style="flex:1">
+            <button type="button" id="btn-token-create" class="btn btn-secondary">Create token</button>
+          </div>
+          <div id="token-new" class="hidden" style="margin-top:10px;padding:8px;border:1px solid var(--border);border-radius:6px">
+            <div style="font-size:12px;margin-bottom:4px">Copy this token now. It will not be shown again.</div>
+            <div style="display:flex;gap:8px">
+              <input type="text" id="token-new-value" readonly style="flex:1;font-family:monospace">
+              <button type="button" id="btn-token-copy" class="btn btn-secondary">Copy</button>
+            </div>
+          </div>
+          <div id="token-list" style="margin-top:10px;font-size:13px"></div>
         </div>
 
       </div>

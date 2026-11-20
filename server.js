@@ -14,6 +14,7 @@ const itemsMigration = require('./itemsMigration');
 const { parse3mf, extractThumbnails } = require('./parse3mf');
 const { matchPrinter } = require('./printer-match');
 const sharedAuth = require('./shared-auth');
+const apiTokens = require('./api-tokens');
 
 const UPLOADS_DIR = path.join(__dirname, 'data', 'uploads');
 if (!fs.existsSync(UPLOADS_DIR)) fs.mkdirSync(UPLOADS_DIR, { recursive: true });
@@ -39,9 +40,9 @@ function cleanupOrphanUploads(fileNames) {
 }
 
 const app = express();
-app.use(express.json());
 
 // --- CORS for cross-app requests (optional, only when sibling URLs configured) ---
+// First, so even the early Bearer 401 below carries the allowed-origin headers.
 const ALLOWED_ORIGINS = [
   process.env.CALCULATOR_URL, process.env.FILAMENT_URL,
   process.env.CALCULATOR_PUBLIC_URL, process.env.FILAMENT_PUBLIC_URL,
@@ -53,12 +54,27 @@ if (ALLOWED_ORIGINS.length) {
       res.setHeader('Access-Control-Allow-Origin', origin);
       res.setHeader('Access-Control-Allow-Credentials', 'true');
       res.setHeader('Access-Control-Allow-Methods', 'GET,POST,PUT,PATCH,DELETE,OPTIONS');
-      res.setHeader('Access-Control-Allow-Headers', 'Content-Type,X-Schedule,X-Plate-Index');
+      res.setHeader('Access-Control-Allow-Headers', 'Content-Type,Authorization,X-Schedule,X-Plate-Index');
       if (req.method === 'OPTIONS') return res.sendStatus(204);
     }
     next();
   });
 }
+
+// --- API token (Bearer) resolution: ahead of body parsing and every route
+// (incl. anonymous ones), so a bad/revoked/empty token is always 401 JSON and
+// never a 400/413 parse error, redirect, anonymous 200, or silent fall-through
+// to cookie auth. (CORS preflights carry no Authorization, so they pass above.)
+app.use((req, res, next) => {
+  const bearer = apiTokens.parseBearer(req);
+  if (bearer === null) return next();
+  const row = apiTokens.authenticate(db, bearer);
+  if (!row) return res.status(401).json({ error: 'invalid_token' });
+  req.apiToken = row;
+  next();
+});
+
+app.use(express.json());
 
 // --- Session store ---
 const SESSION_TTL = 7 * 24 * 60 * 60 * 1000; // 7 days in ms
@@ -109,12 +125,42 @@ app.get('/logout', (req, res) => {
 app.use((req, res, next) => {
   // Allow PWA assets through unauthenticated
   if (['/favicon.svg', '/manifest.json', '/sw.js', '/apple-touch-icon.png', '/api/config'].includes(req.path)) return next();
+  if (req.apiToken) return next(); // validated by the Bearer middleware above
   const token = parseCookieToken(req);
   if (token && isValidSession(token)) return next();
   // Also accept shared JWT if enabled
   if (sharedAuth.validateSharedToken(req)) return next();
   if (req.path.startsWith('/api/')) return res.status(401).json({ error: 'Unauthorized' });
   res.redirect('/login');
+});
+
+// --- API tokens ---
+// Management is browser-session only: a token cannot mint/list/revoke tokens.
+function requireNotToken(req, res, next) {
+  if (req.apiToken) return res.status(403).json({ error: 'token_management_requires_session' });
+  next();
+}
+
+app.get('/api/token/verify', (req, res) => {
+  if (!req.apiToken) return res.status(401).json({ error: 'invalid_token' });
+  res.json({ user: req.apiToken.owner, tokenName: req.apiToken.name });
+});
+
+app.get('/api/tokens', requireNotToken, (req, res) => {
+  res.json(apiTokens.list(db));
+});
+
+app.post('/api/tokens', requireNotToken, (req, res) => {
+  const name = String(req.body?.name ?? '').trim().slice(0, 100);
+  if (!name) return res.status(400).json({ error: 'name required' });
+  // The full token is returned exactly once, here; only its hash is stored.
+  res.status(201).json(apiTokens.create(db, { name, owner: process.env.ADMIN_USER || 'admin' }));
+});
+
+app.delete('/api/tokens/:id', requireNotToken, (req, res) => {
+  const info = apiTokens.revoke(db, Number(req.params.id));
+  if (!info.changes) return res.status(404).json({ error: 'Not found' });
+  res.json({ ok: true });
 });
 
 app.use(express.static('public'));

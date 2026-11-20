@@ -43,6 +43,15 @@ db.exec(`
     token      TEXT PRIMARY KEY,
     expires_at INTEGER NOT NULL
   );
+  CREATE TABLE IF NOT EXISTS api_tokens (
+    id           INTEGER PRIMARY KEY AUTOINCREMENT,
+    name         TEXT NOT NULL,
+    token_hash   TEXT NOT NULL UNIQUE,
+    prefix       TEXT NOT NULL,
+    owner        TEXT NOT NULL,
+    created_at   TEXT NOT NULL,
+    last_used_at TEXT
+  );
 `);
 
 // Migrations: add columns if not present

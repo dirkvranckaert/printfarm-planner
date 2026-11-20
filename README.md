@@ -391,6 +391,12 @@ All endpoints (except `GET /login`, `POST /login`, `GET /logout`, and `GET /favi
 | GET | `/login` | Serve the login page |
 | POST | `/login` | Authenticate — body: `{ username, password }` — sets `pf_session` cookie on success |
 | GET | `/logout` | Clear session cookie and redirect to `/login` |
+| GET | `/api/tokens` | List API tokens (name, prefix, created_at, last_used_at). Session only |
+| POST | `/api/tokens` | Create token — body `{ name }` — returns `{ id, name, prefix, created_at, token }`; full `pf_...` token shown once. Session only |
+| DELETE | `/api/tokens/:id` | Revoke token. Session only |
+| GET | `/api/token/verify` | Bearer only — `200 { user, tokenName }` |
+
+**API tokens** (Settings → API Tokens): send `Authorization: Bearer pf_...` on any endpoint instead of the cookie. No expiry; only a SHA-256 hash is stored. Unknown/revoked token → `401 { "error": "invalid_token" }` (never a login redirect). Tokens cannot manage tokens.
 
 ### Printers
 
