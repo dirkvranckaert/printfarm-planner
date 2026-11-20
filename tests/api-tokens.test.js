@@ -4,6 +4,7 @@ process.env.NODE_ENV = 'test';
 process.env.PLANNER_DB_PATH =
   process.env.PLANNER_DB_PATH || path.join(os.tmpdir(), `printfarm-test-${process.pid}.db`);
 process.env.ADMIN_USER = 'dirk';
+process.env.CALCULATOR_URL = 'https://calc.test'; // allowed cross-app origin (read at server load)
 
 describe('API tokens (real routes via supertest)', () => {
   const request = require('supertest');
@@ -76,6 +77,14 @@ describe('API tokens (real routes via supertest)', () => {
       .set('Authorization', 'Bearer pf_nope').set('Content-Type', 'application/json').send('{bad json');
     expect(res.status).toBe(401);
     expect(res.body).toEqual({ error: 'invalid_token' });
+  });
+
+  test('invalid Bearer 401 keeps CORS headers for an allowed origin', async () => {
+    const res = await request(app).get('/api/jobs')
+      .set('Origin', 'https://calc.test').set('Authorization', 'Bearer pf_nope');
+    expect(res.status).toBe(401);
+    expect(res.headers['access-control-allow-origin']).toBe('https://calc.test');
+    expect(res.headers['access-control-allow-headers']).toContain('Authorization');
   });
 
   test('empty Bearer credential -> 401, not cookie fall-through', async () => {

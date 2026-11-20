@@ -41,22 +41,8 @@ function cleanupOrphanUploads(fileNames) {
 
 const app = express();
 
-// --- API token (Bearer) resolution: the FIRST middleware, ahead of body
-// parsing, CORS and every route (incl. anonymous ones), so a bad/revoked/empty
-// token is always 401 JSON and never a 400/413 parse error, redirect, anonymous
-// 200, or silent fall-through to cookie auth.
-app.use((req, res, next) => {
-  const bearer = apiTokens.parseBearer(req);
-  if (bearer === null) return next();
-  const row = apiTokens.authenticate(db, bearer);
-  if (!row) return res.status(401).json({ error: 'invalid_token' });
-  req.apiToken = row;
-  next();
-});
-
-app.use(express.json());
-
 // --- CORS for cross-app requests (optional, only when sibling URLs configured) ---
+// First, so even the early Bearer 401 below carries the allowed-origin headers.
 const ALLOWED_ORIGINS = [
   process.env.CALCULATOR_URL, process.env.FILAMENT_URL,
   process.env.CALCULATOR_PUBLIC_URL, process.env.FILAMENT_PUBLIC_URL,
@@ -68,12 +54,27 @@ if (ALLOWED_ORIGINS.length) {
       res.setHeader('Access-Control-Allow-Origin', origin);
       res.setHeader('Access-Control-Allow-Credentials', 'true');
       res.setHeader('Access-Control-Allow-Methods', 'GET,POST,PUT,PATCH,DELETE,OPTIONS');
-      res.setHeader('Access-Control-Allow-Headers', 'Content-Type,X-Schedule,X-Plate-Index');
+      res.setHeader('Access-Control-Allow-Headers', 'Content-Type,Authorization,X-Schedule,X-Plate-Index');
       if (req.method === 'OPTIONS') return res.sendStatus(204);
     }
     next();
   });
 }
+
+// --- API token (Bearer) resolution: ahead of body parsing and every route
+// (incl. anonymous ones), so a bad/revoked/empty token is always 401 JSON and
+// never a 400/413 parse error, redirect, anonymous 200, or silent fall-through
+// to cookie auth. (CORS preflights carry no Authorization, so they pass above.)
+app.use((req, res, next) => {
+  const bearer = apiTokens.parseBearer(req);
+  if (bearer === null) return next();
+  const row = apiTokens.authenticate(db, bearer);
+  if (!row) return res.status(401).json({ error: 'invalid_token' });
+  req.apiToken = row;
+  next();
+});
+
+app.use(express.json());
 
 // --- Session store ---
 const SESSION_TTL = 7 * 24 * 60 * 60 * 1000; // 7 days in ms
