@@ -3874,6 +3874,43 @@ async function openSettingsModal() {
   loadConnectedApps();
 }
 
+async function loadApiTokens() {
+  const el = document.getElementById('token-list');
+  if (!el) return;
+  try {
+    const rows = await api('GET', '/api/tokens');
+    el.textContent = '';
+    if (!rows.length) { el.textContent = 'No tokens yet.'; return; }
+    for (const t of rows) {
+      const line = document.createElement('div');
+      line.style.cssText = 'display:flex;gap:8px;align-items:center;padding:4px 0';
+      const info = document.createElement('span');
+      info.style.flex = '1';
+      info.textContent = `${t.name} (${t.prefix}…) created ${t.created_at.slice(0, 10)}, last used ${t.last_used_at ? t.last_used_at.slice(0, 16).replace('T', ' ') : 'never'}`;
+      const btn = document.createElement('button');
+      btn.type = 'button'; btn.className = 'btn btn-secondary'; btn.textContent = 'Revoke';
+      btn.addEventListener('click', async () => {
+        if (!confirm(`Revoke token "${t.name}"? Clients using it stop working.`)) return;
+        await api('DELETE', '/api/tokens/' + t.id);
+        loadApiTokens();
+      });
+      line.append(info, btn);
+      el.append(line);
+    }
+  } catch (err) { el.textContent = 'Failed to load tokens.'; }
+}
+
+async function createApiToken() {
+  const nameEl = document.getElementById('token-name');
+  const name = nameEl.value.trim();
+  if (!name) { nameEl.focus(); return; }
+  const t = await api('POST', '/api/tokens', { name });
+  nameEl.value = '';
+  document.getElementById('token-new-value').value = t.token;
+  document.getElementById('token-new').classList.remove('hidden');
+  loadApiTokens();
+}
+
 async function loadConnectedApps() {
   const el = document.getElementById('connected-apps-panel');
   if (!el) return;
@@ -4786,6 +4823,13 @@ function setupListeners() {
     document.querySelectorAll('.settings-panel').forEach(p => p.classList.toggle('hidden', p.dataset.panel !== panel));
     // Load connected apps lazily
     if (panel === 'apps') loadConnectedApps();
+    if (panel === 'tokens') loadApiTokens();
+  });
+  document.getElementById('btn-token-create').addEventListener('click', createApiToken);
+  document.getElementById('btn-token-copy').addEventListener('click', async () => {
+    const v = document.getElementById('token-new-value');
+    v.select();
+    try { await navigator.clipboard.writeText(v.value); } catch { document.execCommand('copy'); }
   });
   document.getElementById('btn-bambu-connect').addEventListener('click', bambuConnect);
   document.getElementById('btn-bambu-verify').addEventListener('click', bambuVerify);
