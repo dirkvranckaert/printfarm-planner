@@ -3799,7 +3799,15 @@ async function unsubscribePush() {
 // =============================================================================
 // Settings modal
 // =============================================================================
+// Drop the one-time token from the DOM so it cannot be revealed again.
+function clearNewApiToken() {
+  const v = document.getElementById('token-new-value');
+  if (v) v.value = '';
+  document.getElementById('token-new')?.classList.add('hidden');
+}
+
 async function openSettingsModal() {
+  clearNewApiToken();
   const themeSetting = await api('GET', '/api/settings/theme');
   const themeSel = document.getElementById('setting-theme');
   if (themeSel) themeSel.value = themeSetting?.value ?? 'system';
@@ -4823,7 +4831,7 @@ function setupListeners() {
     document.querySelectorAll('.settings-panel').forEach(p => p.classList.toggle('hidden', p.dataset.panel !== panel));
     // Load connected apps lazily
     if (panel === 'apps') loadConnectedApps();
-    if (panel === 'tokens') loadApiTokens();
+    if (panel === 'tokens') loadApiTokens(); else clearNewApiToken();
   });
   document.getElementById('btn-token-create').addEventListener('click', createApiToken);
   document.getElementById('btn-token-copy').addEventListener('click', async () => {

@@ -77,6 +77,18 @@ function isValidSession(token) {
   return true;
 }
 
+// --- API token (Bearer) resolution: runs before EVERY route, incl. the
+// anonymous ones, so a bad/revoked/empty token is always 401 JSON and never a
+// redirect, an anonymous 200, or a silent fall-through to cookie auth.
+app.use((req, res, next) => {
+  const bearer = apiTokens.parseBearer(req);
+  if (bearer === null) return next();
+  const row = apiTokens.authenticate(db, bearer);
+  if (!row) return res.status(401).json({ error: 'invalid_token' });
+  req.apiToken = row;
+  next();
+});
+
 // --- Auth routes (bypass middleware) ---
 app.get('/login', (req, res) => {
   res.sendFile(path.join(__dirname, 'public', 'login.html'));
@@ -110,15 +122,7 @@ app.get('/logout', (req, res) => {
 app.use((req, res, next) => {
   // Allow PWA assets through unauthenticated
   if (['/favicon.svg', '/manifest.json', '/sw.js', '/apple-touch-icon.png', '/api/config'].includes(req.path)) return next();
-  // API token (machine clients, e.g. the macOS uploader). A Bearer header never
-  // falls through to cookie auth or the login redirect: bad token => 401 JSON.
-  const bearer = apiTokens.parseBearer(req);
-  if (bearer !== null) {
-    const row = apiTokens.authenticate(db, bearer);
-    if (!row) return res.status(401).json({ error: 'invalid_token' });
-    req.apiToken = row;
-    return next();
-  }
+  if (req.apiToken) return next(); // validated by the Bearer middleware above
   const token = parseCookieToken(req);
   if (token && isValidSession(token)) return next();
   // Also accept shared JWT if enabled

@@ -16,8 +16,10 @@ function hashToken(token) {
 function parseBearer(req) {
   const h = req.headers.authorization;
   if (typeof h !== 'string') return null;
-  const m = h.match(/^Bearer\s+(.*)$/i);
-  return m ? m[1].trim() : null;
+  // `Bearer` alone (empty credential) is still a Bearer attempt: returns '',
+  // which fails authentication, instead of falling through to cookie auth.
+  const m = h.match(/^Bearer(?:\s+(.*))?$/i);
+  return m ? (m[1] ?? '').trim() : null;
 }
 
 function create(db, { name, owner }) {

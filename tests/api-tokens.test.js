@@ -63,8 +63,17 @@ describe('API tokens (real routes via supertest)', () => {
   });
 
   test('unknown token -> 401 JSON, no redirect', async () => {
-    for (const p of ['/api/token/verify', '/api/jobs']) {
+    // incl. routes that bypass auth (/api/config) or sit before it (/logout)
+    for (const p of ['/api/token/verify', '/api/jobs', '/api/config', '/logout']) {
       const res = await request(app).get(p).set('Authorization', 'Bearer pf_nope');
+      expect(res.status).toBe(401);
+      expect(res.body).toEqual({ error: 'invalid_token' });
+    }
+  });
+
+  test('empty Bearer credential -> 401, not cookie fall-through', async () => {
+    for (const h of ['Bearer', 'Bearer ', 'bearer   ']) {
+      const res = await request(app).get('/api/jobs').set('Cookie', cookie).set('Authorization', h);
       expect(res.status).toBe(401);
       expect(res.body).toEqual({ error: 'invalid_token' });
     }
