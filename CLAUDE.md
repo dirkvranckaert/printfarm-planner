@@ -74,6 +74,10 @@ Dirk (primary), potentially other Printseed users. Accessed via browser (PWA-cap
 
 - **Delete file cleanup** (commit `e8810eb`) — deleting a job (queued or scheduled) unlinks its `printFile` (`<hex>.3mf`) + `thumbFile` (`<hex>.png`) in `data/uploads` (UPLOADS_DIR). Ref-counted via `cleanupOrphanUploads()` — files shared across plates/copies, unlink only when no other job references it. Applied to `DELETE /api/jobs/:id` + `DELETE /api/printers/:id` cascade. ENOENT-safe. `POST /api/import` restore path untouched.
 
+- **Printer visibility** — `p.favourite` (UI: "Show in planner") filters day columns, status cards, week rows, today-overview. Topbar chips use `p.pinned` instead. Month/upcoming views stay unfiltered: Dirk's decision, intentional.
+- **Day header/body alignment** — depends on `--day-sbw` (body scrollbar width, kept in sync by ResizeObserver via `observeDayScroll`/`disconnectDayScroll`) and on the gear (`.day-settings-btn`) being `position:absolute`. Never put header elements in the flex flow.
+- **Status cards** — `--ps-cols` = visible printer count (set in `renderStatusPanel`); panel `padding-left` = `var(--time-col-w)` so card N sits over day column N; min card width 220px, wraps below.
+
 ## Coding conventions
 
 - **Code, comments, commits, docs:** English
@@ -97,8 +101,9 @@ npm start               # default port from .env
 npm test                 # jest
 ```
 
-- **Determinism:** run `npx jest --runInBand` for reliable green. Parallel jest flakes ~20% on a couple server tests — SQLite / port worker contention.
-- **Testing from a `.claude/worktrees/` checkout:** two traps. (1) jest config `testPathIgnorePatterns` includes `/.claude/` → worktree path contains `.claude/worktrees/` → **0 tests collected** (silent "No tests found"). Override: `jest --testPathIgnorePatterns=/node_modules/`. (2) worktree has no `node_modules` — symlink it: `ln -s ../../../node_modules node_modules`. Then `./node_modules/.bin/jest --runInBand --testPathIgnorePatterns=/node_modules/`.
+- **Determinism:** run `npx jest -i` (`--runInBand`) for reliable green. Parallel jest flakes in server/DB suites (SQLite / port worker contention; different suite each run, #3983). `-i` passes.
+- **Testing from a `.claude/worktrees/` checkout:** two traps. (1) jest ignores `/.claude/` → **0 tests collected** (silent "No tests found"). Run `npx jest -i --testPathIgnorePatterns '/node_modules/'`. (2) worktree has no `node_modules` — `npm ci` in the worktree (symlinking main's `node_modules` is denied by the hub worktree guard).
+- **Screenshots:** headless Playwright hides scrollbars by default → launch with `ignoreDefaultArgs: ['--hide-scrollbars']`, else header/body alignment drift stays invisible.
 
 ## Deploy
 
@@ -117,6 +122,7 @@ This deploy is **standing-authorised for the team** (Senne / release engineer) v
 
 ## Gotchas
 
+- **Deploy WARN is normal:** infra `deploy.sh` does pm2 delete+start, so "not running, starting" WARN is expected and the pm2 id changes every deploy.
 - **pm2 cwd caching:** pm2 caches cwd at first start. Delete + restart if you change ecosystem.config.js.
 - **Service worker:** `public/sw.js` shell assets (`/`, `index.html`, `style.css`, `statusCount.js`, `app.js`) are **network-first** since v8 (cache = offline fallback only). Current `CACHE_NAME`: `printfarm-v8`. Effect: future JS fixes reach browsers on next load WITHOUT a manual cache bump (previously cache-first, so every shell-asset change needed a `CACHE_NAME` bump in the same commit). Intended tradeoffs: no fetch timeout; a server 5xx surfaces instead of falling back to the cached shell. `skipWaiting()`, activate-time cache purge and `clients.claim()` still wired.
 - **MQTT reconnect:** if the MQTT broker is unreachable, `bambu.js` retries silently. Check pm2 logs if printer status stops updating.
