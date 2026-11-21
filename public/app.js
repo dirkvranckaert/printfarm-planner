@@ -3065,16 +3065,22 @@ function openPullForwardModal(jobId) {
   const toggle     = document.getElementById('pullforward-window-toggle');
   const windowRow  = document.getElementById('pullforward-window-row');
   const chainToggle = document.getElementById('pullforward-chain-toggle');
-  // Default start = now. The user's most common intent is "tighten toward now".
+  // Default start = the job's currently planned start (local time, via toDatetimeLocal),
+  // so the user adjusts from there. Falls back to now when the job has no start.
   const now = new Date();
-  startInput.value = toDatetimeLocal(now);
+  const job = jobsCache[jobId];
+  const jobStart = job?.start ? new Date(job.start) : null;
+  const base = jobStart && !isNaN(jobStart.getTime()) ? jobStart : now;
+  startInput.value = toDatetimeLocal(base);
   // Default = NO end time (force the exact start + reshuffle). The toggle reveals
   // the window-end field for the fit-into-a-gap mode.
   toggle.checked = false;
   windowRow.classList.add('hidden');
   // Default = move only the anchor. The toggle drags the following chain along.
   if (chainToggle) chainToggle.checked = false;
-  endInput.value = toDatetimeLocal(new Date(now.getTime() + 24 * 60 * 60 * 1000));
+  // Window end default = the job's current start (place it somewhere between the picked
+  // start and where it sits now); without a job start, now + 24h.
+  endInput.value = toDatetimeLocal(base === now ? new Date(now.getTime() + 24 * 60 * 60 * 1000) : base);
   document.getElementById('pullforward-modal').classList.remove('hidden');
   setTimeout(() => startInput.focus(), 50);
 }
