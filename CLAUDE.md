@@ -103,6 +103,9 @@ npm test                 # jest
 
 - **Determinism:** run `npx jest -i` (`--runInBand`) for reliable green. Parallel jest flakes in server/DB suites (SQLite / port worker contention; different suite each run, #3983). `-i` passes.
 - **Testing from a `.claude/worktrees/` checkout:** two traps. (1) jest ignores `/.claude/` → **0 tests collected** (silent "No tests found"). Run `npx jest -i --testPathIgnorePatterns '/node_modules/'`. (2) worktree has no `node_modules` — `npm ci` in the worktree (symlinking main's `node_modules` is denied by the hub worktree guard).
+- **TZ in tests:** jest `globalSetup` = `tests/global-setup.js` pins `process.env.TZ='Europe/Brussels'` before workers fork. Setting TZ inside a test module is ineffective (worker env proxied, `Date` keeps host TZ). Prove TZ-sensitive tests with host `TZ=UTC <jest cmd>` — this Mac is already Brussels, so plain local runs prove nothing.
+- **rtk hook gotcha:** `npx jest <file>` via rtk hook drops file args → runs full suite. Single file: `rtk proxy node_modules/.bin/jest --testPathIgnorePatterns=/node_modules/ -- <file>`.
+- **No CI** on repo (no `.github` / `.gitlab-ci.yml`): local full suite is the only test gate.
 - **Screenshots:** headless Playwright hides scrollbars by default → launch with `ignoreDefaultArgs: ['--hide-scrollbars']`, else header/body alignment drift stays invisible.
 
 ## Deploy
