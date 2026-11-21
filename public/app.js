@@ -3065,18 +3065,49 @@ function openPullForwardModal(jobId) {
   const toggle     = document.getElementById('pullforward-window-toggle');
   const windowRow  = document.getElementById('pullforward-window-row');
   const chainToggle = document.getElementById('pullforward-chain-toggle');
-  // Default start = now. The user's most common intent is "tighten toward now".
+  // Default start = the job's currently planned start (local time, via toDatetimeLocal),
+  // so the user adjusts from there. Falls back to now when the job has no start.
   const now = new Date();
-  startInput.value = toDatetimeLocal(now);
+  const job = jobsCache[jobId];
+  const jobStart = job?.start ? new Date(job.start) : null;
+  const base = jobStart && !isNaN(jobStart.getTime()) ? jobStart : now;
+  startInput.value = toDatetimeLocal(base);
   // Default = NO end time (force the exact start + reshuffle). The toggle reveals
   // the window-end field for the fit-into-a-gap mode.
   toggle.checked = false;
   windowRow.classList.add('hidden');
   // Default = move only the anchor. The toggle drags the following chain along.
   if (chainToggle) chainToggle.checked = false;
-  endInput.value = toDatetimeLocal(new Date(now.getTime() + 24 * 60 * 60 * 1000));
+  // Window end default = the job's current start (place it somewhere between the picked
+  // start and where it sits now); without a job start, now + 24h.
+  endInput.value = toDatetimeLocal(base === now ? new Date(now.getTime() + 24 * 60 * 60 * 1000) : base);
+  showPullForwardError('');
   document.getElementById('pullforward-modal').classList.remove('hidden');
   setTimeout(() => startInput.focus(), 50);
+}
+
+function showPullForwardError(msg) {
+  const el = document.getElementById('pullforward-error');
+  el.textContent = msg;
+  el.classList.toggle('hidden', !msg);
+}
+
+// Window mode needs start < end. Returns an error message, or '' when valid.
+function pullForwardWindowError(startVal, endVal) {
+  if (!endVal) return 'Please set a window end.';
+  if (!(new Date(startVal) < new Date(endVal))) return 'Window end must be after the new start time.';
+  return '';
+}
+
+// Enabling window mode with the default pair (start = end = job start) would be invalid:
+// start the window at "now" when that is still before the window end, else extend the end.
+function fixPullForwardWindowDefaults() {
+  const startInput = document.getElementById('pullforward-datetime');
+  const endInput   = document.getElementById('pullforward-window-end');
+  if (pullForwardWindowError(startInput.value, endInput.value) === '') return;
+  const now = new Date();
+  if (endInput.value && now < new Date(endInput.value)) startInput.value = toDatetimeLocal(now);
+  else endInput.value = toDatetimeLocal(new Date(new Date(startInput.value).getTime() + 24 * 60 * 60 * 1000));
 }
 
 function closePullForwardModal() {
@@ -4648,14 +4679,23 @@ function setupListeners() {
   document.getElementById('pullforward-cancel').addEventListener('click', closePullForwardModal);
   document.getElementById('pullforward-window-toggle').addEventListener('change', (e) => {
     document.getElementById('pullforward-window-row').classList.toggle('hidden', !e.target.checked);
+    if (e.target.checked) fixPullForwardWindowDefaults();
+    showPullForwardError('');
   });
+  ['pullforward-datetime', 'pullforward-window-end'].forEach(id =>
+    document.getElementById(id).addEventListener('input', () => showPullForwardError('')));
   document.getElementById('pullforward-confirm').addEventListener('click', async () => {
     const startVal = document.getElementById('pullforward-datetime').value;
     const useWindow = document.getElementById('pullforward-window-toggle').checked;
     const endVal   = useWindow ? document.getElementById('pullforward-window-end').value : null;
     const moveChain = document.getElementById('pullforward-chain-toggle').checked;
     const id = _pullForwardJobId;
-    if (!startVal || id == null) return closePullForwardModal();
+    if (id == null) return closePullForwardModal(); // stale: no job to act on
+    if (!startVal) return showPullForwardError('Please set a start time.'); // keep the modal open
+    if (useWindow) {
+      const err = pullForwardWindowError(startVal, endVal);
+      if (err) return showPullForwardError(err); // keep the modal open
+    }
     closePullForwardModal();
     // No end time → force the exact start (verbatim + reshuffle). End time → window fit.
     await pullForwardJob(id, startVal, endVal || null, moveChain);

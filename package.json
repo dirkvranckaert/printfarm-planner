@@ -9,6 +9,7 @@
   },
   "jest": {
     "testEnvironment": "node",
+    "globalSetup": "<rootDir>/tests/global-setup.js",
     "testPathIgnorePatterns": [
       "/node_modules/",
       "/.claude/"
