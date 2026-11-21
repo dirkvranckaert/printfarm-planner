@@ -5,9 +5,9 @@
  * job's currently planned start (local time), not "now".
  * Drives the real openPullForwardModal / openPushBackModal from public/app.js.
  */
-// Force a non-UTC zone so local-vs-UTC regressions cannot hide on UTC runners.
-// Must be set before any Date is created (Node re-reads TZ on assignment).
-process.env.TZ = 'Europe/Brussels';
+// Timezone is pinned to Europe/Brussels by tests/global-setup.js (jest globalSetup, real
+// process.env, runs before workers fork). Setting process.env.TZ here would NOT work: Jest
+// gives test modules a proxied env. The offset guard below fails loudly if the pin is lost.
 const fs = require('fs');
 const path = require('path');
 
@@ -123,6 +123,18 @@ describe('pull forward window mode (start < end)', () => {
     $('pullforward-window-end').value = '2026-11-22T10:00';
     $('pullforward-window-end').dispatchEvent(new window.Event('input'));
     expect($('pullforward-error').classList.contains('hidden')).toBe(true);
+  });
+
+  test('empty start is rejected inline, keeps the modal open, sends nothing', () => {
+    api.jobs[10] = { id: 10, start: '2026-11-22T09:00', end: '2026-11-22T11:30' };
+    api.pull(10);
+    toggleWindow(true);
+    $('pullforward-datetime').value = '';
+    confirm();
+    expect(open()).toBe(true);
+    expect($('pullforward-error').classList.contains('hidden')).toBe(false);
+    expect($('pullforward-error').textContent).toMatch(/start/);
+    expect(calls).toHaveLength(0);
   });
 
   test('empty window end in window mode is rejected', () => {

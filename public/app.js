@@ -4690,7 +4690,8 @@ function setupListeners() {
     const endVal   = useWindow ? document.getElementById('pullforward-window-end').value : null;
     const moveChain = document.getElementById('pullforward-chain-toggle').checked;
     const id = _pullForwardJobId;
-    if (!startVal || id == null) return closePullForwardModal();
+    if (id == null) return closePullForwardModal(); // stale: no job to act on
+    if (!startVal) return showPullForwardError('Please set a start time.'); // keep the modal open
     if (useWindow) {
       const err = pullForwardWindowError(startVal, endVal);
       if (err) return showPullForwardError(err); // keep the modal open
