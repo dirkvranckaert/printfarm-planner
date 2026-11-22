@@ -260,6 +260,125 @@ describe('plate split routes', () => {
     fs.unlinkSync(orig);
   });
 
+  // ---- Round-3 ----
+  const hexFiles = () => fs.readdirSync(uploadsDir).filter(n => /^[0-9a-f]{16}\./.test(n)).sort();
+  const seedProcessing = (name = 'seed-orig.3mf', extra = {}) => {
+    fs.copyFileSync(path.join(uploadsDir, '..', 'multi-src.gcode.3mf'), path.join(uploadsDir, name));
+    const payload = { plates: plates(2), sched: { isQueue: true }, projectId: null, ...extra };
+    return appDb.prepare("INSERT INTO jobs (name, start, end, status, queued, original_file, split_payload) VALUES ('seed','','','Processing',1,?,?)")
+      .run(name, JSON.stringify(payload)).lastInsertRowid;
+  };
+  const rowPayload = id => JSON.parse(appDb.prepare('SELECT split_payload FROM jobs WHERE id=?').get(id).split_payload);
+
+  // R3-F2: ownership must be durable before the first write (UPDATE changes === 1).
+  test('placeholder vanishing before ownership is recorded: nothing is written', async () => {
+    const id = seedProcessing();
+    const before = hexFiles();
+    const spy = jest.spyOn(plateSplit, 'splitPlate');
+    jest.spyOn(plateSplit, 'readThumbnails').mockImplementation(async () => {
+      appDb.prepare('DELETE FROM jobs WHERE id=?').run(id); // deleted during the async gap
+      return [];
+    });
+    app.recoverSplits();
+    await settle();
+    expect(spy).not.toHaveBeenCalled();
+    expect(hexFiles()).toEqual(before);
+    expect(jobs()).toHaveLength(0);
+    fs.rmSync(path.join(uploadsDir, 'seed-orig.3mf'), { force: true });
+  });
+
+  // R3-F2: no route may delete the owner (placeholder) of in-flight outputs.
+  test('Processing placeholder cannot be deleted / wiped (409); Split failed can', async () => {
+    const id = seedProcessing();
+    let r = await request(server).delete(`/api/jobs/${id}`).set('Cookie', cookie);
+    expect(r.status).toBe(409);
+    r = await request(server).post('/api/import').set('Cookie', cookie).send({ printers: [], jobs: [] });
+    expect(r.status).toBe(409);
+    expect(jobs()).toHaveLength(1);
+    appDb.prepare("UPDATE jobs SET status='Split failed' WHERE id=?").run(id);
+    r = await request(server).delete(`/api/jobs/${id}`).set('Cookie', cookie);
+    expect(r.status).toBe(204);
+    expect(jobs()).toHaveLength(0);
+    fs.rmSync(path.join(uploadsDir, 'seed-orig.3mf'), { force: true });
+  });
+
+  test('printer delete refuses while a Processing job is bound to it', async () => {
+    const pid = appDb.prepare("INSERT INTO printers (name, color) VALUES ('p','#fff')").run().lastInsertRowid;
+    const id = seedProcessing();
+    appDb.prepare('UPDATE jobs SET printerId=? WHERE id=?').run(pid, id);
+    const r = await request(server).delete(`/api/printers/${pid}`).set('Cookie', cookie);
+    expect(r.status).toBe(409);
+    expect(jobs()).toHaveLength(1);
+    appDb.exec('DELETE FROM jobs; DELETE FROM printers;');
+    fs.rmSync(path.join(uploadsDir, 'seed-orig.3mf'), { force: true });
+  });
+
+  // R3-F3: an output whose deletion is not confirmed stays recorded (never untracked).
+  test('failed cleanup keeps undeleted names recorded; delete/fallback refuse; retry converges', async () => {
+    const id = seedProcessing();
+    let target = null;
+    const split = jest.spyOn(plateSplit, 'splitPlate').mockImplementation(async (src, idx, dest) => {
+      target = target || path.basename(dest);
+      fs.writeFileSync(dest, 'x');
+      throw new Error('boom');
+    });
+    const realUnlink = fs.unlinkSync;
+    const unlink = jest.spyOn(fs, 'unlinkSync').mockImplementation(p => {
+      if (target && String(p).endsWith(target)) throw Object.assign(new Error('busy'), { code: 'EPERM' });
+      return realUnlink(p);
+    });
+    app.recoverSplits();
+    await settle();
+    expect(appDb.prepare('SELECT status FROM jobs WHERE id=?').get(id).status).toBe('Split failed');
+    expect(rowPayload(id).outputs).toEqual([target]); // only the undeletable one is kept
+    expect(fs.existsSync(path.join(uploadsDir, target))).toBe(true);
+
+    // owner row cannot vanish while the leftover is tracked
+    expect((await request(server).delete(`/api/jobs/${id}`).set('Cookie', cookie)).status).toBe(409);
+    expect((await request(server).post(`/api/jobs/${id}/split-fallback`).set('Cookie', cookie)).status).toBe(409);
+    expect(jobs()).toHaveLength(1);
+
+    // retry while still undeletable: no new plan is written over the record
+    await request(server).post(`/api/jobs/${id}/split-retry`).set('Cookie', cookie);
+    await settle();
+    expect(split).toHaveBeenCalledTimes(1);
+    expect(appDb.prepare('SELECT status FROM jobs WHERE id=?').get(id).status).toBe('Split failed');
+    expect(rowPayload(id).outputs).toEqual([target]);
+
+    // unlink works again: retry cleans the old name first and completes
+    unlink.mockRestore(); split.mockRestore();
+    await request(server).post(`/api/jobs/${id}/split-retry`).set('Cookie', cookie);
+    await settle();
+    expect(jobs()).toHaveLength(2);
+    expect(fs.existsSync(path.join(uploadsDir, target))).toBe(false);
+    appDb.exec('DELETE FROM jobs');
+    fs.rmSync(path.join(uploadsDir, 'seed-orig.3mf'), { force: true });
+    for (const n of hexFiles()) fs.unlinkSync(path.join(uploadsDir, n));
+  });
+
+  test('cleanup treats ENOENT as success (record cleared) and drops invalid names', async () => {
+    const hex = () => require('crypto').randomBytes(8).toString('hex');
+    const gone = `${hex()}.3mf`; // recorded but never written / already removed
+    const id = seedProcessing('seed-orig.3mf', { outputs: [gone, 'not-a-stored-name'] });
+    app.recoverSplits();
+    await settle();
+    expect(jobs()).toHaveLength(2); // pre-clean found nothing left, split ran
+    fs.rmSync(path.join(uploadsDir, 'seed-orig.3mf'), { force: true });
+    expect(id).toBeDefined();
+  });
+
+  test('Split failed row with undeletable leftovers: delete retries cleanup once, succeeds when it works', async () => {
+    const hex = () => require('crypto').randomBytes(8).toString('hex');
+    const name = `${hex()}.3mf`;
+    fs.writeFileSync(path.join(uploadsDir, name), 'x');
+    const id = seedProcessing('seed-orig.3mf', { outputs: [name] });
+    appDb.prepare("UPDATE jobs SET status='Split failed' WHERE id=?").run(id);
+    const r = await request(server).delete(`/api/jobs/${id}`).set('Cookie', cookie);
+    expect(r.status).toBe(204);
+    expect(fs.existsSync(path.join(uploadsDir, name))).toBe(false);
+    fs.rmSync(path.join(uploadsDir, 'seed-orig.3mf'), { force: true });
+  });
+
   test('traversal stays rejected: stored name with ../ never resolves (slicer-link, split)', async () => {
     const id = appDb.prepare("INSERT INTO jobs (name, start, end, status, queued, printFile) VALUES ('t','','','Planned',1,'../planner.db')").run().lastInsertRowid;
     expect((await request(server).post(`/api/jobs/${id}/slicer-link`).set('Cookie', cookie)).status).toBe(404);

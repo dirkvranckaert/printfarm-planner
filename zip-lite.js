@@ -23,6 +23,12 @@ const SIG_CEN = 0x02014b50;
 const SIG_LOC = 0x04034b50;
 const MAX_EDIT_BYTES = 32 * 1024 * 1024; // entries we inflate into memory (configs, never gcode)
 const MAX_DEFLATE_SLACK = 1024 * 1024; // deflate may expand incompressible data slightly
+// Independent fixed caps on the central directory, which is read whole into memory.
+// Real Bambu archives have 70-90 entries / ~5-6 KB of directory (measured on real
+// multi-plate exports); 4 MiB / 10000 entries is ~700x / ~100x headroom and still a
+// trivially small allocation, whatever the (attacker-controlled) file size is.
+const MAX_CD_BYTES = 4 * 1024 * 1024;
+const MAX_ENTRIES = 10000;
 
 let crcTable = null;
 function crc32(buf) {
@@ -71,6 +77,7 @@ async function openZip(filePath) {
       throw new Error('ZIP64 archives are not supported');
     }
     if (cdOffset + cdSize > size || count * 46 > cdSize) throw new Error('Corrupt zip central directory');
+    if (cdSize > MAX_CD_BYTES || count > MAX_ENTRIES) throw new Error('Zip central directory too large');
     const cd = await readAt(fh, cdOffset, cdSize, size);
     const entries = [];
     let p = 0;
@@ -79,6 +86,7 @@ async function openZip(filePath) {
       const nameLen = cd.readUInt16LE(p + 28);
       const extraLen = cd.readUInt16LE(p + 30);
       const commentLen = cd.readUInt16LE(p + 32);
+      if (p + 46 + nameLen + extraLen + commentLen > cd.length) throw new Error('Corrupt zip central directory');
       const entry = {
         flags: cd.readUInt16LE(p + 8),
         method: cd.readUInt16LE(p + 10),

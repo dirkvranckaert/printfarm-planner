@@ -236,6 +236,64 @@ describe('plate split (zip-lite + plate-split)', () => {
     const t = await plateSplit.readThumbnails(src);
     expect(t.map(x => x.plateIndex)).toEqual([1, 2, 3]);
   });
+
+  // Round-3 F1: the central directory is read whole, so it has an independent fixed cap
+  // (4 MiB / 10000 entries; real archives: ~6 KB / <100 entries), not just "fits the file".
+  const rawEocd = (file, { size, count, cdSize, cdOffset }) => {
+    const buf = Buffer.alloc(size);
+    const e = size - 22;
+    buf.writeUInt32LE(0x06054b50, e);
+    buf.writeUInt16LE(count, e + 8);
+    buf.writeUInt16LE(count, e + 10);
+    buf.writeUInt32LE(cdSize, e + 12);
+    buf.writeUInt32LE(cdOffset, e + 16);
+    fs.writeFileSync(file, buf);
+  };
+
+  test('openZip: central directory inside a big file but past the fixed cap is rejected before alloc', async () => {
+    const f = path.join(dir, 'cd-5mib.zip');
+    rawEocd(f, { size: 5 * 1024 * 1024 + 22, count: 1, cdSize: 5 * 1024 * 1024, cdOffset: 0 });
+    const spy = allocSpy();
+    try {
+      await expect(zip.openZip(f)).rejects.toThrow(/central directory too large/);
+      expect(maxAlloc(spy)).toBeLessThan(1024 * 1024);
+    } finally { spy.mockRestore(); }
+  });
+
+  test('openZip: entry count past the cap is rejected before alloc', async () => {
+    const f = path.join(dir, 'cd-count.zip');
+    rawEocd(f, { size: 10001 * 46 + 22, count: 10001, cdSize: 10001 * 46, cdOffset: 0 });
+    const spy = allocSpy();
+    try {
+      await expect(zip.openZip(f)).rejects.toThrow(/central directory too large/);
+      expect(maxAlloc(spy)).toBeLessThan(1024 * 1024);
+    } finally { spy.mockRestore(); }
+  });
+
+  test('openZip: entry whose name/extra/comment lengths run past the directory is rejected', async () => {
+    const f = path.join(dir, 'cd-overrun.zip');
+    await buildSliced3mf(f, 1);
+    const buf = Buffer.from(fs.readFileSync(f));
+    buf.writeUInt16LE(0xffff, buf.lastIndexOf(Buffer.from([0x50, 0x4b, 0x01, 0x02])) + 28);
+    fs.writeFileSync(f, buf);
+    await expect(zip.openZip(f)).rejects.toThrow(/Corrupt zip central directory/);
+  });
+
+  test('openZip: realistic multi-plate archive is far below the caps', async () => {
+    const f = path.join(dir, 'cd-real.gcode.3mf');
+    await buildSliced3mf(f, 8);
+    const z = await zip.openZip(f);
+    try { expect(z.entries.length).toBeGreaterThan(20); } finally { await z.close(); }
+  });
+
+  test('readThumbnails: oversized thumbnail entries are skipped, not loaded', async () => {
+    const f = path.join(dir, 'thumb-big.zip');
+    const w = new zip.ZipWriter(f);
+    await w.addBuffer('Metadata/plate_1.png', Buffer.alloc(3 * 1024 * 1024, 1)); // > per-thumb cap
+    await w.addBuffer('Metadata/plate_2.png', Buffer.alloc(200, 2));
+    await w.finish();
+    expect((await plateSplit.readThumbnails(f)).map(t => t.plateIndex)).toEqual([2]);
+  });
 });
 
 describe('streamToFile (upload streaming)', () => {

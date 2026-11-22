@@ -519,7 +519,9 @@ app.put('/api/printers/:id', (req, res) => {
 });
 app.delete('/api/printers/:id', (req, res) => {
   // Deleting a printer cascades to its jobs — clean up their upload artifacts too.
-  const jobs = db.prepare('SELECT printFile, thumbFile, original_file FROM jobs WHERE printerId=?').all(req.params.id);
+  const jobs = db.prepare('SELECT id, status, split_payload, printFile, thumbFile, original_file FROM jobs WHERE printerId=?').all(req.params.id);
+  const blocked = splitDeleteBlock(jobs);
+  if (blocked) return res.status(409).json({ error: blocked });
   db.prepare('DELETE FROM jobs WHERE printerId=?').run(req.params.id);
   db.prepare('DELETE FROM printers WHERE id=?').run(req.params.id);
   cleanupOrphanUploads(jobs.flatMap(j => [j.printFile, j.thumbFile, j.original_file]));
@@ -1281,7 +1283,9 @@ app.post('/api/admin/remap-colors', async (req, res) => {
 app.delete('/api/jobs/:id', (req, res) => {
   // Capture the job's files, delete the row, then unlink any file no surviving
   // job still references (shared 3MF across plates, shared thumbnail across copies).
-  const job = db.prepare('SELECT printFile, thumbFile, original_file FROM jobs WHERE id=?').get(req.params.id);
+  const job = db.prepare('SELECT id, status, split_payload, printFile, thumbFile, original_file FROM jobs WHERE id=?').get(req.params.id);
+  const blocked = job && splitDeleteBlock([job]);
+  if (blocked) return res.status(409).json({ error: blocked });
   db.prepare('DELETE FROM jobs WHERE id=?').run(req.params.id);
   if (job) cleanupOrphanUploads([job.printFile, job.thumbFile, job.original_file]);
   res.status(204).end();
@@ -1397,6 +1401,8 @@ app.get('/api/export', (req, res) => {
 // --- Import ---
 app.post('/api/import', (req, res) => {
   const { printers = [], jobs = [], closures = [], settings = [] } = req.body;
+  const blocked = splitDeleteBlock(db.prepare('SELECT id, status, split_payload FROM jobs').all());
+  if (blocked) return res.status(409).json({ error: blocked });
   db.transaction(() => {
     db.prepare('DELETE FROM settings').run();
     db.prepare('DELETE FROM closures').run();
@@ -1670,9 +1676,14 @@ async function runSplit(jobId) {
   // job's split_payload BEFORE anything is written. Cleanup (failure, or re-run
   // after a restart) deletes exactly the recorded names, never anything else.
   let made = [];
+  let payload = null;
   try {
-    const { payload, origName, origPath } = loadSplitContext(ph);
-    removeRecordedSplitOutputs(jobId, payload); // leftovers of an interrupted earlier attempt
+    const ctx = loadSplitContext(ph);
+    const { origName, origPath } = ctx;
+    payload = ctx.payload;
+    // Leftovers of an interrupted / failed earlier attempt. Names that could not be
+    // deleted stay recorded: never plan (= overwrite the record) while any remain.
+    if (removeRecordedSplitOutputs(jobId, payload) > 0) throw new Error('Outputs of an earlier split attempt could not be removed');
     if (!origPath || !fs.existsSync(origPath)) throw new Error('Original 3MF is missing');
     const planIdx = [...new Set(payload.plates.map(p => p.plateIndex))];
     const thumbs = await safeReadThumbnails(origPath);
@@ -1680,9 +1691,13 @@ async function runSplit(jobId) {
       plates: planIdx.map(idx => ({ idx, name: newStoredName() })),
       thumbs: thumbs.map(t => ({ plateIndex: t.plateIndex, name: crypto.randomBytes(8).toString('hex') + '.png' })),
     };
-    made = [...planNames.plates.map(p => p.name), ...planNames.thumbs.map(t => t.name)];
-    payload.outputs = made;
-    db.prepare("UPDATE jobs SET split_payload=? WHERE id=? AND status='Processing'").run(JSON.stringify(payload), jobId);
+    const planned = [...planNames.plates.map(p => p.name), ...planNames.thumbs.map(t => t.name)];
+    payload.outputs = planned;
+    // Ownership must be durable BEFORE the first write: if the placeholder is gone (or no
+    // longer Processing) nothing is recorded, so nothing may be written. Abort cleanly.
+    const rec = db.prepare("UPDATE jobs SET split_payload=? WHERE id=? AND status='Processing'").run(JSON.stringify(payload), jobId);
+    if (rec.changes !== 1) { payload = null; return; }
+    made = planned;
     const fileByPlate = {};
     for (const { idx, name } of planNames.plates) {
       await plateSplit.splitPlate(origPath, idx, path.join(UPLOADS_DIR, name));
@@ -1701,7 +1716,13 @@ async function runSplit(jobId) {
     });
     broadcastJobsUpdated();
   } catch (err) {
-    removeSplitOutputs(made);
+    // Failure cleanup keeps ownership of whatever it could not delete: those names stay
+    // in the record (a later retry/boot recovery tries again, delete/import refuse).
+    if (made.length && payload) {
+      const left = removeSplitOutputs(made);
+      if (left.length) payload.outputs = left; else delete payload.outputs;
+      db.prepare('UPDATE jobs SET split_payload=? WHERE id=?').run(JSON.stringify(payload), jobId);
+    }
     db.prepare("UPDATE jobs SET status='Split failed', split_error=? WHERE id=? AND status='Processing'")
       .run(String(err.message || err).slice(0, 500), jobId);
     broadcastJobsUpdated();
@@ -1711,27 +1732,50 @@ async function runSplit(jobId) {
 // directory scan, no age heuristic: a file this job did not record is never touched
 // (an upload in flight in this or another process is safe). Names still referenced
 // by a job are skipped; names that are not generated stored names are ignored.
+// Returns the names whose deletion was NOT confirmed (an unlink error other than
+// ENOENT on the file or its `.part`): the caller must keep those in the record.
 function removeSplitOutputs(names) {
   const referenced = new Set();
   for (const j of db.prepare('SELECT printFile, thumbFile, original_file FROM jobs').all()) {
     for (const n of [j.printFile, j.thumbFile, j.original_file]) if (n) referenced.add(n);
   }
-  let removed = 0;
+  const left = [];
   for (const name of names || []) {
     if (typeof name !== 'string' || !/^[0-9a-f]{16}\.(3mf|png)$/.test(name) || referenced.has(name)) continue;
+    let ok = true;
     for (const f of [name, `${name}.part`]) {
-      try { fs.unlinkSync(path.join(UPLOADS_DIR, f)); removed++; } catch { /* absent / best effort */ }
+      try { fs.unlinkSync(path.join(UPLOADS_DIR, f)); } catch (err) {
+        if (err.code !== 'ENOENT') { ok = false; console.warn(`[plate-split] could not unlink ${f}: ${err.message}`); }
+      }
     }
+    if (!ok) left.push(name);
   }
-  return removed;
+  return left;
 }
+// Remove a job's recorded outputs; the record shrinks to the names still undeleted
+// (removed entirely only when nothing is left). Returns how many remain.
 function removeRecordedSplitOutputs(jobId, payload) {
   const names = payload.outputs;
   if (!names || !names.length) return 0;
-  const removed = removeSplitOutputs(names);
-  delete payload.outputs;
-  db.prepare("UPDATE jobs SET split_payload=? WHERE id=? AND status='Processing'").run(JSON.stringify(payload), jobId);
-  return removed;
+  const left = removeSplitOutputs(names);
+  if (left.length) payload.outputs = left; else delete payload.outputs;
+  db.prepare('UPDATE jobs SET split_payload=? WHERE id=?').run(JSON.stringify(payload), jobId);
+  return left.length;
+}
+// Called before any route deletes job rows (single delete, printer cascade, import
+// restore). A 'Processing' placeholder owns files being written right now: refuse, so
+// its recorded outputs can never lose their owner mid-flight. A 'Split failed' row that
+// still records undeletable outputs gets one more cleanup attempt; if names remain the
+// delete is refused too, so no recorded file is ever orphaned. Returns an error or null.
+function splitDeleteBlock(rows) {
+  if (rows.some(r => r.status === 'Processing')) return 'A plate split is still running for this job; try again when it finishes';
+  for (const r of rows) {
+    if (r.status !== 'Split failed' || !r.split_payload) continue;
+    let payload;
+    try { payload = JSON.parse(r.split_payload); } catch { continue; }
+    if (removeRecordedSplitOutputs(r.id, payload) > 0) return 'Leftover split files could not be removed yet; try again';
+  }
+  return null;
 }
 // Boot recovery: a restart mid-split leaves 'Processing' rows; run them again.
 // runSplit first removes the outputs that row recorded before writing (see above).
@@ -1759,6 +1803,10 @@ app.post('/api/jobs/:id/split-fallback', (req, res) => {
   if (ph.status !== 'Split failed') return res.status(409).json({ error: 'Job is not in a failed split state' });
   try {
     const { payload, origName } = loadSplitContext(ph);
+    // The fallback deletes the placeholder, i.e. the owner of any undeleted recorded outputs.
+    if (removeRecordedSplitOutputs(ph.id, payload) > 0) {
+      return res.status(409).json({ error: 'Leftover split files could not be removed yet; try again' });
+    }
     const jobs = insertPlateJobs({
       expandedPlates: payload.plates, sched: payload.sched, projId: payload.projectId,
       thumbMap: {}, sourceName: ph.source_name, originalFile: null,

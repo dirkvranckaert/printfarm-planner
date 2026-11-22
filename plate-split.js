@@ -17,6 +17,8 @@ const { parseSliceInfo } = require('./parse3mf');
 
 const PLATE_FILE = /^Metadata\/(plate_no_light|plate|top|pick)_(\d+)(_small)?\.(png|json|gcode|gcode\.md5)$/;
 const GCODE = /^Metadata\/plate_(\d+)\.gcode$/;
+const MAX_THUMB_BYTES = 2 * 1024 * 1024; // real plate thumbnails: 4-35 KB
+const MAX_THUMBS_TOTAL = 16 * 1024 * 1024;
 
 /** Sliced plate indexes present in the archive (sorted); [] when not a sliced 3MF. */
 async function listSlicedPlates(filePath) {
@@ -43,9 +45,14 @@ async function readThumbnails(filePath) {
   const z = await zip.openZip(filePath);
   try {
     const out = [];
+    let total = 0;
     for (const e of z.entries) {
       const m = /^Metadata\/plate_(\d+)\.png$/.exec(e.name);
       if (!m) continue;
+      // Thumbnails are retained in memory until written: cap each and the sum
+      // (real ones are ~100s of KB) so a crafted archive can't pile up 32 MiB x N.
+      if (e.usize > MAX_THUMB_BYTES || total + e.usize > MAX_THUMBS_TOTAL) continue;
+      total += e.usize;
       const buffer = await zip.readEntry(z, e);
       if (buffer.length >= 100) out.push({ plateIndex: Number(m[1]), buffer });
     }
