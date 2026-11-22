@@ -48,6 +48,9 @@ printfarm-planner/
 ├── db.js                 ← SQLite setup and schema initialisation
 ├── push.js               ← Web Push module: VAPID key management, send to subscribers
 ├── bambu.js              ← BambuLab cloud MQTT client (low-level)
+├── zip-lite.js           ← Dependency-free zip reader/writer (size caps)
+├── plate-split.js        ← Per-plate split of multi-plate .gcode.3mf
+├── upload-stream.js      ← Streamed raw-body upload (500 MB cap)
 ├── brands/
 │   ├── index.js          ← Brand registry — connectAll, onUpdate, getAllStatuses
 │   └── bambulab.js       ← BambuLab brand module + Express router
@@ -424,6 +427,9 @@ Printer body fields: `name`, `color` (hex), `brand`, `bambu_serial?`, `pinned?` 
 | PUT | `/api/jobs/:id` | Replace job (full update) |
 | PATCH | `/api/jobs/:id` | Partial update (used for drag/resize) |
 | DELETE | `/api/jobs/:id` | Delete job |
+| POST | `/api/jobs/:id/split-retry` | Retry per-plate split of a `Split failed` job |
+| POST | `/api/jobs/:id/split-fallback` | Give up splitting: use original file, expand per plate (wrong-plate risk) |
+| DELETE | `/api/queue` | Clear queue — skips `Processing` jobs — returns `{ deleted, skipped }` |
 
 Job body fields: `printerId` (int), `name`, `customerName`, `orderNr`, `start` (datetime-local string), `end` (datetime-local string), `queued` (bool), `status` (`Planned` / `Printing` / `Post Printing` / `Done`), `colors`, `printFile`, `remarks`
 
@@ -432,6 +438,8 @@ Job body fields: `printerId` (int), `name`, `customerName`, `orderNr`, `start` (
 `PUT` is a **full-row replace**: any field you omit is nulled — send the whole row, or use `PATCH` for partial edits. Both PUT and PATCH clear `linked_printer_id` when the resulting status is not one of `Awaiting Printer` / `Printing` / `Paused`, so a job that leaves the print cycle never stays linked to the printer.
 
 Queued jobs have `queued = 1`; scheduled jobs have `queued = 0` with real datetime values.
+
+**Multi-plate `.gcode.3mf` upload:** server splits per plate. Upload (streamed, max 500 MB, `413` above) first inserts a placeholder job with status `Processing`; it expands into one job per plate named `<source name> <plate>`. Split failure → status `Split failed`; recover via `split-retry` or `split-fallback`. `DELETE` job / `DELETE` printer / import return `409` while a job is `Processing`.
 
 ### Closures
 
