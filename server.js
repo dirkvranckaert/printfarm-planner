@@ -520,7 +520,7 @@ app.put('/api/printers/:id', (req, res) => {
 app.delete('/api/printers/:id', (req, res) => {
   // Deleting a printer cascades to its jobs — clean up their upload artifacts too.
   const jobs = db.prepare('SELECT id, status, split_payload, printFile, thumbFile, original_file FROM jobs WHERE printerId=?').all(req.params.id);
-  const blocked = splitDeleteBlock(jobs);
+  const blocked = printerSplitBlock(req.params.id) || splitDeleteBlock(jobs);
   if (blocked) return res.status(409).json({ error: blocked });
   db.prepare('DELETE FROM jobs WHERE printerId=?').run(req.params.id);
   db.prepare('DELETE FROM printers WHERE id=?').run(req.params.id);
@@ -1681,9 +1681,9 @@ async function runSplit(jobId) {
     const ctx = loadSplitContext(ph);
     const { origName, origPath } = ctx;
     payload = ctx.payload;
-    // Leftovers of an interrupted / failed earlier attempt. Names that could not be
-    // deleted stay recorded: never plan (= overwrite the record) while any remain.
-    if (removeRecordedSplitOutputs(jobId, payload) > 0) throw new Error('Outputs of an earlier split attempt could not be removed');
+    // Leftovers of an interrupted / failed earlier attempt are released first
+    // (undeletable names move to split_orphans, they never block this run).
+    removeRecordedSplitOutputs(jobId, payload);
     if (!origPath || !fs.existsSync(origPath)) throw new Error('Original 3MF is missing');
     const planIdx = [...new Set(payload.plates.map(p => p.plateIndex))];
     const thumbs = await safeReadThumbnails(origPath);
@@ -1716,11 +1716,10 @@ async function runSplit(jobId) {
     });
     broadcastJobsUpdated();
   } catch (err) {
-    // Failure cleanup keeps ownership of whatever it could not delete: those names stay
-    // in the record (a later retry/boot recovery tries again, delete/import refuse).
+    // Failure cleanup releases what this attempt wrote; undeletable names go to split_orphans.
     if (made.length && payload) {
-      const left = removeSplitOutputs(made);
-      if (left.length) payload.outputs = left; else delete payload.outputs;
+      releaseSplitOutputs(made);
+      delete payload.outputs;
       db.prepare('UPDATE jobs SET split_payload=? WHERE id=?').run(JSON.stringify(payload), jobId);
     }
     db.prepare("UPDATE jobs SET status='Split failed', split_error=? WHERE id=? AND status='Processing'")
@@ -1728,52 +1727,76 @@ async function runSplit(jobId) {
     broadcastJobsUpdated();
   }
 }
-// Delete exactly these recorded split outputs (+ their in-flight `.part`). No
-// directory scan, no age heuristic: a file this job did not record is never touched
-// (an upload in flight in this or another process is safe). Names still referenced
-// by a job are skipped; names that are not generated stored names are ignored.
-// Returns the names whose deletion was NOT confirmed (an unlink error other than
-// ENOENT on the file or its `.part`): the caller must keep those in the record.
-function removeSplitOutputs(names) {
-  const referenced = new Set();
-  for (const j of db.prepare('SELECT printFile, thumbFile, original_file FROM jobs').all()) {
-    for (const n of [j.printFile, j.thumbFile, j.original_file]) if (n) referenced.add(n);
+// Split outputs are owned by the placeholder's record while it lives. When the record
+// goes away (delete / fallback / retry / failure / import) the names are RELEASED: each is
+// unlinked (+ its in-flight `.part`); a name that cannot be unlinked (anything but ENOENT)
+// moves to the `split_orphans` table instead of blocking the user. No file is ever
+// untracked and no user action is ever refused because of a filesystem error. Only
+// exact recorded names are touched (no directory scan, no age heuristic); names still
+// referenced by a job, or that are not generated stored names, are skipped.
+const SPLIT_NAME_RE = /^[0-9a-f]{16}\.(3mf|png)$/;
+function unlinkWithPart(name) {
+  let err2 = null;
+  for (const f of [name, `${name}.part`]) {
+    try { fs.unlinkSync(path.join(UPLOADS_DIR, f)); } catch (err) { if (err.code !== 'ENOENT') err2 = err; }
   }
-  const left = [];
-  for (const name of names || []) {
-    if (typeof name !== 'string' || !/^[0-9a-f]{16}\.(3mf|png)$/.test(name) || referenced.has(name)) continue;
-    let ok = true;
-    for (const f of [name, `${name}.part`]) {
-      try { fs.unlinkSync(path.join(UPLOADS_DIR, f)); } catch (err) {
-        if (err.code !== 'ENOENT') { ok = false; console.warn(`[plate-split] could not unlink ${f}: ${err.message}`); }
-      }
-    }
-    if (!ok) left.push(name);
-  }
-  return left;
+  return err2;
 }
-// Remove a job's recorded outputs; the record shrinks to the names still undeleted
-// (removed entirely only when nothing is left). Returns how many remain.
+function isReferencedUpload(name) {
+  return db.prepare('SELECT 1 FROM jobs WHERE printFile=? OR thumbFile=? OR original_file=?').get(name, name, name) != null;
+}
+function releaseSplitOutputs(names) {
+  for (const name of names || []) {
+    if (typeof name !== 'string' || !SPLIT_NAME_RE.test(name) || isReferencedUpload(name)) continue;
+    const err = unlinkWithPart(name);
+    if (!err) continue;
+    console.warn(`[plate-split] could not unlink ${name}, kept for retry: ${err.message}`);
+    db.prepare('INSERT INTO split_orphans (name, first_seen, last_error) VALUES (?,?,?) ON CONFLICT(name) DO UPDATE SET last_error=excluded.last_error')
+      .run(name, Date.now(), String(err.message || err).slice(0, 300));
+  }
+}
+// Retry every orphaned name (boot + periodic). A name a job references is dropped from
+// the list without touching the file.
+function drainSplitOrphans() {
+  for (const { name } of db.prepare('SELECT name FROM split_orphans').all()) {
+    if (isReferencedUpload(name)) { db.prepare('DELETE FROM split_orphans WHERE name=?').run(name); continue; }
+    const err = unlinkWithPart(name);
+    if (!err) db.prepare('DELETE FROM split_orphans WHERE name=?').run(name);
+    else db.prepare('UPDATE split_orphans SET last_error=? WHERE name=?').run(String(err.message || err).slice(0, 300), name);
+  }
+}
+app.drainSplitOrphans = drainSplitOrphans;
+// Release a job's recorded outputs and clear the record.
 function removeRecordedSplitOutputs(jobId, payload) {
-  const names = payload.outputs;
-  if (!names || !names.length) return 0;
-  const left = removeSplitOutputs(names);
-  if (left.length) payload.outputs = left; else delete payload.outputs;
+  if (!payload.outputs || !payload.outputs.length) return;
+  releaseSplitOutputs(payload.outputs);
+  delete payload.outputs;
   db.prepare('UPDATE jobs SET split_payload=? WHERE id=?').run(JSON.stringify(payload), jobId);
-  return left.length;
 }
 // Called before any route deletes job rows (single delete, printer cascade, import
-// restore). A 'Processing' placeholder owns files being written right now: refuse, so
-// its recorded outputs can never lose their owner mid-flight. A 'Split failed' row that
-// still records undeletable outputs gets one more cleanup attempt; if names remain the
-// delete is refused too, so no recorded file is ever orphaned. Returns an error or null.
+// restore). A 'Processing' placeholder owns files being written right now: refuse (the
+// split finishes or fails on its own, so this is transient). 'Split failed' rows release
+// their recorded outputs (undeletable ones go to split_orphans) and never block.
 function splitDeleteBlock(rows) {
   if (rows.some(r => r.status === 'Processing')) return 'A plate split is still running for this job; try again when it finishes';
   for (const r of rows) {
     if (r.status !== 'Split failed' || !r.split_payload) continue;
     let payload;
     try { payload = JSON.parse(r.split_payload); } catch { continue; }
-    if (removeRecordedSplitOutputs(r.id, payload) > 0) return 'Leftover split files could not be removed yet; try again';
+    removeRecordedSplitOutputs(r.id, payload);
+  }
+  return null;
+}
+// A placeholder's printers live in split_payload.plates (its own printerId is NULL), so
+// deleting a printer is refused while a pending ('Processing' / 'Split failed') split
+// still references it: retry / fallback would fail with "Unknown printer".
+function printerSplitBlock(printerId) {
+  for (const r of db.prepare("SELECT split_payload FROM jobs WHERE status IN ('Processing','Split failed') AND split_payload IS NOT NULL").all()) {
+    let payload;
+    try { payload = JSON.parse(r.split_payload); } catch { continue; }
+    if ((payload.plates || []).some(pl => pl.printerId != null && String(pl.printerId) === String(printerId))) {
+      return 'A plate split for this printer is pending; wait for it to finish (or retry / use the original file) before deleting the printer';
+    }
   }
   return null;
 }
@@ -1803,10 +1826,8 @@ app.post('/api/jobs/:id/split-fallback', (req, res) => {
   if (ph.status !== 'Split failed') return res.status(409).json({ error: 'Job is not in a failed split state' });
   try {
     const { payload, origName } = loadSplitContext(ph);
-    // The fallback deletes the placeholder, i.e. the owner of any undeleted recorded outputs.
-    if (removeRecordedSplitOutputs(ph.id, payload) > 0) {
-      return res.status(409).json({ error: 'Leftover split files could not be removed yet; try again' });
-    }
+    // The fallback deletes the placeholder, the owner of any recorded outputs: release them.
+    removeRecordedSplitOutputs(ph.id, payload);
     const jobs = insertPlateJobs({
       expandedPlates: payload.plates, sched: payload.sched, projId: payload.projectId,
       thumbMap: {}, sourceName: ph.source_name, originalFile: null,
@@ -2002,6 +2023,8 @@ if (require.main === module) {
     // -3MF backlog never blocks incoming HTTP — the port answers immediately and
     // the backfill self-heals in the background. See runItemsBackfill above.
     runItemsBackfill();
+    drainSplitOrphans(); // retry undeletable split outputs (#4051)
+    setInterval(drainSplitOrphans, 10 * 60 * 1000).unref();
     recoverSplits(); // re-run plate splits interrupted by a restart (#4051)
   });
 }

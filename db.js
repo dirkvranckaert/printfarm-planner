@@ -189,6 +189,12 @@ db.exec(`CREATE TABLE IF NOT EXISTS projects (
   status     TEXT NOT NULL DEFAULT 'open',
   created_at INTEGER NOT NULL DEFAULT (strftime('%s','now')*1000)
 );`);
+// Split outputs that could not be unlinked (#4051): retried at boot + periodically.
+db.exec(`CREATE TABLE IF NOT EXISTS split_orphans (
+  name       TEXT PRIMARY KEY,
+  first_seen INTEGER NOT NULL,
+  last_error TEXT
+);`);
 const jobColsProject = db.pragma('table_info(jobs)');
 if (!jobColsProject.some(c => c.name === 'project_id')) {
   db.exec('ALTER TABLE jobs ADD COLUMN project_id TEXT');

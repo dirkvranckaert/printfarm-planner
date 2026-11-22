@@ -80,6 +80,13 @@ async function api(method, path, body) {
   return method === 'DELETE' ? null : res.json();
 }
 
+// Server errors arrive as the raw body, e.g. '{"error":"..."}': show just the message.
+function apiErrMsg(e) {
+  const raw = (e && e.message) || String(e);
+  try { const j = JSON.parse(raw); if (j && j.error) return j.error; } catch { /* plain text */ }
+  return raw;
+}
+
 // ---- Live status helpers ----
 // Status is keyed as "{brand}:{printerKey}" — e.g. "bambulab:01P00A123456789".
 // Add a case here when a new brand integration is added.
@@ -1308,21 +1315,21 @@ async function renderQueuePanel() {
   );
   panel.querySelectorAll('.queue-split-retry-btn').forEach(btn =>
     btn.addEventListener('click', async () => {
-      await api('POST', `/api/jobs/${btn.dataset.id}/split-retry`).catch(e => alert('Retry failed: ' + (e.message || e)));
+      await api('POST', `/api/jobs/${btn.dataset.id}/split-retry`).catch(e => alert('Retry failed: ' + apiErrMsg(e)));
       renderCalendar();
     })
   );
   panel.querySelectorAll('.queue-split-fallback-btn').forEach(btn =>
     btn.addEventListener('click', async () => {
       if (!confirm('Use the original multi-plate file for every plate? Printing then needs the right plate picked in the slicer.')) return;
-      await api('POST', `/api/jobs/${btn.dataset.id}/split-fallback`).catch(e => alert('Fallback failed: ' + (e.message || e)));
+      await api('POST', `/api/jobs/${btn.dataset.id}/split-fallback`).catch(e => alert('Fallback failed: ' + apiErrMsg(e)));
       renderCalendar();
     })
   );
   panel.querySelectorAll('.queue-delete-btn').forEach(btn =>
     btn.addEventListener('click', async () => {
       if (!confirm('Remove from queue?')) return;
-      await api('DELETE', `/api/jobs/${btn.dataset.id}`);
+      await api('DELETE', `/api/jobs/${btn.dataset.id}`).catch(e => alert('Could not remove: ' + apiErrMsg(e)));
       renderCalendar();
     })
   );
@@ -3736,7 +3743,7 @@ async function deletePrinter(id) {
     ? `This printer has ${count} job(s). Deleting it will also remove all its jobs. Continue?`
     : 'Delete this printer?';
   if (!confirm(msg)) return;
-  await api('DELETE', `/api/printers/${id}`);
+  try { await api('DELETE', `/api/printers/${id}`); } catch (e) { alert('Could not delete printer: ' + apiErrMsg(e)); return; }
   await refreshPrinterList();
   renderTopbarStatus();
   renderCalendar();

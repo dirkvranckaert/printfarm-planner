@@ -27,7 +27,7 @@ describe('plate split routes', () => {
   afterAll(() => closeServer(server));
   beforeEach(() => {
     jest.restoreAllMocks();
-    appDb.exec('DELETE FROM jobs; DELETE FROM printers;');
+    appDb.exec('DELETE FROM jobs; DELETE FROM printers; DELETE FROM split_orphans;');
   });
 
   const sched = obj => encodeURIComponent(JSON.stringify(obj));
@@ -302,19 +302,40 @@ describe('plate split routes', () => {
     fs.rmSync(path.join(uploadsDir, 'seed-orig.3mf'), { force: true });
   });
 
-  test('printer delete refuses while a Processing job is bound to it', async () => {
+  // R4-F2: production shape. The placeholder is created by the import route (printerId NULL);
+  // its printers live only in split_payload.plates.
+  test('printer delete refuses while a pending split (Processing or Split failed) references it', async () => {
     const pid = appDb.prepare("INSERT INTO printers (name, color) VALUES ('p','#fff')").run().lastInsertRowid;
-    const id = seedProcessing();
-    appDb.prepare('UPDATE jobs SET printerId=? WHERE id=?').run(pid, id);
-    const r = await request(server).delete(`/api/printers/${pid}`).set('Cookie', cookie);
+    const other = appDb.prepare("INSERT INTO printers (name, color) VALUES ('o','#000')").run().lastInsertRowid;
+    let release;
+    const gate = new Promise(r => { release = r; });
+    const split = jest.spyOn(plateSplit, 'splitPlate').mockImplementation(async () => { await gate; throw new Error('boom'); });
+    const res = await imp({ plates: plates(2).map(p => ({ ...p, printerId: pid })), mode: 'queue' });
+    expect(res.status).toBe(201);
+    const id = res.body.jobs[0].id;
+    expect(appDb.prepare('SELECT printerId, status FROM jobs WHERE id=?').get(id)).toMatchObject({ printerId: null, status: 'Processing' });
+    let r = await request(server).delete(`/api/printers/${pid}`).set('Cookie', cookie);
     expect(r.status).toBe(409);
+    expect(r.body.error).toMatch(/split/i);
+    // an unrelated printer is still deletable
+    expect((await request(server).delete(`/api/printers/${other}`).set('Cookie', cookie)).status).toBe(204);
+    release(); await settle();
+    expect(appDb.prepare('SELECT status FROM jobs WHERE id=?').get(id).status).toBe('Split failed');
+    r = await request(server).delete(`/api/printers/${pid}`).set('Cookie', cookie);
+    expect(r.status).toBe(409); // retry / fallback would still need the printer
     expect(jobs()).toHaveLength(1);
+    // once the split row is gone the printer can go
+    expect((await request(server).delete(`/api/jobs/${id}`).set('Cookie', cookie)).status).toBe(204);
+    expect((await request(server).delete(`/api/printers/${pid}`).set('Cookie', cookie)).status).toBe(204);
+    split.mockRestore();
     appDb.exec('DELETE FROM jobs; DELETE FROM printers;');
-    fs.rmSync(path.join(uploadsDir, 'seed-orig.3mf'), { force: true });
+    for (const n of hexFiles()) fs.unlinkSync(path.join(uploadsDir, n));
   });
 
-  // R3-F3: an output whose deletion is not confirmed stays recorded (never untracked).
-  test('failed cleanup keeps undeleted names recorded; delete/fallback refuse; retry converges', async () => {
+  // R4-F1: an undeletable output never blocks the user and is never untracked: it moves to
+  // split_orphans, the job proceeds, and the drain removes the file once unlink works again.
+  test('undeletable outputs go to split_orphans; delete/fallback/retry/import never block; drain converges', async () => {
+    const orphans = () => appDb.prepare('SELECT name, last_error FROM split_orphans').all().map(o => o.name);
     const id = seedProcessing();
     let target = null;
     const split = jest.spyOn(plateSplit, 'splitPlate').mockImplementation(async (src, idx, dest) => {
@@ -330,30 +351,49 @@ describe('plate split routes', () => {
     app.recoverSplits();
     await settle();
     expect(appDb.prepare('SELECT status FROM jobs WHERE id=?').get(id).status).toBe('Split failed');
-    expect(rowPayload(id).outputs).toEqual([target]); // only the undeletable one is kept
+    expect(rowPayload(id).outputs).toBeUndefined(); // ownership moved off the job
+    expect(orphans()).toEqual([target]);
+    expect(appDb.prepare('SELECT last_error FROM split_orphans').get().last_error).toMatch(/busy/);
     expect(fs.existsSync(path.join(uploadsDir, target))).toBe(true);
 
-    // owner row cannot vanish while the leftover is tracked
-    expect((await request(server).delete(`/api/jobs/${id}`).set('Cookie', cookie)).status).toBe(409);
-    expect((await request(server).post(`/api/jobs/${id}/split-fallback`).set('Cookie', cookie)).status).toBe(409);
-    expect(jobs()).toHaveLength(1);
-
-    // retry while still undeletable: no new plan is written over the record
+    // retry is not blocked (fails again, the new attempt's undeletable output is orphaned too)
     await request(server).post(`/api/jobs/${id}/split-retry`).set('Cookie', cookie);
     await settle();
-    expect(split).toHaveBeenCalledTimes(1);
-    expect(appDb.prepare('SELECT status FROM jobs WHERE id=?').get(id).status).toBe('Split failed');
-    expect(rowPayload(id).outputs).toEqual([target]);
+    expect(split).toHaveBeenCalledTimes(2);
 
-    // unlink works again: retry cleans the old name first and completes
-    unlink.mockRestore(); split.mockRestore();
-    await request(server).post(`/api/jobs/${id}/split-retry`).set('Cookie', cookie);
-    await settle();
-    expect(jobs()).toHaveLength(2);
-    expect(fs.existsSync(path.join(uploadsDir, target))).toBe(false);
+    // fallback / delete / import succeed even while unlink keeps failing
+    expect((await request(server).post(`/api/jobs/${id}/split-fallback`).set('Cookie', cookie)).status).toBe(201);
     appDb.exec('DELETE FROM jobs');
+    const id2 = seedProcessing();
+    appDb.prepare("UPDATE jobs SET status='Split failed' WHERE id=?").run(id2);
+    expect((await request(server).delete(`/api/jobs/${id2}`).set('Cookie', cookie)).status).toBe(204);
+    expect((await request(server).post('/api/import').set('Cookie', cookie).send({ printers: [], jobs: [] })).status).toBe(200);
+    expect(orphans()).toContain(target);
+
+    // still failing: drain keeps the name; a job referencing it never has it deleted
+    app.drainSplitOrphans();
+    expect(orphans()).toContain(target);
+    expect(fs.existsSync(path.join(uploadsDir, target))).toBe(true);
+
+    // unlink works again: drain removes file + row
+    unlink.mockRestore(); split.mockRestore();
+    app.drainSplitOrphans();
+    expect(orphans()).toEqual([]);
+    expect(fs.existsSync(path.join(uploadsDir, target))).toBe(false);
     fs.rmSync(path.join(uploadsDir, 'seed-orig.3mf'), { force: true });
     for (const n of hexFiles()) fs.unlinkSync(path.join(uploadsDir, n));
+  });
+
+  test('drain drops an orphan name a job references, without deleting the file', () => {
+    const name = `${require('crypto').randomBytes(8).toString('hex')}.3mf`;
+    fs.writeFileSync(path.join(uploadsDir, name), 'x');
+    appDb.prepare('INSERT INTO split_orphans (name, first_seen) VALUES (?,?)').run(name, Date.now());
+    appDb.prepare("INSERT INTO jobs (name, start, end, status, queued, printFile) VALUES ('r','','','Planned',1,?)").run(name);
+    app.drainSplitOrphans();
+    expect(appDb.prepare('SELECT COUNT(*) c FROM split_orphans').get().c).toBe(0);
+    expect(fs.existsSync(path.join(uploadsDir, name))).toBe(true);
+    appDb.exec('DELETE FROM jobs');
+    fs.unlinkSync(path.join(uploadsDir, name));
   });
 
   test('cleanup treats ENOENT as success (record cleared) and drops invalid names', async () => {
