@@ -1291,6 +1291,22 @@ app.delete('/api/jobs/:id', (req, res) => {
   res.status(204).end();
 });
 
+// Clear the print queue: delete every queued (unscheduled) job in ONE transaction, same
+// rules as the single delete. 'Processing' placeholders own files being written right now,
+// so they are skipped (not an error) and reported; scheduled jobs (queued=0) are never touched.
+// Files go through cleanupOrphanUploads AFTER the rows are gone (ref-counted originals).
+app.delete('/api/queue', (req, res) => {
+  const rows = db.prepare('SELECT id, status, split_payload, printFile, thumbFile, original_file FROM jobs WHERE queued=1').all();
+  const deletable = rows.filter(r => r.status !== 'Processing');
+  const skipped = rows.length - deletable.length;
+  splitDeleteBlock(deletable); // releases 'Split failed' outputs; cannot block (no Processing left)
+  const del = db.prepare('DELETE FROM jobs WHERE id=?');
+  db.transaction(() => { for (const r of deletable) del.run(r.id); })();
+  cleanupOrphanUploads(deletable.flatMap(r => [r.printFile, r.thumbFile, r.original_file]));
+  if (deletable.length) broadcastJobsUpdated();
+  res.json({ deleted: deletable.length, skipped });
+});
+
 // ---- Projects ----
 // Sorted summary list: active projects first (most active first), completed
 // below, closed at the very bottom. Each carries { toPrint, busy, done, total }.
