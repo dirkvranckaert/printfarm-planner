@@ -121,6 +121,34 @@ describe('plate split (zip-lite + plate-split)', () => {
     await expect(plateSplit.splitPlate(z64, 1, path.join(dir, 'z64-out.3mf'))).rejects.toThrow(/ZIP64/);
   });
 
+  // F1: the central-directory usize is attacker-declared; inflate must not trust it.
+  const lyingZip = async (file, declaredUsize, content) => {
+    const w = new zip.ZipWriter(file);
+    const comp = require('zlib').deflateRawSync(content);
+    await w._write(w._local('a.bin', { method: 8, time: 0, date: 0x21, crc: zip.crc32(content), csize: comp.length, usize: declaredUsize }));
+    await w._write(comp);
+    await w.finish();
+  };
+
+  test('readEntry: entry inflating past its declared size is rejected (decompression bomb)', async () => {
+    const f = path.join(dir, 'bomb.zip');
+    await lyingZip(f, 10, Buffer.alloc(1024 * 1024, 0));
+    await expect(zip.readNamed(f, 'a.bin')).rejects.toThrow();
+  });
+
+  test('readEntry: entry inflating short of its declared size is rejected', async () => {
+    const f = path.join(dir, 'short.zip');
+    await lyingZip(f, 5000, Buffer.alloc(100, 1));
+    await expect(zip.readNamed(f, 'a.bin')).rejects.toThrow(/Size mismatch/);
+  });
+
+  test('readEntry: honest entry still reads back exactly', async () => {
+    const f = path.join(dir, 'honest.zip');
+    const data = Buffer.alloc(4096, 7);
+    await lyingZip(f, data.length, data);
+    expect((await zip.readNamed(f, 'a.bin')).equals(data)).toBe(true);
+  });
+
   test('readThumbnails returns per-plate pngs', async () => {
     const src = path.join(dir, 'thumbs.gcode.3mf');
     await buildSliced3mf(src, 3);

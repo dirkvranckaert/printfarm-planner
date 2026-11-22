@@ -519,10 +519,10 @@ app.put('/api/printers/:id', (req, res) => {
 });
 app.delete('/api/printers/:id', (req, res) => {
   // Deleting a printer cascades to its jobs — clean up their upload artifacts too.
-  const jobs = db.prepare('SELECT printFile, thumbFile FROM jobs WHERE printerId=?').all(req.params.id);
+  const jobs = db.prepare('SELECT printFile, thumbFile, original_file FROM jobs WHERE printerId=?').all(req.params.id);
   db.prepare('DELETE FROM jobs WHERE printerId=?').run(req.params.id);
   db.prepare('DELETE FROM printers WHERE id=?').run(req.params.id);
-  cleanupOrphanUploads(jobs.flatMap(j => [j.printFile, j.thumbFile]));
+  cleanupOrphanUploads(jobs.flatMap(j => [j.printFile, j.thumbFile, j.original_file]));
   res.status(204).end();
 });
 
@@ -1698,8 +1698,32 @@ async function runSplit(jobId) {
   }
 }
 // Boot recovery: a restart mid-split leaves 'Processing' rows; run them again.
+// A crash mid-split leaves written per-plate files, thumbnails and the in-flight
+// `<hex>.3mf.part`; the re-run uses fresh random names, so sweep stale ones first:
+// stored-name files no job references that predate this process (a live upload or
+// split of this process is never touched).
+function sweepSplitLeftovers() {
+  const bootMs = Date.now() - process.uptime() * 1000;
+  const referenced = new Set();
+  for (const j of db.prepare('SELECT printFile, thumbFile, original_file FROM jobs').all()) {
+    for (const n of [j.printFile, j.thumbFile, j.original_file]) if (n) referenced.add(n);
+  }
+  let names = [];
+  try { names = fs.readdirSync(UPLOADS_DIR); } catch { return 0; }
+  let removed = 0;
+  for (const name of names) {
+    if (!/^[0-9a-f]{16}\.(3mf|png)(\.part)?$/.test(name) || referenced.has(name)) continue;
+    try {
+      if (fs.statSync(path.join(UPLOADS_DIR, name)).mtimeMs >= bootMs) continue;
+      fs.unlinkSync(path.join(UPLOADS_DIR, name));
+      removed++;
+    } catch { /* best effort */ }
+  }
+  return removed;
+}
 function recoverSplits() {
   const rows = db.prepare("SELECT id FROM jobs WHERE status='Processing'").all();
+  if (rows.length) sweepSplitLeftovers();
   for (const r of rows) enqueueSplit(r.id);
   return rows.length;
 }

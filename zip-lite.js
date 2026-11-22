@@ -109,7 +109,12 @@ async function readEntry(zip, entry) {
   if (entry.usize > MAX_EDIT_BYTES) throw new Error(`Entry too large to edit: ${entry.name}`);
   const raw = await readAt(zip.fh, await dataOffset(zip, entry), entry.csize);
   if (entry.method === 0) return raw;
-  if (entry.method === 8) return zlib.inflateRawSync(raw);
+  if (entry.method === 8) {
+    // usize is attacker-declared: cap the inflate so a lying entry can't balloon memory.
+    const out = zlib.inflateRawSync(raw, { maxOutputLength: Math.max(1, Math.min(entry.usize, MAX_EDIT_BYTES)) });
+    if (out.length !== entry.usize) throw new Error(`Size mismatch for ${entry.name}`);
+    return out;
+  }
   throw new Error(`Unsupported compression method ${entry.method} for ${entry.name}`);
 }
 

@@ -208,6 +208,25 @@ describe('plate split routes', () => {
     expect(res.status).toBe(201);
   });
 
+  // F2: crash mid-split leaves written plate files + a .part; recovery sweeps them.
+  test('boot recovery sweeps stale unreferenced split leftovers, keeps referenced and fresh files', async () => {
+    const hex = () => require('crypto').randomBytes(8).toString('hex');
+    const up = n => path.join(uploadsDir, n);
+    const old = new Date(Date.now() - 3600_000);
+    const stale = [`${hex()}.3mf`, `${hex()}.3mf.part`, `${hex()}.png`];
+    for (const n of stale) { fs.writeFileSync(up(n), 'x'); fs.utimesSync(up(n), old, old); }
+    const fresh = `${hex()}.3mf`; fs.writeFileSync(up(fresh), 'x'); // this process's own file
+    const kept = `${hex()}.3mf`; fs.writeFileSync(up(kept), 'x'); fs.utimesSync(up(kept), old, old);
+    const unrelated = 'notes.txt'; fs.writeFileSync(up(unrelated), 'x'); fs.utimesSync(up(unrelated), old, old);
+    appDb.prepare("INSERT INTO jobs (name, start, end, status, queued, printFile) VALUES ('ref','','','Planned',1,?)").run(kept);
+    const payload = { plates: plates(1), sched: { isQueue: true }, projectId: null };
+    appDb.prepare("INSERT INTO jobs (name, start, end, status, queued, original_file, split_payload) VALUES ('rec','','','Processing',1,'0000000000000000.3mf',?)").run(JSON.stringify(payload));
+    app.recoverSplits();
+    await settle();
+    for (const n of stale) expect(fs.existsSync(up(n))).toBe(false);
+    for (const n of [fresh, kept, unrelated]) { expect(fs.existsSync(up(n))).toBe(true); fs.unlinkSync(up(n)); }
+  });
+
   test('traversal stays rejected: stored name with ../ never resolves (slicer-link, split)', async () => {
     const id = appDb.prepare("INSERT INTO jobs (name, start, end, status, queued, printFile) VALUES ('t','','','Planned',1,'../planner.db')").run().lastInsertRowid;
     expect((await request(server).post(`/api/jobs/${id}/slicer-link`).set('Cookie', cookie)).status).toBe(404);
