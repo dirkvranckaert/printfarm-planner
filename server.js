@@ -1666,24 +1666,34 @@ function loadSplitContext(ph) {
 async function runSplit(jobId) {
   const ph = db.prepare("SELECT * FROM jobs WHERE id=? AND status='Processing'").get(jobId);
   if (!ph) return;
-  const made = [];
+  // Deterministic ownership: the output names are allocated and recorded in this
+  // job's split_payload BEFORE anything is written. Cleanup (failure, or re-run
+  // after a restart) deletes exactly the recorded names, never anything else.
+  let made = [];
   try {
     const { payload, origName, origPath } = loadSplitContext(ph);
+    removeRecordedSplitOutputs(jobId, payload); // leftovers of an interrupted earlier attempt
     if (!origPath || !fs.existsSync(origPath)) throw new Error('Original 3MF is missing');
+    const planIdx = [...new Set(payload.plates.map(p => p.plateIndex))];
+    const thumbs = await safeReadThumbnails(origPath);
+    const planNames = {
+      plates: planIdx.map(idx => ({ idx, name: newStoredName() })),
+      thumbs: thumbs.map(t => ({ plateIndex: t.plateIndex, name: crypto.randomBytes(8).toString('hex') + '.png' })),
+    };
+    made = [...planNames.plates.map(p => p.name), ...planNames.thumbs.map(t => t.name)];
+    payload.outputs = made;
+    db.prepare("UPDATE jobs SET split_payload=? WHERE id=? AND status='Processing'").run(JSON.stringify(payload), jobId);
     const fileByPlate = {};
-    for (const idx of [...new Set(payload.plates.map(p => p.plateIndex))]) {
-      const name = newStoredName();
-      made.push(name);
+    for (const { idx, name } of planNames.plates) {
       await plateSplit.splitPlate(origPath, idx, path.join(UPLOADS_DIR, name));
       fileByPlate[idx] = name;
     }
     const thumbMap = {};
-    for (const t of await safeReadThumbnails(origPath)) {
-      const imgId = crypto.randomBytes(8).toString('hex') + '.png';
+    thumbs.forEach((t, i) => {
+      const imgId = planNames.thumbs[i].name;
       fs.writeFileSync(path.join(UPLOADS_DIR, imgId), t.buffer);
-      made.push(imgId);
       thumbMap[t.plateIndex] = imgId;
-    }
+    });
     insertPlateJobs({
       expandedPlates: payload.plates, sched: payload.sched, projId: payload.projectId,
       thumbMap, sourceName: ph.source_name, originalFile: origName,
@@ -1691,39 +1701,42 @@ async function runSplit(jobId) {
     });
     broadcastJobsUpdated();
   } catch (err) {
-    for (const f of made) unlinkQuiet(f);
+    removeSplitOutputs(made);
     db.prepare("UPDATE jobs SET status='Split failed', split_error=? WHERE id=? AND status='Processing'")
       .run(String(err.message || err).slice(0, 500), jobId);
     broadcastJobsUpdated();
   }
 }
-// Boot recovery: a restart mid-split leaves 'Processing' rows; run them again.
-// A crash mid-split leaves written per-plate files, thumbnails and the in-flight
-// `<hex>.3mf.part`; the re-run uses fresh random names, so sweep stale ones first:
-// stored-name files no job references that predate this process (a live upload or
-// split of this process is never touched).
-function sweepSplitLeftovers() {
-  const bootMs = Date.now() - process.uptime() * 1000;
+// Delete exactly these recorded split outputs (+ their in-flight `.part`). No
+// directory scan, no age heuristic: a file this job did not record is never touched
+// (an upload in flight in this or another process is safe). Names still referenced
+// by a job are skipped; names that are not generated stored names are ignored.
+function removeSplitOutputs(names) {
   const referenced = new Set();
   for (const j of db.prepare('SELECT printFile, thumbFile, original_file FROM jobs').all()) {
     for (const n of [j.printFile, j.thumbFile, j.original_file]) if (n) referenced.add(n);
   }
-  let names = [];
-  try { names = fs.readdirSync(UPLOADS_DIR); } catch { return 0; }
   let removed = 0;
-  for (const name of names) {
-    if (!/^[0-9a-f]{16}\.(3mf|png)(\.part)?$/.test(name) || referenced.has(name)) continue;
-    try {
-      if (fs.statSync(path.join(UPLOADS_DIR, name)).mtimeMs >= bootMs) continue;
-      fs.unlinkSync(path.join(UPLOADS_DIR, name));
-      removed++;
-    } catch { /* best effort */ }
+  for (const name of names || []) {
+    if (typeof name !== 'string' || !/^[0-9a-f]{16}\.(3mf|png)$/.test(name) || referenced.has(name)) continue;
+    for (const f of [name, `${name}.part`]) {
+      try { fs.unlinkSync(path.join(UPLOADS_DIR, f)); removed++; } catch { /* absent / best effort */ }
+    }
   }
   return removed;
 }
+function removeRecordedSplitOutputs(jobId, payload) {
+  const names = payload.outputs;
+  if (!names || !names.length) return 0;
+  const removed = removeSplitOutputs(names);
+  delete payload.outputs;
+  db.prepare("UPDATE jobs SET split_payload=? WHERE id=? AND status='Processing'").run(JSON.stringify(payload), jobId);
+  return removed;
+}
+// Boot recovery: a restart mid-split leaves 'Processing' rows; run them again.
+// runSplit first removes the outputs that row recorded before writing (see above).
 function recoverSplits() {
   const rows = db.prepare("SELECT id FROM jobs WHERE status='Processing'").all();
-  if (rows.length) sweepSplitLeftovers();
   for (const r of rows) enqueueSplit(r.id);
   return rows.length;
 }

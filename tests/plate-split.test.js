@@ -142,6 +142,87 @@ describe('plate split (zip-lite + plate-split)', () => {
     await expect(zip.readNamed(f, 'a.bin')).rejects.toThrow(/Size mismatch/);
   });
 
+  // Round-2 F1: csize/usize/method/cd bounds are checked before any allocation.
+  const patchedZip = async (file, { method = 8, content = Buffer.alloc(64, 1), csize, usize, cdSize, cdOffset } = {}) => {
+    const w = new zip.ZipWriter(file);
+    const comp = method === 0 ? content : require('zlib').deflateRawSync(content);
+    await w._write(w._local('a.bin', { method, time: 0, date: 0x21, crc: zip.crc32(content), csize: comp.length, usize: content.length }));
+    await w._write(comp);
+    await w.finish();
+    const buf = Buffer.from(fs.readFileSync(file));
+    const cen = buf.lastIndexOf(Buffer.from([0x50, 0x4b, 0x01, 0x02]));
+    const eocd = buf.lastIndexOf(Buffer.from([0x50, 0x4b, 0x05, 0x06]));
+    if (csize !== undefined) buf.writeUInt32LE(csize, cen + 20);
+    if (usize !== undefined) buf.writeUInt32LE(usize, cen + 24);
+    if (method === 0) buf.writeUInt16LE(0, cen + 10);
+    if (cdSize !== undefined) buf.writeUInt32LE(cdSize, eocd + 12);
+    if (cdOffset !== undefined) buf.writeUInt32LE(cdOffset, eocd + 16);
+    fs.writeFileSync(file, buf);
+  };
+  const allocSpy = () => jest.spyOn(Buffer, 'alloc');
+  const maxAlloc = spy => Math.max(0, ...spy.mock.calls.map(c => Number(c[0]) || 0));
+
+  test('readEntry: huge declared csize (deflate) is rejected without allocating it', async () => {
+    const f = path.join(dir, 'bigc-deflate.zip');
+    await patchedZip(f, { csize: 0xfffffff0, usize: 0 });
+    const spy = allocSpy();
+    try {
+      await expect(zip.readNamed(f, 'a.bin')).rejects.toThrow(/too large/);
+      expect(maxAlloc(spy)).toBeLessThan(1024 * 1024);
+    } finally { spy.mockRestore(); }
+  });
+
+  test('readEntry: huge declared csize (stored) is rejected without allocating it', async () => {
+    const f = path.join(dir, 'bigc-stored.zip');
+    await patchedZip(f, { method: 0, csize: 0xfffffff0, usize: 0xfffffff0 });
+    const spy = allocSpy();
+    try {
+      await expect(zip.readNamed(f, 'a.bin')).rejects.toThrow(/too large/);
+      expect(maxAlloc(spy)).toBeLessThan(1024 * 1024);
+    } finally { spy.mockRestore(); }
+  });
+
+  test('readEntry: csize within the cap but beyond the real file is rejected before alloc', async () => {
+    const f = path.join(dir, 'beyond.zip');
+    await patchedZip(f, { csize: 20 * 1024 * 1024, usize: 20 * 1024 * 1024 });
+    const spy = allocSpy();
+    try {
+      await expect(zip.readNamed(f, 'a.bin')).rejects.toThrow(/outside file/);
+      expect(maxAlloc(spy)).toBeLessThan(1024 * 1024);
+    } finally { spy.mockRestore(); }
+  });
+
+  test('readEntry: stored entry must have csize === usize', async () => {
+    const f = path.join(dir, 'stored-mismatch.zip');
+    await patchedZip(f, { method: 0, content: Buffer.alloc(64, 2), usize: 10 });
+    await expect(zip.readNamed(f, 'a.bin')).rejects.toThrow(/Size mismatch/);
+  });
+
+  test('readEntry: stored entry honest size reads back', async () => {
+    const f = path.join(dir, 'stored-ok.zip');
+    await patchedZip(f, { method: 0, content: Buffer.alloc(64, 3) });
+    expect((await zip.readNamed(f, 'a.bin')).equals(Buffer.alloc(64, 3))).toBe(true);
+  });
+
+  test('readEntry: unknown compression method is rejected before reading data', async () => {
+    const f = path.join(dir, 'method99.zip');
+    await patchedZip(f);
+    const buf = Buffer.from(fs.readFileSync(f));
+    buf.writeUInt16LE(99, buf.lastIndexOf(Buffer.from([0x50, 0x4b, 0x01, 0x02])) + 10);
+    fs.writeFileSync(f, buf);
+    await expect(zip.readNamed(f, 'a.bin')).rejects.toThrow(/Unsupported compression method 99/);
+  });
+
+  test('openZip: central directory size/offset declared past the file is rejected before alloc', async () => {
+    const f = path.join(dir, 'bigcd.zip');
+    await patchedZip(f, { cdSize: 0xfffffff0 });
+    const spy = allocSpy();
+    try {
+      await expect(zip.openZip(f)).rejects.toThrow(/central directory/);
+      expect(maxAlloc(spy)).toBeLessThan(1024 * 1024);
+    } finally { spy.mockRestore(); }
+  });
+
   test('readEntry: honest entry still reads back exactly', async () => {
     const f = path.join(dir, 'honest.zip');
     const data = Buffer.alloc(4096, 7);

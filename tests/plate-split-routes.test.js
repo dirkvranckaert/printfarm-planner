@@ -208,23 +208,56 @@ describe('plate split routes', () => {
     expect(res.status).toBe(201);
   });
 
-  // F2: crash mid-split leaves written plate files + a .part; recovery sweeps them.
-  test('boot recovery sweeps stale unreferenced split leftovers, keeps referenced and fresh files', async () => {
+  // Round-2 F2: cleanup is deterministic. A crash mid-split leaves the outputs the Processing
+  // row recorded in split_payload.outputs; the re-run deletes exactly those (+ their .part),
+  // never an unrecorded file, however old (it may be another process's upload in flight).
+  test('boot recovery deletes only the outputs the Processing job recorded, never unrecorded files', async () => {
     const hex = () => require('crypto').randomBytes(8).toString('hex');
     const up = n => path.join(uploadsDir, n);
     const old = new Date(Date.now() - 3600_000);
-    const stale = [`${hex()}.3mf`, `${hex()}.3mf.part`, `${hex()}.png`];
-    for (const n of stale) { fs.writeFileSync(up(n), 'x'); fs.utimesSync(up(n), old, old); }
-    const fresh = `${hex()}.3mf`; fs.writeFileSync(up(fresh), 'x'); // this process's own file
-    const kept = `${hex()}.3mf`; fs.writeFileSync(up(kept), 'x'); fs.utimesSync(up(kept), old, old);
-    const unrelated = 'notes.txt'; fs.writeFileSync(up(unrelated), 'x'); fs.utimesSync(up(unrelated), old, old);
+    const first = (await imp({ plates: plates(2), mode: 'queue' }));
+    await settle();
+    const orig = jobs()[0].original_file;
+    const recorded = [`${hex()}.3mf`, `${hex()}.png`];
+    const recordedPart = `${recorded[0]}.part`;
+    for (const n of [...recorded, recordedPart]) fs.writeFileSync(up(n), 'x');
+    // unrecorded: old stale-looking files an overlapping process could be writing
+    const foreign = [`${hex()}.3mf`, `${hex()}.3mf.part`, `${hex()}.png`];
+    for (const n of foreign) { fs.writeFileSync(up(n), 'x'); fs.utimesSync(up(n), old, old); }
+    const kept = `${hex()}.3mf`; fs.writeFileSync(up(kept), 'x');
     appDb.prepare("INSERT INTO jobs (name, start, end, status, queued, printFile) VALUES ('ref','','','Planned',1,?)").run(kept);
-    const payload = { plates: plates(1), sched: { isQueue: true }, projectId: null };
-    appDb.prepare("INSERT INTO jobs (name, start, end, status, queued, original_file, split_payload) VALUES ('rec','','','Processing',1,'0000000000000000.3mf',?)").run(JSON.stringify(payload));
+    const outsider = 'notes.txt'; fs.writeFileSync(up(outsider), 'x');
+    appDb.exec("DELETE FROM jobs WHERE name != 'ref'");
+    const payload = { plates: plates(2), sched: { isQueue: true }, projectId: null, outputs: [...recorded, kept, '../planner.db', 'notes.txt'] };
+    const id = appDb.prepare("INSERT INTO jobs (name, start, end, status, queued, original_file, split_payload) VALUES ('rec','','','Processing',1,?,?)")
+      .run(orig, JSON.stringify(payload)).lastInsertRowid;
     app.recoverSplits();
     await settle();
-    for (const n of stale) expect(fs.existsSync(up(n))).toBe(false);
-    for (const n of [fresh, kept, unrelated]) { expect(fs.existsSync(up(n))).toBe(true); fs.unlinkSync(up(n)); }
+    for (const n of [...recorded, recordedPart]) expect(fs.existsSync(up(n))).toBe(false);
+    for (const n of [...foreign, kept, outsider]) { expect(fs.existsSync(up(n))).toBe(true); fs.unlinkSync(up(n)); }
+    expect(appDb.prepare('SELECT 1 FROM jobs WHERE id=?').get(id)).toBeUndefined(); // placeholder replaced
+    expect(jobs().filter(j => j.name !== 'ref')).toHaveLength(2);
+    expect(first.status).toBe(201);
+  });
+
+  test('runSplit records its output names in split_payload before writing; failure removes them', async () => {
+    const orig = path.join(uploadsDir, 'rec-orig.3mf');
+    fs.writeFileSync(orig, fs.readFileSync(path.join(uploadsDir, '..', 'multi-src.gcode.3mf')));
+    const payload = { plates: plates(2), sched: { isQueue: true }, projectId: null };
+    const id = appDb.prepare("INSERT INTO jobs (name, start, end, status, queued, original_file, split_payload) VALUES ('f','','','Processing',1,'rec-orig.3mf',?)")
+      .run(JSON.stringify(payload)).lastInsertRowid;
+    jest.spyOn(plateSplit, 'splitPlate').mockImplementation(async (src, idx, dest) => {
+      const rec = JSON.parse(appDb.prepare('SELECT split_payload FROM jobs WHERE id=?').get(id).split_payload);
+      expect(rec.outputs).toContain(path.basename(dest)); // recorded before the write
+      fs.writeFileSync(`${dest}.part`, 'x');
+      throw new Error('boom');
+    });
+    const before = fs.readdirSync(uploadsDir).filter(n => /^[0-9a-f]{16}\./.test(n));
+    app.recoverSplits();
+    await settle();
+    expect(appDb.prepare('SELECT status FROM jobs WHERE id=?').get(id).status).toBe('Split failed');
+    expect(fs.readdirSync(uploadsDir).filter(n => /^[0-9a-f]{16}\./.test(n)).sort()).toEqual(before.sort());
+    fs.unlinkSync(orig);
   });
 
   test('traversal stays rejected: stored name with ../ never resolves (slicer-link, split)', async () => {

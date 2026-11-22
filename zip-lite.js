@@ -22,6 +22,7 @@ const SIG_EOCD = 0x06054b50;
 const SIG_CEN = 0x02014b50;
 const SIG_LOC = 0x04034b50;
 const MAX_EDIT_BYTES = 32 * 1024 * 1024; // entries we inflate into memory (configs, never gcode)
+const MAX_DEFLATE_SLACK = 1024 * 1024; // deflate may expand incompressible data slightly
 
 let crcTable = null;
 function crc32(buf) {
@@ -38,7 +39,12 @@ function crc32(buf) {
   return (c ^ 0xffffffff) >>> 0;
 }
 
-async function readAt(fh, position, length) {
+// Every length/offset read from an archive is attacker-declared: bound the range
+// against the real file size BEFORE allocating, so a tiny zip can't ask for GiBs.
+async function readAt(fh, position, length, fileSize) {
+  if (!Number.isInteger(length) || length < 0 || position < 0 || position + length > fileSize) {
+    throw new Error('Zip range outside file');
+  }
   const buf = Buffer.alloc(length);
   const { bytesRead } = await fh.read(buf, 0, length, position);
   if (bytesRead !== length) throw new Error('Unexpected end of zip file');
@@ -52,7 +58,7 @@ async function openZip(filePath) {
     const { size } = await fh.stat();
     if (size < 22) throw new Error('Not a zip file');
     const tailLen = Math.min(size, 22 + 65535);
-    const tail = await readAt(fh, size - tailLen, tailLen);
+    const tail = await readAt(fh, size - tailLen, tailLen, size);
     let e = -1;
     for (let i = tail.length - 22; i >= 0; i--) {
       if (tail.readUInt32LE(i) === SIG_EOCD) { e = i; break; }
@@ -64,7 +70,8 @@ async function openZip(filePath) {
     if (count === 0xffff || cdSize === 0xffffffff || cdOffset === 0xffffffff) {
       throw new Error('ZIP64 archives are not supported');
     }
-    const cd = await readAt(fh, cdOffset, cdSize);
+    if (cdOffset + cdSize > size || count * 46 > cdSize) throw new Error('Corrupt zip central directory');
+    const cd = await readAt(fh, cdOffset, cdSize, size);
     const entries = [];
     let p = 0;
     for (let i = 0; i < count; i++) {
@@ -90,7 +97,7 @@ async function openZip(filePath) {
       p += 46 + nameLen + extraLen + commentLen;
     }
     const byName = new Map(entries.map(en => [en.name, en]));
-    return { fh, entries, byName, close: () => fh.close() };
+    return { fh, size, entries, byName, close: () => fh.close() };
   } catch (err) {
     await fh.close();
     throw err;
@@ -99,23 +106,28 @@ async function openZip(filePath) {
 
 /** Absolute offset of an entry's (compressed) data. */
 async function dataOffset(zip, entry) {
-  const loc = await readAt(zip.fh, entry.offset, 30);
+  const loc = await readAt(zip.fh, entry.offset, 30, zip.size);
   if (loc.readUInt32LE(0) !== SIG_LOC) throw new Error(`Corrupt local header for ${entry.name}`);
   return entry.offset + 30 + loc.readUInt16LE(26) + loc.readUInt16LE(28);
 }
 
 /** Read + inflate a (small) entry into a Buffer. */
 async function readEntry(zip, entry) {
-  if (entry.usize > MAX_EDIT_BYTES) throw new Error(`Entry too large to edit: ${entry.name}`);
-  const raw = await readAt(zip.fh, await dataOffset(zip, entry), entry.csize);
+  if (entry.method !== 0 && entry.method !== 8) {
+    throw new Error(`Unsupported compression method ${entry.method} for ${entry.name}`);
+  }
+  if (entry.usize > MAX_EDIT_BYTES || entry.csize > MAX_EDIT_BYTES + MAX_DEFLATE_SLACK) {
+    throw new Error(`Entry too large to edit: ${entry.name}`);
+  }
+  if (entry.method === 0 && entry.csize !== entry.usize) throw new Error(`Size mismatch for ${entry.name}`);
+  const raw = await readAt(zip.fh, await dataOffset(zip, entry), entry.csize, zip.size);
   if (entry.method === 0) return raw;
-  if (entry.method === 8) {
+  {
     // usize is attacker-declared: cap the inflate so a lying entry can't balloon memory.
     const out = zlib.inflateRawSync(raw, { maxOutputLength: Math.max(1, Math.min(entry.usize, MAX_EDIT_BYTES)) });
     if (out.length !== entry.usize) throw new Error(`Size mismatch for ${entry.name}`);
     return out;
   }
-  throw new Error(`Unsupported compression method ${entry.method} for ${entry.name}`);
 }
 
 /** Convenience: read one named entry from a zip path; null when absent. */
@@ -167,6 +179,7 @@ class ZipWriter {
   async addRaw(srcZip, entry, newName = entry.name) {
     await this._write(this._local(newName, entry));
     const start = await dataOffset(srcZip, entry);
+    if (start + entry.csize > srcZip.size) throw new Error(`Entry data outside file: ${entry.name}`);
     if (entry.csize > 0) {
       const rs = fs.createReadStream(null, { fd: srcZip.fh.fd, start, end: start + entry.csize - 1, autoClose: false, emitClose: false });
       for await (const chunk of rs) await this._write(chunk);
