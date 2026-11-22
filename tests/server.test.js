@@ -1,3 +1,4 @@
+const { listenLocal, closeServer } = require('./helpers/listen-local');
 // Point the app's DB singleton at a throwaway temp file and flag the test env
 // BEFORE anything requires ../db or ../server (both read these at load time).
 const os   = require('os');
@@ -422,14 +423,16 @@ describe('3MF schedule import — array-order is the contract', () => {
 // Each must funnel through the same fit -> needsReshove -> confirm -> cascade flow.
 describe('timed moves — reshove on occupied slot (all four entry points)', () => {
   const request = require('supertest');
-  let app, appDb, printerId;
+  let server, app, appDb, printerId;
   const SESSION_TOKEN = 'reshove-session-token';
   const authCookie = `pf_session=${SESSION_TOKEN}`;
   const iso = (d) => new Date(d).toISOString();
 
-  beforeAll(() => {
+  afterAll(() => closeServer(server));
+  beforeAll(async () => {
     appDb = require('../db');
     app   = require('../server');
+    server = await listenLocal(app);
     appDb.prepare('INSERT OR REPLACE INTO sessions (token, expires_at) VALUES (?,?)')
       .run(SESSION_TOKEN, Date.now() + 3_600_000);
   });
@@ -461,13 +464,13 @@ describe('timed moves — reshove on occupied slot (all four entry points)', () 
     const blocker = addJob('2026-04-13T12:00:00Z', '2026-04-13T13:00:00Z');           // 14:00–15:00 Brussels
     const to = '2026-04-13T12:00:00Z'; // push anchor right onto the blocker
 
-    const r1 = await request(app).post(`/api/jobs/${anchor}/push-back`).set('Cookie', authCookie).send({ to });
+    const r1 = await request(server).post(`/api/jobs/${anchor}/push-back`).set('Cookie', authCookie).send({ to });
     expect(r1.status).toBe(200);
     expect(r1.body.needsReshove).toBe(true);
     // Nothing written yet.
     expect(appDb.prepare('SELECT start FROM jobs WHERE id=?').get(anchor).start).toBe(iso('2026-04-13T06:00:00Z'));
 
-    const r2 = await request(app).post(`/api/jobs/${anchor}/push-back`).set('Cookie', authCookie).send({ to, reshove: true });
+    const r2 = await request(server).post(`/api/jobs/${anchor}/push-back`).set('Cookie', authCookie).send({ to, reshove: true });
     expect(r2.status).toBe(200);
     expect(r2.body.reshoved).toBe(true);
     // Anchor verbatim at target; blocker shoved to anchorEnd 13:00Z + 20m = 13:20Z.
@@ -481,11 +484,11 @@ describe('timed moves — reshove on occupied slot (all four entry points)', () 
     const blocker = addJob('2026-04-13T08:00:00Z', '2026-04-13T09:00:00Z');           // 10:00–11:00 Brussels
     const to = '2026-04-13T08:00:00Z'; // pull anchor onto the earlier blocker
 
-    const r1 = await request(app).post(`/api/jobs/${anchor}/pull-forward`).set('Cookie', authCookie).send({ to });
+    const r1 = await request(server).post(`/api/jobs/${anchor}/pull-forward`).set('Cookie', authCookie).send({ to });
     expect(r1.body.needsReshove).toBe(true);
     expect(appDb.prepare('SELECT start FROM jobs WHERE id=?').get(anchor).start).toBe(iso('2026-04-13T14:00:00Z'));
 
-    const r2 = await request(app).post(`/api/jobs/${anchor}/pull-forward`).set('Cookie', authCookie).send({ to, reshove: true });
+    const r2 = await request(server).post(`/api/jobs/${anchor}/pull-forward`).set('Cookie', authCookie).send({ to, reshove: true });
     expect(r2.body.reshoved).toBe(true);
     expect(appDb.prepare('SELECT start FROM jobs WHERE id=?').get(anchor).start).toBe(iso('2026-04-13T08:00:00Z'));
     expect(appDb.prepare('SELECT start FROM jobs WHERE id=?').get(blocker).start).toBe(iso('2026-04-13T09:20:00Z'));
@@ -497,10 +500,10 @@ describe('timed moves — reshove on occupied slot (all four entry points)', () 
     const anchor = addJob(now - 3 * 3600_000, now - 2 * 3600_000); // past job (push-back = past-only)
     const blocker = addJob(now + 60_000, now + 60_000 + 3 * 3600_000); // starts just after now, spans it
     // Omit `to` → server uses new Date().
-    const r1 = await request(app).post(`/api/jobs/${anchor}/push-back`).set('Cookie', authCookie).send({});
+    const r1 = await request(server).post(`/api/jobs/${anchor}/push-back`).set('Cookie', authCookie).send({});
     expect(r1.body.needsReshove).toBe(true);
 
-    const r2 = await request(app).post(`/api/jobs/${anchor}/push-back`).set('Cookie', authCookie).send({ reshove: true });
+    const r2 = await request(server).post(`/api/jobs/${anchor}/push-back`).set('Cookie', authCookie).send({ reshove: true });
     expect(r2.body.reshoved).toBe(true);
     // Anchor now sits at ~now (verbatim); blocker was shoved later than its original start.
     const anchorStart = new Date(appDb.prepare('SELECT start FROM jobs WHERE id=?').get(anchor).start).getTime();
@@ -514,10 +517,10 @@ describe('timed moves — reshove on occupied slot (all four entry points)', () 
     const now = Date.now();
     const anchor = addJob(now + 3 * 3600_000, now + 4 * 3600_000); // future job (pull-forward = future-only)
     const blocker = addJob(now + 60_000, now + 60_000 + 3 * 3600_000);
-    const r1 = await request(app).post(`/api/jobs/${anchor}/pull-forward`).set('Cookie', authCookie).send({});
+    const r1 = await request(server).post(`/api/jobs/${anchor}/pull-forward`).set('Cookie', authCookie).send({});
     expect(r1.body.needsReshove).toBe(true);
 
-    const r2 = await request(app).post(`/api/jobs/${anchor}/pull-forward`).set('Cookie', authCookie).send({ reshove: true });
+    const r2 = await request(server).post(`/api/jobs/${anchor}/pull-forward`).set('Cookie', authCookie).send({ reshove: true });
     expect(r2.body.reshoved).toBe(true);
     const anchorStart = new Date(appDb.prepare('SELECT start FROM jobs WHERE id=?').get(anchor).start).getTime();
     expect(Math.abs(anchorStart - now)).toBeLessThan(5000);
@@ -529,7 +532,7 @@ describe('timed moves — reshove on occupied slot (all four entry points)', () 
     addJob('2026-04-13T18:00:00Z', '2026-04-13T19:00:00Z');                 // far-away movable job
     const to = '2026-04-13T10:00:00Z'; // free slot
 
-    const r = await request(app).post(`/api/jobs/${anchor}/push-back`).set('Cookie', authCookie).send({ to });
+    const r = await request(server).post(`/api/jobs/${anchor}/push-back`).set('Cookie', authCookie).send({ to });
     expect(r.status).toBe(200);
     expect(r.body.needsReshove).toBeUndefined();
     expect(r.body.updatedCount).toBeGreaterThanOrEqual(1);
@@ -541,7 +544,7 @@ describe('timed moves — reshove on occupied slot (all four entry points)', () 
   test('wrong-direction custom push-back (to earlier) is a no-op, never a reshuffle', async () => {
     const anchor = addJob('2026-04-13T10:00:00Z', '2026-04-13T11:00:00Z');
     const to = '2026-04-13T08:00:00Z'; // earlier than current start → wrong direction for push-back
-    const r = await request(app).post(`/api/jobs/${anchor}/push-back`).set('Cookie', authCookie).send({ to });
+    const r = await request(server).post(`/api/jobs/${anchor}/push-back`).set('Cookie', authCookie).send({ to });
     expect(r.status).toBe(200);
     expect(r.body.needsReshove).toBeUndefined();
     expect(r.body.updatedCount).toBe(0);
@@ -558,7 +561,7 @@ describe('timed moves — reshove on occupied slot (all four entry points)', () 
     addJob('2026-04-13T08:00:00Z', '2026-04-13T09:00:00Z'); // occupies the earlier target
     const before = snapshotAll();
     const to = '2026-04-13T08:00:00Z'; // earlier than anchor start → wrong direction
-    const r = await request(app).post(`/api/jobs/${anchor}/push-back`).set('Cookie', authCookie).send({ to, reshove: true });
+    const r = await request(server).post(`/api/jobs/${anchor}/push-back`).set('Cookie', authCookie).send({ to, reshove: true });
     expect(r.body.needsReshove).toBeUndefined();
     expect(r.body.updatedCount).toBe(0);
     expect(snapshotAll()).toEqual(before); // nothing moved
@@ -569,7 +572,7 @@ describe('timed moves — reshove on occupied slot (all four entry points)', () 
     addJob('2026-04-13T12:00:00Z', '2026-04-13T13:00:00Z'); // occupies the later target
     const before = snapshotAll();
     const to = '2026-04-13T12:00:00Z'; // later than anchor start → wrong direction for pull
-    const r = await request(app).post(`/api/jobs/${anchor}/pull-forward`).set('Cookie', authCookie).send({ to, reshove: true });
+    const r = await request(server).post(`/api/jobs/${anchor}/pull-forward`).set('Cookie', authCookie).send({ to, reshove: true });
     expect(r.body.needsReshove).toBeUndefined();
     expect(r.body.updatedCount).toBe(0);
     expect(snapshotAll()).toEqual(before);
@@ -582,7 +585,7 @@ describe('timed moves — reshove on occupied slot (all four entry points)', () 
     addJob(now + 60_000, now + 60_000 + 3 * 3600_000);
     addJob(now + 5 * 3600_000, now + 6 * 3600_000); // a third downstream job
     const before = snapshotAll();
-    const r = await request(app).post(`/api/jobs/${anchor}/push-back`).set('Cookie', authCookie).send({});
+    const r = await request(server).post(`/api/jobs/${anchor}/push-back`).set('Cookie', authCookie).send({});
     expect(r.body.needsReshove).toBe(true);
     expect(snapshotAll()).toEqual(before); // every row byte-unchanged
   });
@@ -606,7 +609,7 @@ describe('timed moves — reshove on occupied slot (all four entry points)', () 
     };
     // No windowEnd → forced verbatim path. to (08:00) < anchor start (14:00) = correct pull direction.
     const to = '2026-04-13T08:00:00Z';
-    const r = await request(app).post(`/api/jobs/${anchor}/pull-forward`).set('Cookie', authCookie).send({ to, reshove: true });
+    const r = await request(server).post(`/api/jobs/${anchor}/pull-forward`).set('Cookie', authCookie).send({ to, reshove: true });
     expect(r.body.reshoved).toBe(true);
     expect(r.body.activeConflict).toBe(true); // anchor overlaps the running print
     // Immovable rows untouched.
@@ -621,9 +624,9 @@ describe('timed moves — reshove on occupied slot (all four entry points)', () 
   test('pull-forward NO windowEnd forces the exact start + cascades (occupied)', async () => {
     const anchor = addJob('2026-04-13T14:00:00Z', '2026-04-13T15:00:00Z');
     addJob('2026-04-13T08:00:00Z', '2026-04-13T09:00:00Z'); // occupies target
-    const r1 = await request(app).post(`/api/jobs/${anchor}/pull-forward`).set('Cookie', authCookie).send({ to: '2026-04-13T08:00:00Z' });
+    const r1 = await request(server).post(`/api/jobs/${anchor}/pull-forward`).set('Cookie', authCookie).send({ to: '2026-04-13T08:00:00Z' });
     expect(r1.body.needsReshove).toBe(true);
-    const r2 = await request(app).post(`/api/jobs/${anchor}/pull-forward`).set('Cookie', authCookie).send({ to: '2026-04-13T08:00:00Z', reshove: true });
+    const r2 = await request(server).post(`/api/jobs/${anchor}/pull-forward`).set('Cookie', authCookie).send({ to: '2026-04-13T08:00:00Z', reshove: true });
     expect(r2.body.reshoved).toBe(true);
     expect(appDb.prepare('SELECT start FROM jobs WHERE id=?').get(anchor).start).toBe(iso('2026-04-13T08:00:00Z')); // verbatim
   });
@@ -631,7 +634,7 @@ describe('timed moves — reshove on occupied slot (all four entry points)', () 
   test('pull-forward WITH windowEnd fits into a clean gap — no cascade, no dialog', async () => {
     const anchor = addJob('2026-04-13T14:00:00Z', '2026-04-13T15:00:00Z'); // future
     // Target 08:00 is free; window generous. Should place cleanly, no reshuffle.
-    const r = await request(app).post(`/api/jobs/${anchor}/pull-forward`)
+    const r = await request(server).post(`/api/jobs/${anchor}/pull-forward`)
       .set('Cookie', authCookie)
       .send({ to: '2026-04-13T08:00:00Z', windowEnd: '2026-04-13T20:00:00Z' });
     expect(r.status).toBe(200);
@@ -643,11 +646,11 @@ describe('timed moves — reshove on occupied slot (all four entry points)', () 
     const anchor = addJob('2026-04-13T14:00:00Z', '2026-04-13T15:00:00Z');
     // Fill the whole [08:00, 09:30] window with a movable job so no gap fits.
     addJob('2026-04-13T08:00:00Z', '2026-04-13T09:30:00Z');
-    const r1 = await request(app).post(`/api/jobs/${anchor}/pull-forward`)
+    const r1 = await request(server).post(`/api/jobs/${anchor}/pull-forward`)
       .set('Cookie', authCookie)
       .send({ to: '2026-04-13T08:00:00Z', windowEnd: '2026-04-13T09:30:00Z' });
     expect(r1.body.needsReshove).toBe(true); // no gap → forced path asks to reshuffle
-    const r2 = await request(app).post(`/api/jobs/${anchor}/pull-forward`)
+    const r2 = await request(server).post(`/api/jobs/${anchor}/pull-forward`)
       .set('Cookie', authCookie)
       .send({ to: '2026-04-13T08:00:00Z', windowEnd: '2026-04-13T09:30:00Z', reshove: true });
     expect(r2.body.reshoved).toBe(true);
@@ -658,14 +661,16 @@ describe('timed moves — reshove on occupied slot (all four entry points)', () 
 
 describe('lockable jobs — immovability via the real routes (supertest)', () => {
   const request = require('supertest');
-  let app, appDb, printerId;
+  let server, app, appDb, printerId;
   const SESSION_TOKEN = 'lock-session-token';
   const authCookie = `pf_session=${SESSION_TOKEN}`;
   const iso = (d) => new Date(d).toISOString();
 
-  beforeAll(() => {
+  afterAll(() => closeServer(server));
+  beforeAll(async () => {
     appDb = require('../db');
     app   = require('../server');
+    server = await listenLocal(app);
     appDb.prepare('INSERT OR REPLACE INTO sessions (token, expires_at) VALUES (?,?)')
       .run(SESSION_TOKEN, Date.now() + 3_600_000);
   });
@@ -694,7 +699,7 @@ describe('lockable jobs — immovability via the real routes (supertest)', () =>
 
   test('locked anchor: push-back is a no-op (never moves)', async () => {
     const anchor = addJob('2026-04-13T06:00:00Z', '2026-04-13T07:00:00Z', { locked: 1 });
-    const r = await request(app).post(`/api/jobs/${anchor}/push-back`)
+    const r = await request(server).post(`/api/jobs/${anchor}/push-back`)
       .set('Cookie', authCookie).send({ to: '2026-04-13T12:00:00Z' });
     expect(r.status).toBe(200);
     expect(r.body.updatedCount).toBe(0);
@@ -703,7 +708,7 @@ describe('lockable jobs — immovability via the real routes (supertest)', () =>
 
   test('locked anchor: pull-forward is a no-op (never moves)', async () => {
     const anchor = addJob('2026-04-13T14:00:00Z', '2026-04-13T15:00:00Z', { locked: 1 });
-    const r = await request(app).post(`/api/jobs/${anchor}/pull-forward`)
+    const r = await request(server).post(`/api/jobs/${anchor}/pull-forward`)
       .set('Cookie', authCookie).send({ to: '2026-04-13T08:00:00Z' });
     expect(r.status).toBe(200);
     expect(r.body.updatedCount).toBe(0);
@@ -715,7 +720,7 @@ describe('lockable jobs — immovability via the real routes (supertest)', () =>
     const lockedBlocker = addJob('2026-04-13T12:00:00Z', '2026-04-13T13:00:00Z', { locked: 1 });
     const to = '2026-04-13T12:00:00Z'; // push anchor onto the locked blocker
     // A locked blocker is in the "fixed" bucket, never a mover → no reshove needed.
-    const r = await request(app).post(`/api/jobs/${anchor}/push-back`)
+    const r = await request(server).post(`/api/jobs/${anchor}/push-back`)
       .set('Cookie', authCookie).send({ to, reshove: true });
     expect(r.status).toBe(200);
     // Locked blocker unchanged regardless of the anchor landing on it.
@@ -728,7 +733,7 @@ describe('lockable jobs — immovability via the real routes (supertest)', () =>
     const lockedDownstream = addJob('2026-04-13T16:00:00Z', '2026-04-13T17:00:00Z', { locked: 1 }); // in window, downstream
     // Window [08:00, 20:00] spans the locked job. Without the guard the window
     // chain would pull the locked job forward to pack behind the anchor.
-    const r = await request(app).post(`/api/jobs/${anchor}/pull-forward`)
+    const r = await request(server).post(`/api/jobs/${anchor}/pull-forward`)
       .set('Cookie', authCookie)
       .send({ to: '2026-04-13T08:00:00Z', windowEnd: '2026-04-13T20:00:00Z' });
     expect(r.status).toBe(200);
@@ -741,28 +746,28 @@ describe('lockable jobs — immovability via the real routes (supertest)', () =>
 
   test('lock toggle blocked while Printing (409)', async () => {
     const id = addJob('2026-04-13T06:00:00Z', '2026-04-13T07:00:00Z', { status: 'Printing' });
-    const r = await request(app).patch(`/api/jobs/${id}`).set('Cookie', authCookie).send({ locked: 1 });
+    const r = await request(server).patch(`/api/jobs/${id}`).set('Cookie', authCookie).send({ locked: 1 });
     expect(r.status).toBe(409);
     expect(getJob(id).locked).toBe(0);
   });
 
   test('lock toggle blocked while Awaiting Printer (409)', async () => {
     const id = addJob('2026-04-13T06:00:00Z', '2026-04-13T07:00:00Z', { status: 'Awaiting Printer' });
-    const r = await request(app).patch(`/api/jobs/${id}`).set('Cookie', authCookie).send({ locked: 1 });
+    const r = await request(server).patch(`/api/jobs/${id}`).set('Cookie', authCookie).send({ locked: 1 });
     expect(r.status).toBe(409);
     expect(getJob(id).locked).toBe(0);
   });
 
   test('lock toggle persists for a Planned job', async () => {
     const id = addJob('2026-04-13T06:00:00Z', '2026-04-13T07:00:00Z');
-    const r = await request(app).patch(`/api/jobs/${id}`).set('Cookie', authCookie).send({ locked: 1 });
+    const r = await request(server).patch(`/api/jobs/${id}`).set('Cookie', authCookie).send({ locked: 1 });
     expect(r.status).toBe(200);
     expect(getJob(id).locked).toBe(1);
   });
 
   test('PATCH on a locked job drops start/end/printerId (drag/next-day/move-printer defense)', async () => {
     const id = addJob('2026-04-13T06:00:00Z', '2026-04-13T07:00:00Z', { locked: 1 });
-    const r = await request(app).patch(`/api/jobs/${id}`).set('Cookie', authCookie)
+    const r = await request(server).patch(`/api/jobs/${id}`).set('Cookie', authCookie)
       .send({ start: '2026-04-13T20:00:00Z', end: '2026-04-13T21:00:00Z', printerId: 999 });
     // start/end/printerId all stripped → nothing valid left to write.
     expect(r.status).toBe(400);
@@ -774,7 +779,7 @@ describe('lockable jobs — immovability via the real routes (supertest)', () =>
 
   test('unlock + move in the SAME PATCH is honoured (not stripped)', async () => {
     const id = addJob('2026-04-13T06:00:00Z', '2026-04-13T07:00:00Z', { locked: 1 });
-    const r = await request(app).patch(`/api/jobs/${id}`).set('Cookie', authCookie)
+    const r = await request(server).patch(`/api/jobs/${id}`).set('Cookie', authCookie)
       .send({ locked: 0, start: '2026-04-13T20:00:00Z', end: '2026-04-13T21:00:00Z' });
     expect(r.status).toBe(200);
     const after = getJob(id);
@@ -784,7 +789,7 @@ describe('lockable jobs — immovability via the real routes (supertest)', () =>
 
   test('PUT (edit dialog) preserves start/end/printerId on a locked job', async () => {
     const id = addJob('2026-04-13T06:00:00Z', '2026-04-13T07:00:00Z', { locked: 1 });
-    const r = await request(app).put(`/api/jobs/${id}`).set('Cookie', authCookie)
+    const r = await request(server).put(`/api/jobs/${id}`).set('Cookie', authCookie)
       .send({
         printerId: 999, name: 'Renamed', start: '2026-04-13T20:00:00Z', end: '2026-04-13T21:00:00Z',
         status: 'Planned', queued: false,
@@ -805,14 +810,16 @@ describe('lockable jobs — immovability via the real routes (supertest)', () =>
 // put and the movers route around them. Default OFF = single-anchor unchanged.
 describe('pull-forward — move following chain toggle', () => {
   const request = require('supertest');
-  let app, appDb, printerId;
+  let server, app, appDb, printerId;
   const SESSION_TOKEN = 'movechain-session-token';
   const authCookie = `pf_session=${SESSION_TOKEN}`;
   const iso = (d) => new Date(d).toISOString();
 
-  beforeAll(() => {
+  afterAll(() => closeServer(server));
+  beforeAll(async () => {
     appDb = require('../db');
     app   = require('../server');
+    server = await listenLocal(app);
     appDb.prepare('INSERT OR REPLACE INTO sessions (token, expires_at) VALUES (?,?)')
       .run(SESSION_TOKEN, Date.now() + 3_600_000);
   });
@@ -836,7 +843,7 @@ describe('pull-forward — move following chain toggle', () => {
   test('toggle OFF (default): only the anchor moves, followers stay put', async () => {
     const anchor = addJob('2026-04-13T14:00:00Z', '2026-04-13T15:00:00Z');
     const follower = addJob('2026-04-13T15:20:00Z', '2026-04-13T16:20:00Z'); // tight, would chain if ON
-    const r = await request(app).post(`/api/jobs/${anchor}/pull-forward`)
+    const r = await request(server).post(`/api/jobs/${anchor}/pull-forward`)
       .set('Cookie', authCookie).send({ to: '2026-04-13T08:00:00Z' });
     expect(r.status).toBe(200);
     expect(getJob(anchor).start).toBe(iso('2026-04-13T08:00:00Z'));
@@ -848,7 +855,7 @@ describe('pull-forward — move following chain toggle', () => {
     const anchor = addJob('2026-04-13T14:00:00Z', '2026-04-13T15:00:00Z');
     const f1 = addJob('2026-04-13T15:20:00Z', '2026-04-13T16:20:00Z'); // 20 min gap → chains
     const f2 = addJob('2026-04-13T16:40:00Z', '2026-04-13T17:40:00Z'); // 20 min gap → chains
-    const r = await request(app).post(`/api/jobs/${anchor}/pull-forward`)
+    const r = await request(server).post(`/api/jobs/${anchor}/pull-forward`)
       .set('Cookie', authCookie).send({ to: '2026-04-13T08:00:00Z', moveChain: true });
     expect(r.status).toBe(200);
     expect(getJob(anchor).start).toBe(iso('2026-04-13T08:00:00Z'));
@@ -861,7 +868,7 @@ describe('pull-forward — move following chain toggle', () => {
     const anchor = addJob('2026-04-13T14:00:00Z', '2026-04-13T15:00:00Z');
     const f1 = addJob('2026-04-13T15:20:00Z', '2026-04-13T16:20:00Z'); // chains
     const far = addJob('2026-04-13T17:10:00Z', '2026-04-13T18:10:00Z'); // 50 min after f1 end → breaks
-    const r = await request(app).post(`/api/jobs/${anchor}/pull-forward`)
+    const r = await request(server).post(`/api/jobs/${anchor}/pull-forward`)
       .set('Cookie', authCookie).send({ to: '2026-04-13T08:00:00Z', moveChain: true });
     expect(r.status).toBe(200);
     expect(getJob(anchor).start).toBe(iso('2026-04-13T08:00:00Z'));
@@ -875,7 +882,7 @@ describe('pull-forward — move following chain toggle', () => {
     const f1 = addJob('2026-04-13T15:20:00Z', '2026-04-13T16:20:00Z');                 // chains (20 min gap)
     const lockedMid = addJob('2026-04-13T16:40:00Z', '2026-04-13T17:40:00Z', { locked: 1 }); // skipped, stays put
     const after = addJob('2026-04-13T18:00:00Z', '2026-04-13T19:00:00Z');              // tight past locked → pulled in
-    const r = await request(app).post(`/api/jobs/${anchor}/pull-forward`)
+    const r = await request(server).post(`/api/jobs/${anchor}/pull-forward`)
       .set('Cookie', authCookie).send({ to: '2026-04-13T08:00:00Z', moveChain: true });
     expect(r.status).toBe(200);
     expect(getJob(anchor).start).toBe(iso('2026-04-13T08:00:00Z'));
@@ -899,7 +906,7 @@ describe('pull-forward — move following chain toggle', () => {
     const lockedMid = addJob('2026-04-13T16:40:00Z', '2026-04-13T17:40:00Z', { locked: 1 }); // skipped, stays
     const after = addJob('2026-04-13T18:00:00Z', '2026-04-13T19:00:00Z');              // tight past locked → pulled in
     // Window [08:00, 12:00] has a clean gap for the anchor → clean-fit tight-pack path.
-    const r = await request(app).post(`/api/jobs/${anchor}/pull-forward`)
+    const r = await request(server).post(`/api/jobs/${anchor}/pull-forward`)
       .set('Cookie', authCookie).send({ to: '2026-04-13T08:00:00Z', windowEnd: '2026-04-13T12:00:00Z', moveChain: true });
     expect(r.status).toBe(200);
     expect(getJob(anchor).start).toBe(iso('2026-04-13T08:00:00Z'));
@@ -918,13 +925,13 @@ describe('pull-forward — move following chain toggle', () => {
     const blocker = addJob('2026-04-13T08:00:00Z', '2026-04-13T09:00:00Z');
     const body = { to: '2026-04-13T08:00:00Z', moveChain: true };
 
-    const r1 = await request(app).post(`/api/jobs/${anchor}/pull-forward`).set('Cookie', authCookie).send(body);
+    const r1 = await request(server).post(`/api/jobs/${anchor}/pull-forward`).set('Cookie', authCookie).send(body);
     expect(r1.body.needsReshove).toBe(true);
     // Nothing written yet.
     expect(getJob(anchor).start).toBe(iso('2026-04-13T14:00:00Z'));
     expect(getJob(blocker).start).toBe(iso('2026-04-13T08:00:00Z'));
 
-    const r2 = await request(app).post(`/api/jobs/${anchor}/pull-forward`).set('Cookie', authCookie).send({ ...body, reshove: true });
+    const r2 = await request(server).post(`/api/jobs/${anchor}/pull-forward`).set('Cookie', authCookie).send({ ...body, reshove: true });
     expect(r2.body.reshoved).toBe(true);
     expect(getJob(anchor).start).toBe(iso('2026-04-13T08:00:00Z'));
     expect(getJob(follower).start).toBe(iso('2026-04-13T09:20:00Z'));
@@ -936,13 +943,15 @@ describe('pull-forward — move following chain toggle', () => {
 
 describe('PATCH /api/jobs/:id — status persistence (real route via supertest)', () => {
   const request = require('supertest');
-  let app, appDb, printerId;
+  let server, app, appDb, printerId;
   const SESSION_TOKEN = 'test-session-token';
   const authCookie = `pf_session=${SESSION_TOKEN}`;
 
-  beforeAll(() => {
+  afterAll(() => closeServer(server));
+  beforeAll(async () => {
     appDb = require('../db');     // singleton, temp-file DB (PLANNER_DB_PATH)
     app   = require('../server'); // exports the Express app (no listen under test)
+    server = await listenLocal(app);
     // Valid session so the auth middleware lets the PATCH through.
     appDb.prepare('INSERT OR REPLACE INTO sessions (token, expires_at) VALUES (?,?)')
       .run(SESSION_TOKEN, Date.now() + 3_600_000);
@@ -966,7 +975,7 @@ describe('PATCH /api/jobs/:id — status persistence (real route via supertest)'
         .run(printerId, 'Job', '2026-03-27T10:00', '2026-03-27T12:00', 'Planned');
       const id = r.lastInsertRowid;
 
-      const res = await request(app)
+      const res = await request(server)
         .patch(`/api/jobs/${id}`)
         .set('Cookie', authCookie)
         .send({ status });

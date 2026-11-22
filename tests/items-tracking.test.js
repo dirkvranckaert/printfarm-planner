@@ -1,3 +1,4 @@
+const { listenLocal, closeServer } = require('./helpers/listen-local');
 // Item-count tracking — schema migration, import passthrough, manual
 // create/edit + items_lost validation, projects aggregation (losses subtracted
 // from BOTH done and total), auto-migration backfill, the reload-from-3MF route,
@@ -321,13 +322,15 @@ describe('item-count routes (integration)', () => {
   process.env.PLANNER_DB_PATH =
     process.env.PLANNER_DB_PATH || path.join(os.tmpdir(), `printfarm-items-test-${process.pid}.db`);
   const request = require('supertest');
-  let app, appDb, printerId, UPLOADS_DIR;
+  let server, app, appDb, printerId, UPLOADS_DIR;
   const SESSION_TOKEN = 'items-session-token';
   const authCookie = `pf_session=${SESSION_TOKEN}`;
 
-  beforeAll(() => {
+  afterAll(() => closeServer(server));
+  beforeAll(async () => {
     appDb = require('../db');
     app   = require('../server');
+    server = await listenLocal(app);
     UPLOADS_DIR = process.env.PLANNER_UPLOADS_DIR; // per-file temp dir (tests/isolate-env.js)
     appDb.prepare('INSERT OR REPLACE INTO sessions (token, expires_at) VALUES (?,?)')
       .run(SESSION_TOKEN, Date.now() + 3_600_000);
@@ -339,9 +342,9 @@ describe('item-count routes (integration)', () => {
   });
   afterAll(() => { try { appDb.exec('DELETE FROM jobs; DELETE FROM printers; DELETE FROM projects;'); } catch {} });
 
-  const post  = (url, body) => request(app).post(url).set('Cookie', authCookie).send(body);
-  const put   = (url, body) => request(app).put(url).set('Cookie', authCookie).send(body);
-  const patch = (url, body) => request(app).patch(url).set('Cookie', authCookie).send(body);
+  const post  = (url, body) => request(server).post(url).set('Cookie', authCookie).send(body);
+  const put   = (url, body) => request(server).put(url).set('Cookie', authCookie).send(body);
+  const patch = (url, body) => request(server).patch(url).set('Cookie', authCookie).send(body);
 
   // --- C. Manual create + edit + items_lost validation ---
   test('POST /api/jobs stores items + items_lost', async () => {
@@ -412,7 +415,7 @@ describe('item-count routes (integration)', () => {
       { plateIndex: 2, name: 'No Items Plate', printerId, durationMins: 30 }, // no items field
     ];
     const hdr = encodeURIComponent(JSON.stringify({ plates, startISO: '2026-08-04T08:00:00.000Z', mode: 'manual' }));
-    const res = await request(app).post('/api/import-3mf-schedule')
+    const res = await request(server).post('/api/import-3mf-schedule')
       .set('Cookie', authCookie)
       .set('Content-Type', 'application/octet-stream')
       .set('X-Schedule', hdr)
@@ -429,7 +432,7 @@ describe('item-count routes (integration)', () => {
   // --- F. Reload route ---
   test('GET /api/jobs/:id/3mf-plates returns [] when the job has no retained 3MF', async () => {
     const c = await post('/api/jobs', { printerId, name: 'J', start: '2026-08-04T08:00', end: '2026-08-04T09:00', printFile: '/a/label.txt' });
-    const r = await request(app).get(`/api/jobs/${c.body.id}/3mf-plates`).set('Cookie', authCookie);
+    const r = await request(server).get(`/api/jobs/${c.body.id}/3mf-plates`).set('Cookie', authCookie);
     expect(r.status).toBe(200);
     expect(r.body).toEqual([]);
   });
@@ -477,7 +480,7 @@ describe('item-count routes (integration)', () => {
     return post('/api/jobs', { printerId, name: 'J', start: '2026-08-04T08:00', end: '2026-08-04T09:00' })
       .then(c => {
         appDb.prepare('UPDATE jobs SET printFile=? WHERE id=?').run(stored, c.body.id);
-        return request(app).get(`/api/jobs/${c.body.id}/3mf-plates`).set('Cookie', authCookie);
+        return request(server).get(`/api/jobs/${c.body.id}/3mf-plates`).set('Cookie', authCookie);
       })
       .then(r => {
         expect(r.status).toBe(200);

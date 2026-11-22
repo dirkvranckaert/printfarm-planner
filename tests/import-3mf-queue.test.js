@@ -1,3 +1,4 @@
+const { listenLocal, closeServer } = require('./helpers/listen-local');
 // Point the app's DB singleton at a throwaway temp file BEFORE requiring
 // ../db or ../server (both read PLANNER_DB_PATH at load time).
 const os   = require('os');
@@ -14,7 +15,7 @@ process.env.PLANNER_DB_PATH =
 // `start` (the `new Date('')` trap).
 describe('import-3mf-schedule — queue mode (real route via supertest)', () => {
   const request = require('supertest');
-  let app, appDb, printerId;
+  let server, app, appDb, printerId;
   const SESSION_TOKEN = 'queue-import-session-token';
   const authCookie = `pf_session=${SESSION_TOKEN}`;
   const uploadsDir = process.env.PLANNER_UPLOADS_DIR; // per-file temp dir (tests/isolate-env.js)
@@ -30,9 +31,11 @@ describe('import-3mf-schedule — queue mode (real route via supertest)', () => 
 
   const schedule = (obj) => encodeURIComponent(JSON.stringify(obj));
 
-  beforeAll(() => {
+  afterAll(() => closeServer(server));
+  beforeAll(async () => {
     appDb = require('../db');
     app   = require('../server');
+    server = await listenLocal(app);
     appDb.prepare('INSERT OR REPLACE INTO sessions (token, expires_at) VALUES (?,?)')
       .run(SESSION_TOKEN, Date.now() + 3_600_000);
   });
@@ -57,7 +60,7 @@ describe('import-3mf-schedule — queue mode (real route via supertest)', () => 
   });
 
   const post = (scheduleObj, body = dummyBody) =>
-    request(app)
+    request(server)
       .post('/api/import-3mf-schedule')
       .set('Cookie', authCookie)
       .set('Content-Type', 'application/octet-stream')
@@ -109,7 +112,7 @@ describe('import-3mf-schedule — queue mode (real route via supertest)', () => 
     if (imp.body.file) createdFiles.push(imp.body.file);
     const jobId = imp.body.jobs[0].id;
 
-    const res = await request(app)
+    const res = await request(server)
       .post(`/api/jobs/${jobId}/attach-3mf`)
       .set('Cookie', authCookie)
       .set('Content-Type', 'application/octet-stream')

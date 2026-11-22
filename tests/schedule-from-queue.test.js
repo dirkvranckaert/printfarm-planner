@@ -1,3 +1,4 @@
+const { listenLocal, closeServer } = require('./helpers/listen-local');
 // Point the app's DB singleton at a throwaway temp file BEFORE requiring
 // ../db or ../server (both read PLANNER_DB_PATH at load time).
 const os   = require('os');
@@ -13,13 +14,15 @@ process.env.PLANNER_DB_PATH =
 // taken. An unassigned queue job is refused (no lane to schedule onto).
 describe('schedule-from-queue (real route via supertest)', () => {
   const request = require('supertest');
-  let app, appDb, printerId;
+  let server, app, appDb, printerId;
   const SESSION_TOKEN = 'schedule-from-queue-token';
   const authCookie = `pf_session=${SESSION_TOKEN}`;
 
-  beforeAll(() => {
+  afterAll(() => closeServer(server));
+  beforeAll(async () => {
     appDb = require('../db');
     app   = require('../server');
+    server = await listenLocal(app);
     appDb.prepare('INSERT OR REPLACE INTO sessions (token, expires_at) VALUES (?,?)')
       .run(SESSION_TOKEN, Date.now() + 3_600_000);
   });
@@ -38,7 +41,7 @@ describe('schedule-from-queue (real route via supertest)', () => {
   afterAll(() => { try { appDb.exec('DELETE FROM jobs; DELETE FROM printers;'); } catch { /* ignore */ } });
 
   const post = (id, body) =>
-    request(app).post(`/api/jobs/${id}/schedule-from-queue`).set('Cookie', authCookie).send(body);
+    request(server).post(`/api/jobs/${id}/schedule-from-queue`).set('Cookie', authCookie).send(body);
 
   // Insert a queued job directly (empty start/end, queued=1).
   const queueJob = (over = {}) => {
