@@ -1255,13 +1255,13 @@ async function renderQueuePanel() {
   panel.classList.remove('hidden');
 
   if (!count) {
-    panel.innerHTML = '<div class="queue-panel-inner"><span class="queue-panel-title">Print Queue</span><button class="btn btn-primary btn-sm" id="queue-add-btn">+ Add to Queue</button><span style="color:var(--text-muted);font-size:13px">Queue is empty.</span></div>';
+    panel.innerHTML = '<div class="queue-panel-inner"><div class="queue-panel-left"><span class="queue-panel-title">Print Queue</span><button class="btn btn-primary btn-sm" id="queue-add-btn">+ Add to Queue</button></div><span style="color:var(--text-muted);font-size:13px">Queue is empty.</span></div>';
     panel.querySelector('#queue-add-btn').addEventListener('click', () => openJobModal(null, { queued: true }));
     return;
   }
 
   const isDayView = view === 'day';
-  let h = `<div class="queue-panel-inner"><span class="queue-panel-title">Print Queue (${count})</span><button class="btn btn-primary btn-sm" id="queue-add-btn">+ Add to Queue</button><div class="queue-list">`;
+  let h = `<div class="queue-panel-inner"><div class="queue-panel-left"><span class="queue-panel-title">Print Queue (${count})</span><button class="btn btn-primary btn-sm" id="queue-add-btn">+ Add to Queue</button><button class="btn btn-danger btn-sm queue-clear-btn" id="queue-clear-btn">Clear queue</button></div><div class="queue-list">`;
   queued.forEach(job => {
     const p = printers.find(pr => pr.id === job.printerId);
     const printerChip = p
@@ -1306,6 +1306,18 @@ async function renderQueuePanel() {
   panel.innerHTML = h;
 
   panel.querySelector('#queue-add-btn')?.addEventListener('click', () => openJobModal(null, { queued: true }));
+  panel.querySelector('#queue-clear-btn')?.addEventListener('click', async () => {
+    if (!confirm(`Delete ${count} queued job${count === 1 ? '' : 's'}?`)) return;
+    try {
+      // api() drops DELETE bodies; this one carries {deleted, skipped}.
+      const res = await fetch('/api/queue', { method: 'DELETE' });
+      if (res.status === 401) { location.href = '/login'; return; }
+      if (!res.ok) throw new Error(await res.text());
+      const r = await res.json();
+      if (r && r.skipped) alert(`Deleted ${r.deleted} queued job${r.deleted === 1 ? '' : 's'}. Skipped ${r.skipped} still processing (plate split running); try again when it finishes.`);
+    } catch (e) { alert('Could not clear queue: ' + apiErrMsg(e)); }
+    renderCalendar();
+  });
 
   panel.querySelectorAll('.queue-schedule-btn').forEach(btn =>
     btn.addEventListener('click', () => scheduleFromQueue(parseInt(btn.dataset.id)))

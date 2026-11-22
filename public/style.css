@@ -1156,6 +1156,14 @@ input[type="color"] {
   padding: 10px 16px;
   flex-wrap: wrap;
 }
+.queue-panel-left {
+  display: flex;
+  flex-direction: column;
+  align-items: flex-start;
+  gap: 6px;
+  flex-shrink: 0;
+}
+.queue-clear-btn { font-size: 11px; padding: 3px 8px; }
 .queue-panel-title {
   font-size: 12px;
   font-weight: 700;
