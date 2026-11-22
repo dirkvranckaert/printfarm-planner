@@ -1515,6 +1515,7 @@ async function renderDay() {
                 <span class="job-block-name" style="flex-shrink:1;min-width:0;overflow:hidden;text-overflow:ellipsis;white-space:nowrap">${job.orderNr ? `#${escHtml(job.orderNr)} — ` : ''}${escHtml(job.name)}</span>
                 ${job.colors ? renderColorSwatches(job.colors) : ''}
                 ${job.linked_printer_id ? '<span title="Linked to printer">🔗</span>' : ''}
+                ${jobDownloadLink(job)}
                 <span class="job-status-badge" style="flex-shrink:0;${statusBadgeStyle(status)}">${escHtml(status)}</span>
               </div>`;
       if (htPx >= 40 && job.customerName) h += `<span class="job-block-customer">${escHtml(job.customerName)}</span>`;
@@ -1899,11 +1900,19 @@ async function onDragEnd() {
   if (scr2) scr2.scrollTop = savedScrollTop;
 }
 
+// Download link for a job's retained uploaded .3mf; same filename logic as the job dialog.
+function jobDownloadLink(job) {
+  if (!job.printFile || job.printFile.includes('/')) return '';
+  const dlName = `${job.orderNr ? job.orderNr + '_' : ''}${job.name.replace(/[^a-zA-Z0-9_-]/g, '_')}.3mf`;
+  return `<a class="job-dl" href="/api/uploads/${escHtml(job.printFile)}" download="${escHtml(dlName)}" title="Download ${escHtml(dlName)}" style="flex-shrink:0;text-decoration:none">📦</a>`;
+}
+
 function attachDayEvents() {
   // Click job → edit  |  right-click / long-press → context menu  |  mousedown → move
   document.querySelectorAll('.job-block').forEach(el => {
     el.addEventListener('click', e => {
       e.stopPropagation();
+      if (e.target.closest('.job-dl')) return; // browser downloads; don't open the job
       if (lastDragMoved) { lastDragMoved = false; return; }
       openJobModal(parseInt(el.dataset.jobId));
     });
@@ -1916,7 +1925,7 @@ function attachDayEvents() {
 
     el.addEventListener('mousedown', e => {
       if (e.button !== 0) return;
-      if (e.target.closest('.job-resize-handle')) return;
+      if (e.target.closest('.job-resize-handle, .job-dl')) return;
       e.stopPropagation();
 
       const jobId   = parseInt(el.dataset.jobId);
