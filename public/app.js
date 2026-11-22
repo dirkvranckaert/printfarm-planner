@@ -80,6 +80,13 @@ async function api(method, path, body) {
   return method === 'DELETE' ? null : res.json();
 }
 
+// Server errors arrive as the raw body, e.g. '{"error":"..."}': show just the message.
+function apiErrMsg(e) {
+  const raw = (e && e.message) || String(e);
+  try { const j = JSON.parse(raw); if (j && j.error) return j.error; } catch { /* plain text */ }
+  return raw;
+}
+
 // ---- Live status helpers ----
 // Status is keyed as "{brand}:{printerKey}" — e.g. "bambulab:01P00A123456789".
 // Add a case here when a new brand integration is added.
@@ -295,6 +302,15 @@ function renderStatusPanel(connectedPrinters) {
   // Respect the same favourite (visibility) setting as the day-view columns
   const list = (connectedPrinters ?? printers.filter(p => printerStatusKey(p))).filter(p => p.favourite);
 
+  // Restore the persisted open state once, after the first time printers are known
+  if (!statusPanelRestored && list.length) {
+    statusPanelRestored = true;
+    if (uiPrefGet('statusPanelOpen')) {
+      panel.classList.remove('hidden');
+      btn.setAttribute('aria-expanded', 'true');
+    }
+  }
+
   // Hide the button only when there are no connected printers at all
   btn.classList.toggle('hidden', list.length === 0);
   if (list.length === 0) {
@@ -332,11 +348,13 @@ function toggleStatusPanel() {
   if (isOpen) {
     panel.classList.add('hidden');
     btn.setAttribute('aria-expanded', 'false');
+    uiPrefSet('statusPanelOpen', false);
   } else {
     renderStatusPanel(); // always rebuild with latest data before showing
     if (btn.classList.contains('hidden')) return; // no visible printers
     panel.classList.remove('hidden');
     btn.setAttribute('aria-expanded', 'true');
+    uiPrefSet('statusPanelOpen', true);
   }
 }
 
@@ -351,7 +369,11 @@ let ctxJobId       = null; // job ID targeted by the current context menu
 let lastConflictIds = new Set(); // conflict IDs from last render
 let drag           = null; // active drag state
 let showTodayPanel    = false;
-let showQueuePanel    = false;
+// UI state that survives a refresh (#4051): queue panel + printer detail panel open/closed.
+function uiPrefGet(key) { try { return localStorage.getItem('pf.' + key) === '1'; } catch { return false; } }
+function uiPrefSet(key, on) { try { localStorage.setItem('pf.' + key, on ? '1' : '0'); } catch { /* storage blocked */ } }
+let statusPanelRestored = false;
+let showQueuePanel    = uiPrefGet('showQueuePanel');
 let editingJobStatus  = 'Planned';
 let jobsCache       = {};   // id → job, updated on each full DB fetch
 let lastDragMoved  = false;
@@ -1222,8 +1244,12 @@ async function renderQueuePanel() {
   const queued     = allJobs.filter(j => j.queued);
   const count      = queued.length;
 
-  btn.textContent = count ? `Queue (${count})` : 'Queue';
+  setMenuBadge('queue-badge', count);
   btn.classList.toggle('active', showQueuePanel);
+  btn.classList.toggle('queue-attention', count > 0);
+  panel.classList.toggle('queue-panel-attention', count > 0);
+  updateProjectsBadge();
+  updateTopbarMenuBadge();
 
   if (!showQueuePanel) { panel.classList.add('hidden'); return; }
   panel.classList.remove('hidden');
@@ -1246,21 +1272,34 @@ async function renderQueuePanel() {
     const durH = Math.floor(dur / 60), durM = dur % 60;
     const durStr = dur > 0 ? (durH > 0 ? (durM > 0 ? `${durH}h ${durM}m` : `${durH}h`) : `${durM}m`) : '';
     const durChip = durStr ? `<span class="queue-dur-chip">${durStr}</span>` : '';
-    const dragHint = isDayView ? ' queue-item-draggable' : '';
-    const dragTitle = isDayView ? ' title="Drag to calendar to schedule"' : '';
-    h += `<div class="queue-item${dragHint}" data-id="${job.id}" data-duration="${dur}" data-printer="${job.printerId ?? ''}"${dragTitle}>
-      ${isDayView ? '<span class="queue-drag-handle" title="Drag to schedule">⠿</span>' : ''}
+    // Split placeholders (#4051): not draggable / schedulable until expanded.
+    const processing = job.status === 'Processing';
+    const failed     = job.status === 'Split failed';
+    const pending    = processing || failed;
+    const dragHint = isDayView && !pending ? ' queue-item-draggable' : '';
+    const dragTitle = isDayView && !pending ? ' title="Drag to calendar to schedule"' : '';
+    const pendingCls = processing ? ' queue-item-processing' : failed ? ' queue-item-failed' : '';
+    const splitBadge = processing ? '<span class="queue-split-status">Processing</span>'
+      : failed ? `<span class="queue-split-status">Split failed</span><span class="queue-split-error">${escHtml(job.split_error || '')}</span>` : '';
+    const actions = processing
+      ? `<button class="btn-icon danger queue-delete-btn" data-id="${job.id}" title="Remove">🗑</button>`
+      : failed
+        ? `<button class="btn btn-primary btn-sm queue-split-retry-btn" data-id="${job.id}">Retry</button>
+        <button class="btn btn-secondary btn-sm queue-split-fallback-btn" data-id="${job.id}" title="Give up splitting: one job per plate, all pointing at the original multi-plate file">Use original, expand per plate</button>
+        <button class="btn-icon danger queue-delete-btn" data-id="${job.id}" title="Remove">🗑</button>`
+        : `<button class="btn btn-primary btn-sm queue-schedule-btn" data-id="${job.id}">Schedule</button>
+        <button class="btn btn-secondary btn-sm queue-edit-btn"   data-id="${job.id}">Edit</button>
+        <button class="btn-icon danger queue-delete-btn"           data-id="${job.id}" title="Remove">🗑</button>`;
+    h += `<div class="queue-item${dragHint}${pendingCls}" data-id="${job.id}" data-duration="${dur}" data-printer="${job.printerId ?? ''}"${dragTitle}>
+      ${isDayView && !pending ? '<span class="queue-drag-handle" title="Drag to schedule">⠿</span>' : ''}
       <div class="queue-item-info">
         <span class="queue-item-name">${escHtml(job.name)}</span>
+        ${splitBadge}
         ${meta ? `<span class="queue-item-meta">${escHtml(meta)}</span>` : ''}
         ${printerChip}
         ${durChip}
       </div>
-      <div class="queue-item-actions">
-        <button class="btn btn-primary btn-sm queue-schedule-btn" data-id="${job.id}">Schedule</button>
-        <button class="btn btn-secondary btn-sm queue-edit-btn"   data-id="${job.id}">Edit</button>
-        <button class="btn-icon danger queue-delete-btn"           data-id="${job.id}" title="Remove">🗑</button>
-      </div>
+      <div class="queue-item-actions">${actions}</div>
     </div>`;
   });
   h += '</div></div>';
@@ -1274,10 +1313,23 @@ async function renderQueuePanel() {
   panel.querySelectorAll('.queue-edit-btn').forEach(btn =>
     btn.addEventListener('click', () => openJobModal(parseInt(btn.dataset.id)))
   );
+  panel.querySelectorAll('.queue-split-retry-btn').forEach(btn =>
+    btn.addEventListener('click', async () => {
+      await api('POST', `/api/jobs/${btn.dataset.id}/split-retry`).catch(e => alert('Retry failed: ' + apiErrMsg(e)));
+      renderCalendar();
+    })
+  );
+  panel.querySelectorAll('.queue-split-fallback-btn').forEach(btn =>
+    btn.addEventListener('click', async () => {
+      if (!confirm('Use the original multi-plate file for every plate? Printing then needs the right plate picked in the slicer.')) return;
+      await api('POST', `/api/jobs/${btn.dataset.id}/split-fallback`).catch(e => alert('Fallback failed: ' + apiErrMsg(e)));
+      renderCalendar();
+    })
+  );
   panel.querySelectorAll('.queue-delete-btn').forEach(btn =>
     btn.addEventListener('click', async () => {
       if (!confirm('Remove from queue?')) return;
-      await api('DELETE', `/api/jobs/${btn.dataset.id}`);
+      await api('DELETE', `/api/jobs/${btn.dataset.id}`).catch(e => alert('Could not remove: ' + apiErrMsg(e)));
       renderCalendar();
     })
   );
@@ -1904,9 +1956,14 @@ async function onDragEnd() {
 // Click = open in the slicer that made the file; Alt/Option-click = plain download
 // (the job dialog also keeps its plain download link).
 const PRINTER_ICON_SVG = '<svg width="16" height="16" viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2" stroke-linecap="round" stroke-linejoin="round" aria-hidden="true"><path d="M6 9V3h12v6"/><rect x="3" y="9" width="18" height="9" rx="2"/><path d="M6 14h12v7H6z"/></svg>';
+// <original>_plate<N>.gcode.3mf for a split single-plate file (mirrors server splitDownloadName), else null.
+function splitDownloadName(job) {
+  if (!job.original_file || job.original_file === job.printFile || !job.plate_index) return null;
+  return `${String(job.source_name || job.name || 'plate').replace(/[^a-zA-Z0-9_-]/g, '_')}_plate${job.plate_index}.gcode.3mf`;
+}
 function jobDownloadLink(job) {
   if (!job.printFile || job.printFile.includes('/')) return '';
-  const dlName = `${job.orderNr ? job.orderNr + '_' : ''}${job.name.replace(/[^a-zA-Z0-9_-]/g, '_')}.3mf`;
+  const dlName = splitDownloadName(job) || `${job.orderNr ? job.orderNr + '_' : ''}${job.name.replace(/[^a-zA-Z0-9_-]/g, '_')}.3mf`;
   return `<button type="button" class="job-dl" data-job-id="${escHtml(String(job.id))}" title="Open in slicer (Alt-click: download ${escHtml(dlName)})" aria-label="Open in slicer">${PRINTER_ICON_SVG}</button>`;
 }
 
@@ -3266,9 +3323,17 @@ async function openJobModal(jobId = null, prefill = {}) {
     // Show download link if printFile is an uploaded file
     const pfDisplay = document.getElementById('job-printfile-display');
     const hasRetained3mf = job.printFile && !job.printFile.includes('/') && job.printFile.endsWith('.3mf');
+    const pfOriginal = document.getElementById('job-printfile-original');
+    pfOriginal.innerHTML = '';
     if (job.printFile && !job.printFile.includes('/')) {
-      const dlName = `${job.orderNr ? job.orderNr + '_' : ''}${job.name.replace(/[^a-zA-Z0-9_-]/g, '_')}.3mf`;
-      pfDisplay.innerHTML = `<a href="/api/uploads/${escHtml(job.printFile)}" download="${escHtml(dlName)}" style="color:var(--primary);font-size:13px">📦 ${escHtml(dlName)}</a>`;
+      const split = splitDownloadName(job);
+      const dlName = split || `${job.orderNr ? job.orderNr + '_' : ''}${job.name.replace(/[^a-zA-Z0-9_-]/g, '_')}.3mf`;
+      const tag = split ? '<span class="pf-file-tag">single plate — print this</span>' : '';
+      pfDisplay.innerHTML = `<div class="pf-file-row"><a href="/api/uploads/${escHtml(job.printFile)}" download="${escHtml(dlName)}" style="color:var(--primary);font-size:13px">📦 ${escHtml(dlName)}</a>${tag}</div>`;
+      if (split && job.original_file && !job.original_file.includes('/')) {
+        const origName = `${(job.source_name || job.name).replace(/[^a-zA-Z0-9_-]/g, '_')}.gcode.3mf`;
+        pfOriginal.innerHTML = `<div class="pf-file-row"><a href="/api/uploads/${escHtml(job.original_file)}" download="${escHtml(origName)}" style="color:var(--text-muted);font-size:13px">📦 ${escHtml(origName)}</a><span class="pf-file-tag">original multi-plate — backup</span></div>`;
+      }
       document.getElementById('job-printfile').style.display = 'none';
     } else {
       pfDisplay.innerHTML = '';
@@ -3678,7 +3743,7 @@ async function deletePrinter(id) {
     ? `This printer has ${count} job(s). Deleting it will also remove all its jobs. Continue?`
     : 'Delete this printer?';
   if (!confirm(msg)) return;
-  await api('DELETE', `/api/printers/${id}`);
+  try { await api('DELETE', `/api/printers/${id}`); } catch (e) { alert('Could not delete printer: ' + apiErrMsg(e)); return; }
   await refreshPrinterList();
   renderTopbarStatus();
   renderCalendar();
@@ -4339,13 +4404,34 @@ function updateStatusOverviewBadge() {
   if (!badge) return;
   // Shared pure count (public/statusCount.js) — same logic the test exercises.
   const count = countAttentionJobs(Object.values(jobsCache));
-  if (count > 0) {
-    badge.textContent = String(count);
-    badge.classList.remove('hidden');
-  } else {
-    badge.textContent = '';
-    badge.classList.add('hidden');
-  }
+  setMenuBadge('status-overview-badge', count);
+  updateTopbarMenuBadge();
+}
+
+// One shared badge style (.menu-badge) for Queue, Projecten and the ⋮ menu (#4051):
+// shown with the count, hidden at 0.
+function setMenuBadge(id, count) {
+  const el = document.getElementById(id);
+  if (!el) return;
+  el.textContent = count > 0 ? String(count) : '';
+  el.classList.toggle('hidden', !(count > 0));
+}
+
+// ⋮ badge = sum of the badges of the entries inside the menu.
+function updateTopbarMenuBadge() {
+  let sum = 0;
+  document.querySelectorAll('#topbar-menu .menu-badge').forEach(b => {
+    if (!b.classList.contains('hidden')) sum += parseInt(b.textContent, 10) || 0;
+  });
+  setMenuBadge('topbar-menu-badge', sum);
+}
+
+// Projecten badge = number of non-closed projects.
+async function updateProjectsBadge() {
+  try {
+    const list = await fetchProjects();
+    setMenuBadge('projects-badge', list.filter(p => p.status !== 'closed').length);
+  } catch { /* keep the last badge */ }
 }
 
 // Render the overview body from the current jobsCache + printers. Called on
@@ -4502,6 +4588,7 @@ function projectCounterHtml(p) {
 
 async function openProjectsModal() {
   const list = await fetchProjects();
+  setMenuBadge('projects-badge', list.filter(p => p.status !== 'closed').length);
   const body = document.getElementById('projects-body');
   if (list.length === 0) {
     body.innerHTML = `<div class="so-empty">Nog geen projecten.</div>`;
@@ -4886,6 +4973,7 @@ function setupListeners() {
 
   document.getElementById('btn-queue').addEventListener('click', () => {
     showQueuePanel = !showQueuePanel;
+    uiPrefSet('showQueuePanel', showQueuePanel);
     renderQueuePanel();
   });
 
@@ -5007,6 +5095,7 @@ let import3mfBuffer = null;
 let import3mfBusy = false;
 let import3mfDefaultDate = null;
 let import3mfFilename = null;
+let attach3mfFileName = null;
 let import3mfPlateOrder = []; // current display order of original plate indices
 
 // Pure helper: swap an entry with its neighbour and return a new array.
@@ -5340,7 +5429,7 @@ async function confirm3mfSchedule() {
       method: 'POST',
       headers: {
         'Content-Type': 'application/octet-stream',
-        'X-Schedule': encodeURIComponent(JSON.stringify({ plates: selectedPlates, mode: 'queue' })),
+        'X-Schedule': encodeURIComponent(JSON.stringify({ plates: selectedPlates, mode: 'queue', fileName: import3mfFilename || undefined })),
       },
       body: import3mfBuffer.buffer,
     });
@@ -5430,6 +5519,7 @@ function initAttach3mf() {
     this.value = '';
     attachJobId = editJobId;
     attach3mfBuffer = await file.arrayBuffer();
+    attach3mfFileName = file.name;
 
     // Close job modal, show import modal with progress
     closeModal('job-modal');
@@ -5486,7 +5576,7 @@ async function confirmAttachPlate(plateIndex) {
 
   const res = await fetch(`/api/jobs/${attachJobId}/attach-3mf`, {
     method: 'POST',
-    headers: { 'Content-Type': 'application/octet-stream', 'X-Plate-Index': String(plateIndex) },
+    headers: { 'Content-Type': 'application/octet-stream', 'X-Plate-Index': String(plateIndex), ...(attach3mfFileName ? { 'X-File-Name': encodeURIComponent(attach3mfFileName) } : {}) },
     body: attach3mfBuffer,
   });
 

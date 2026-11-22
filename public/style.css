@@ -167,6 +167,16 @@ body {
   vertical-align: middle;
 }
 
+/* Queue attention (#4051): non-empty queue highlights the bar; split placeholders */
+.queue-panel-attention { background: color-mix(in srgb, var(--primary) 8%, transparent); border-left: 3px solid var(--primary); }
+.queue-item-processing .queue-item-name::after { content: ' (Processing…)'; color: var(--text-muted); font-weight: 400; }
+.queue-item-failed { border-color: var(--danger); }
+.queue-split-status { font-size: 11px; font-weight: 600; padding: 1px 6px; border-radius: 8px; background: var(--border); }
+.queue-item-failed .queue-split-status { background: var(--danger); color: #fff; }
+.queue-split-error { font-size: 11px; color: var(--danger); }
+.pf-file-row { font-size: 13px; margin-top: 4px; }
+.pf-file-row .pf-file-tag { font-size: 11px; font-weight: 600; margin-left: 6px; color: var(--text-muted); }
+
 /* Badge dot on the mobile printer-status button */
 .status-panel-toggle { position: relative; }
 .status-badge {

@@ -301,4 +301,4 @@ function detectSlicer(filePath) {
   return null;
 }
 
-module.exports = { parse3mf, extractThumbnails, detectSlicer };
+module.exports = { parse3mf, extractThumbnails, detectSlicer, parseSliceInfo };

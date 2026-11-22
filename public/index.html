@@ -28,10 +28,10 @@
         🖨 <span id="printer-status-badge"></span>
       </button>
       <button id="btn-add-job" class="btn btn-primary">+ Job</button>
-      <button id="btn-projects" class="btn btn-secondary">Projecten</button>
-      <button id="btn-queue" class="btn btn-secondary">Queue</button>
+      <button id="btn-projects" class="btn btn-secondary">Projecten <span id="projects-badge" class="menu-badge hidden"></span></button>
+      <button id="btn-queue" class="btn btn-secondary"><span id="queue-label">Queue</span> <span id="queue-badge" class="menu-badge hidden"></span></button>
       <div class="topbar-menu-wrap" id="topbar-menu-wrap">
-        <button class="btn btn-secondary topbar-menu-btn" id="btn-topbar-menu" title="Menu" aria-expanded="false">⋮</button>
+        <button class="btn btn-secondary topbar-menu-btn" id="btn-topbar-menu" title="Menu" aria-expanded="false">⋮<span id="topbar-menu-badge" class="menu-badge hidden"></span></button>
         <div class="topbar-menu" id="topbar-menu">
           <button class="topbar-menu-item" id="btn-manage-printers">⚙ Printers</button>
           <button class="topbar-menu-item" id="btn-manage-closures">🔒 Closures</button>
@@ -210,6 +210,7 @@
           <label>Print File</label>
           <input type="text" id="job-printfile" placeholder="e.g. /path/to/file.3mf (optional)">
           <div id="job-printfile-display" style="margin-top:4px"></div>
+          <div id="job-printfile-original" style="margin-top:4px"></div>
           <div id="job-3mf-attach" style="margin-top:6px">
             <button type="button" class="btn btn-sm" id="btn-attach-3mf" onclick="document.getElementById('attach-3mf-input').click()">Attach 3MF</button>
             <input type="file" id="attach-3mf-input" accept=".3mf" style="display:none">

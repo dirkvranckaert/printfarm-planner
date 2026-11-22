@@ -11,8 +11,10 @@ const projects = require('./projects');
 const awaitingPrinter = require('./awaiting-printer');
 const linkTransition = require('./link-transition');
 const itemsMigration = require('./itemsMigration');
-const { parse3mf, extractThumbnails, detectSlicer } = require('./parse3mf');
+const { parse3mf, detectSlicer } = require('./parse3mf');
 const dlToken = require('./dl-token');
+const plateSplit = require('./plate-split');
+const { streamToFile } = require('./upload-stream');
 const { matchPrinter } = require('./printer-match');
 const sharedAuth = require('./shared-auth');
 const apiTokens = require('./api-tokens');
@@ -30,13 +32,11 @@ if (!fs.existsSync(UPLOADS_DIR)) fs.mkdirSync(UPLOADS_DIR, { recursive: true });
 function cleanupOrphanUploads(fileNames) {
   const names = new Set(fileNames.filter(Boolean));
   for (const name of names) {
-    const ref = db.prepare('SELECT COUNT(*) AS c FROM jobs WHERE printFile=? OR thumbFile=?').get(name, name);
+    const ref = db.prepare('SELECT COUNT(*) AS c FROM jobs WHERE printFile=? OR thumbFile=? OR original_file=?').get(name, name, name);
     if (ref.c > 0) continue; // still referenced by a surviving job — keep it
-    try {
-      fs.unlinkSync(path.join(UPLOADS_DIR, name));
-    } catch (err) {
-      if (err.code !== 'ENOENT') console.warn(`[job-delete] could not unlink ${name}: ${err.message}`);
-    }
+    // Main file + in-flight `.part`; an undeletable one is tracked in split_orphans (retried by the drain).
+    const err = unlinkWithPart(name);
+    if (err) trackOrphan(name, err);
   }
 }
 
@@ -517,10 +517,12 @@ app.put('/api/printers/:id', (req, res) => {
 });
 app.delete('/api/printers/:id', (req, res) => {
   // Deleting a printer cascades to its jobs — clean up their upload artifacts too.
-  const jobs = db.prepare('SELECT printFile, thumbFile FROM jobs WHERE printerId=?').all(req.params.id);
+  const jobs = db.prepare('SELECT id, status, split_payload, printFile, thumbFile, original_file FROM jobs WHERE printerId=?').all(req.params.id);
+  const blocked = printerSplitBlock(req.params.id) || splitDeleteBlock(jobs);
+  if (blocked) return res.status(409).json({ error: blocked });
   db.prepare('DELETE FROM jobs WHERE printerId=?').run(req.params.id);
   db.prepare('DELETE FROM printers WHERE id=?').run(req.params.id);
-  cleanupOrphanUploads(jobs.flatMap(j => [j.printFile, j.thumbFile]));
+  cleanupOrphanUploads(jobs.flatMap(j => [j.printFile, j.thumbFile, j.original_file]));
   res.status(204).end();
 });
 
@@ -532,26 +534,75 @@ app.get('/api/jobs', (req, res) => {
     'SELECT jobs.*, projects.label AS project FROM jobs LEFT JOIN projects ON jobs.project_id = projects.id'
   ).all());
 });
-// Attach a 3MF to an existing job (must be before :id routes)
-app.post('/api/jobs/:id/attach-3mf', express.raw({ type: '*/*', limit: '500mb' }), (req, res) => {
+// A job whose plate split is still pending / failed is a placeholder: it must
+// not be edited into a schedulable / sendable state until it expands (#4051).
+const SPLIT_PENDING = new Set(['Processing', 'Split failed']);
+function isSplitPending(job) { return !!job && SPLIT_PENDING.has(job.status); }
+// PATCH on a placeholder may only touch harmless fields (name/project/remarks...);
+// anything that schedules, links or sends it is refused.
+const SPLIT_PENDING_BLOCKED = ['status', 'linked_printer_id', 'printerId', 'start', 'end', 'queued', 'locked'];
+function patchGuardSplitPending(req, res, next) {
+  const job = db.prepare('SELECT status FROM jobs WHERE id=?').get(req.params.id);
+  if (isSplitPending(job) && SPLIT_PENDING_BLOCKED.some(k => req.body && k in req.body)) {
+    return res.status(409).json({ error: `Job is ${job.status}: wait for the plate split (or retry / use the original file)` });
+  }
+  next();
+}
+function rejectIfSplitPending(req, res, next) {
+  const job = db.prepare('SELECT status FROM jobs WHERE id=?').get(req.params.id);
+  if (isSplitPending(job)) return res.status(409).json({ error: `Job is ${job.status}: wait for the plate split (or retry / use the original file)` });
+  next();
+}
+
+// Strip the slicer suffixes from an uploaded file name -> recognisable base.
+function baseNameOf(fileName) {
+  return String(fileName || '').replace(/^.*[\\/]/, '').replace(/\.gcode\.3mf$|\.3mf$/i, '').trim();
+}
+function newStoredName() { return `${crypto.randomBytes(8).toString('hex')}.3mf`; }
+async function safeReadThumbnails(filePath) {
+  try { return await plateSplit.readThumbnails(filePath); } catch { return []; }
+}
+async function safeListSlicedPlates(filePath) {
+  try { return await plateSplit.listSlicedPlates(filePath); } catch { return []; }
+}
+function unlinkQuiet(name) { const err = unlinkWithPart(name); if (err) trackOrphan(name, err); }
+
+// Attach a 3MF to an existing job (must be before :id routes). Body streams to
+// disk; a multi-plate sliced source is split to the chosen plate (primary
+// `printFile`), the untouched upload stays as `original_file` (#4051).
+app.post('/api/jobs/:id/attach-3mf', rejectIfSplitPending, async (req, res) => {
+  const written = [];
   try {
     const job = db.prepare('SELECT * FROM jobs WHERE id=?').get(req.params.id);
     if (!job) return res.status(404).json({ error: 'Job not found' });
     const plateIndex = parseInt(req.headers['x-plate-index'] || '1');
+    const sourceName = baseNameOf(req.headers['x-file-name'] ? decodeURIComponent(req.headers['x-file-name']) : '') || null;
 
-    const fileId = crypto.randomBytes(8).toString('hex');
-    const storedName = `${fileId}.3mf`;
-    fs.writeFileSync(path.join(UPLOADS_DIR, storedName), req.body);
+    const storedName = newStoredName();
+    const fullPath = path.join(UPLOADS_DIR, storedName);
+    await streamToFile(req, fullPath);
+    written.push(storedName);
 
-    const parsed = parse3mf(req.body);
+    const parsed = parse3mf(fullPath);
     const plate = parsed.plates.find(p => p.index === plateIndex) || parsed.plates[0];
 
-    const thumbs = extractThumbnails(req.body);
+    const thumbs = await safeReadThumbnails(fullPath);
     const thumb = thumbs.find(t => t.plateIndex === plateIndex) || thumbs[0];
     let thumbFile = null;
     if (thumb) {
       thumbFile = crypto.randomBytes(8).toString('hex') + '.png';
       fs.writeFileSync(path.join(UPLOADS_DIR, thumbFile), thumb.buffer);
+      written.push(thumbFile);
+    }
+
+    // Multi-plate sliced source -> single-plate primary + original backup.
+    let printFile = storedName, originalFile = null, usedPlate = plate ? plate.index : null;
+    const sliced = await safeListSlicedPlates(fullPath);
+    if (sliced.length > 1 && usedPlate != null && sliced.includes(usedPlate)) {
+      printFile = newStoredName();
+      await plateSplit.splitPlate(fullPath, usedPlate, path.join(UPLOADS_DIR, printFile));
+      written.push(printFile);
+      originalFile = storedName;
     }
 
     const isDual = plate && (plate.nozzleCount || 1) >= 2;
@@ -571,12 +622,15 @@ app.post('/api/jobs/:id/attach-3mf', express.raw({ type: '*/*', limit: '500mb' }
     const newEnd = job.start ? new Date(new Date(job.start).getTime() + durationMins * 60 * 1000).toISOString() : '';
     const bedType = plate?.bedType || null;
 
-    db.prepare('UPDATE jobs SET printFile=?, thumbFile=?, colors=?, durationMins=?, end=?, bedType=? WHERE id=?')
-      .run(storedName, thumbFile, colorsStr, durationMins, newEnd, bedType, req.params.id);
+    const upd = db.prepare('UPDATE jobs SET printFile=?, thumbFile=?, colors=?, durationMins=?, end=?, bedType=?, original_file=?, plate_index=?, source_name=? WHERE id=?')
+      .run(printFile, thumbFile, colorsStr, durationMins, newEnd, bedType, originalFile, usedPlate, sourceName, req.params.id);
+    // The job may have been deleted during the awaits above: never leave the new files behind.
+    if (!upd.changes) throw Object.assign(new Error('Job not found'), { status: 404 });
 
     res.json(db.prepare('SELECT * FROM jobs WHERE id=?').get(req.params.id));
   } catch (err) {
-    res.status(400).json({ error: err.message });
+    for (const f of written) unlinkQuiet(f);
+    res.status(err.status || 400).json({ error: err.message });
   }
 });
 
@@ -697,7 +751,7 @@ app.post('/api/jobs', (req, res) => {
   const projectId = db.prepare('SELECT project_id FROM jobs WHERE id=?').get(result.lastInsertRowid)?.project_id ?? null;
   res.status(201).json({ id: result.lastInsertRowid, ...req.body, start: normStart, end: normEnd, queued: isQueued, cool_down_mins: coolDownMins, warm_up_mins: warmUpMins, project_id: projectId });
 });
-app.put('/api/jobs/:id', (req, res) => {
+app.put('/api/jobs/:id', rejectIfSplitPending, (req, res) => {
   const { name, customerName, orderNr, status, colors, printFile, remarks, queued, durationMins, bedType } = req.body;
   const existing = db.prepare('SELECT start, end, printerId, cool_down_mins, warm_up_mins, locked FROM jobs WHERE id=?').get(req.params.id);
   const isQueued = queued ? 1 : 0;
@@ -743,7 +797,7 @@ app.put('/api/jobs/:id', (req, res) => {
   const projectId = db.prepare('SELECT project_id FROM jobs WHERE id=?').get(req.params.id)?.project_id ?? null;
   res.json({ id: Number(req.params.id), ...req.body, start: normStart, end: normEnd, queued: isQueued, cool_down_mins: coolDownMins, warm_up_mins: warmUpMins, project_id: projectId });
 });
-app.patch('/api/jobs/:id', (req, res) => {
+app.patch('/api/jobs/:id', patchGuardSplitPending, (req, res) => {
   // "Link when printer starts": enter the 'Awaiting Printer' pending state.
   // The start-time window + one-pending-per-printer invariant are enforced
   // here, at the point the user sets it. The auto-link on RUNNING reuses the
@@ -1087,7 +1141,7 @@ app.post('/api/jobs/:id/pull-forward', (req, res) => {
 //     when a movable job blocks the slot and `reshove` isn't set.
 // On success the job leaves the queue (queued=0) with a real start/end — the
 // empty-start invariant only ever held WHILE it was queued.
-app.post('/api/jobs/:id/schedule-from-queue', (req, res) => {
+app.post('/api/jobs/:id/schedule-from-queue', rejectIfSplitPending, (req, res) => {
   const id = Number(req.params.id);
   const job = db.prepare('SELECT * FROM jobs WHERE id=?').get(id);
   if (!job || !job.queued) return res.status(400).json({ error: 'Job is not queued' });
@@ -1229,9 +1283,11 @@ app.post('/api/admin/remap-colors', async (req, res) => {
 app.delete('/api/jobs/:id', (req, res) => {
   // Capture the job's files, delete the row, then unlink any file no surviving
   // job still references (shared 3MF across plates, shared thumbnail across copies).
-  const job = db.prepare('SELECT printFile, thumbFile FROM jobs WHERE id=?').get(req.params.id);
+  const job = db.prepare('SELECT id, status, split_payload, printFile, thumbFile, original_file FROM jobs WHERE id=?').get(req.params.id);
+  const blocked = job && splitDeleteBlock([job]);
+  if (blocked) return res.status(409).json({ error: blocked });
   db.prepare('DELETE FROM jobs WHERE id=?').run(req.params.id);
-  if (job) cleanupOrphanUploads([job.printFile, job.thumbFile]);
+  if (job) cleanupOrphanUploads([job.printFile, job.thumbFile, job.original_file]);
   res.status(204).end();
 });
 
@@ -1345,6 +1401,8 @@ app.get('/api/export', (req, res) => {
 // --- Import ---
 app.post('/api/import', (req, res) => {
   const { printers = [], jobs = [], closures = [], settings = [] } = req.body;
+  const blocked = splitDeleteBlock(db.prepare('SELECT id, status, split_payload FROM jobs').all());
+  if (blocked) return res.status(409).json({ error: blocked });
   db.transaction(() => {
     db.prepare('DELETE FROM settings').run();
     db.prepare('DELETE FROM closures').run();
@@ -1464,22 +1522,342 @@ app.post('/api/find-slot', (req, res) => {
   res.json({ start: start.toISOString(), end: end.toISOString(), printerId });
 });
 
-app.post('/api/parse-3mf', express.raw({ type: '*/*', limit: '500mb' }), (req, res) => {
+app.post('/api/parse-3mf', async (req, res) => {
+  // Stream to a scratch file (never the whole body in memory); removed after parsing.
+  const tmpName = `parse-${crypto.randomBytes(8).toString('hex')}.tmp`;
+  const tmpPath = path.join(UPLOADS_DIR, tmpName);
   try {
-    if (!req.body?.length) return res.status(400).json({ error: 'Empty body' });
-    const result = parse3mf(req.body);
-    const thumbs = extractThumbnails(req.body);
+    await streamToFile(req, tmpPath);
+    const result = parse3mf(tmpPath);
+    const thumbs = await safeReadThumbnails(tmpPath);
     result.thumbnails = {};
     for (const t of thumbs) result.thumbnails[t.plateIndex] = 'data:image/png;base64,' + t.buffer.toString('base64');
     res.json(result);
   } catch (err) {
-    res.status(400).json({ error: 'Failed to parse 3MF: ' + err.message });
+    res.status(err.status || 400).json({ error: err.status === 400 && err.message === 'Empty body' ? 'Empty body' : 'Failed to parse 3MF: ' + err.message });
+  } finally {
+    unlinkQuiet(tmpName);
   }
 });
 
-app.post('/api/import-3mf-schedule', express.raw({ type: '*/*', limit: '500mb' }), (req, res) => {
+// Insert one job per (plate x copies) in a single transaction. Shared by the
+// synchronous import (single-plate / unsplittable source) and the async plate
+// split (#4051). `ctx.fileFor(pl)` gives the printFile for a plate,
+// `ctx.originalFile` the multi-plate backup (null when there is none),
+// `ctx.removeJobId` deletes the "Processing" placeholder inside the same
+// transaction (throws when it was deleted meanwhile, so a cancelled split
+// never resurrects jobs). Job NAMES come untouched from the plates payload.
+function insertPlateJobs(ctx) {
+  const { expandedPlates, sched, projId, thumbMap, sourceName } = ctx;
+  const { isQueue, isFirstAvailable, startISO, startDate, startTime } = sched;
+  const printerCache = new Map();
+  for (const pl of expandedPlates) {
+    if (pl.printerId == null || printerCache.has(pl.printerId)) continue;
+    const p = db.prepare('SELECT warm_up_mins, cool_down_mins FROM printers WHERE id=?').get(pl.printerId);
+    if (!p) throw Object.assign(new Error(`Unknown printer: ${pl.printerId}`), { status: 400 });
+    printerCache.set(pl.printerId, p);
+  }
+
+  // Schedule jobs sequentially, respecting silent hours/closed days/overlaps.
+  // Queue mode skips all time-slotting entirely: jobs are inserted with
+  // queued=1 and empty start/end, so no `new Date('')` is ever computed.
+  const importTz = getSchedulingRestrictions().timezone || DEFAULT_TZ;
+  let currentStart = null;
+  if (!isQueue) {
+    if (isFirstAvailable) {
+      currentStart = new Date();
+    } else if (startISO) {
+      currentStart = new Date(startISO);
+    } else {
+      const [dy, dmo, dda] = startDate.split('-').map(Number);
+      const [sh, smi] = (startTime || '08:00').split(':').map(Number);
+      currentStart = zonedTimeToDate(dy, dmo, dda, sh, smi || 0, importTz);
+    }
+  }
+  const createdJobs = [];
+
+  // All inserts run in ONE transaction: any throw rolls back every prior insert.
+  const run = db.transaction(() => {
+    if (ctx.removeJobId != null) {
+      const del = db.prepare('DELETE FROM jobs WHERE id=?').run(ctx.removeJobId);
+      if (!del.changes) throw new Error('Placeholder job was removed');
+    }
+    for (const pl of expandedPlates) {
+      const durationMins = pl.durationMins || 0;
+
+      const printer = pl.printerId != null ? printerCache.get(pl.printerId) : null;
+      const warmUp = printer?.warm_up_mins ?? 5;
+      const coolDown = printer?.cool_down_mins ?? 15;
+
+      const thumbFile = thumbMap[pl.plateIndex] || null;
+      const colorsStr = pl.colors ? JSON.stringify(pl.colors) : null;
+
+      // Item count forwarded by the calculator (plate objectCount). Null-safe:
+      // a missing/invalid value leaves items NULL (untracked). plate_name
+      // remembers which plate this job came from for later display + reload.
+      const plItems = Number.isInteger(pl.items) && pl.items >= 0 ? pl.items : null;
+      const plateName = pl.name || null;
+
+      // Time-slotted only when not queueing. Queue mode leaves start/end empty.
+      let startStr = '';
+      let endStr = '';
+      if (!isQueue) {
+        const validStart = findNextValidStart(currentStart, durationMins, pl.printerId);
+        const endDate = new Date(validStart.getTime() + durationMins * 60000);
+        startStr = validStart.toISOString();
+        endStr = endDate.toISOString();
+        // Next plate candidate: after this job's end + cool-down + warm-up
+        currentStart = new Date(endDate.getTime() + (coolDown + warmUp) * 60000);
+      }
+
+      const printFile = ctx.fileFor(pl);
+      const result = db.prepare(
+        'INSERT INTO jobs (printerId, name, customerName, orderNr, start, end, status, colors, printFile, remarks, queued, durationMins, thumbFile, bedType, cool_down_mins, warm_up_mins, items, plate_name, original_file, plate_index, source_name) VALUES (?,?,?,?,?,?,?,?,?,?,?,?,?,?,?,?,?,?,?,?,?)'
+      ).run(
+        pl.printerId || null,
+        pl.name || `Plate ${pl.plateIndex}`,
+        pl.customerName || null,
+        pl.orderNr || null,
+        startStr,
+        endStr,
+        'Planned',
+        colorsStr,
+        printFile,
+        null,
+        isQueue ? 1 : 0,
+        durationMins,
+        thumbFile || null,
+        pl.bedType || null,
+        coolDown,
+        warmUp,
+        plItems,
+        plateName,
+        ctx.originalFile && ctx.originalFile !== printFile ? ctx.originalFile : null,
+        Number.isInteger(pl.plateIndex) ? pl.plateIndex : null,
+        sourceName || null
+      );
+
+      if (projId) db.prepare('UPDATE jobs SET project_id=? WHERE id=?').run(projId, result.lastInsertRowid);
+
+      createdJobs.push({
+        id: result.lastInsertRowid,
+        name: pl.name,
+        printerId: pl.printerId ?? null,
+        start: startStr,
+        end: endStr,
+        durationMins,
+        thumbFile,
+        queued: isQueue ? 1 : 0,
+      });
+    }
+  });
+  run();
+  return createdJobs;
+}
+
+// --- Async plate split (#4051) ---
+// A multi-plate import returns at once with ONE placeholder job ('Processing');
+// the split runs here (serialised: one at a time, bounded memory) and replaces
+// the placeholder with the per-plate jobs. Failure -> 'Split failed' + Retry /
+// "use original file" fallback. Restarts re-run every 'Processing' row.
+let splitChain = Promise.resolve();
+function enqueueSplit(jobId) {
+  splitChain = splitChain.then(() => runSplit(jobId)).catch(err => console.error('[plate-split] unexpected:', err));
+  return splitChain;
+}
+function loadSplitContext(ph) {
+  const payload = JSON.parse(ph.split_payload);
+  return { payload, origName: ph.original_file, origPath: safeUploadPath(ph.original_file) };
+}
+async function runSplit(jobId) {
+  const ph = db.prepare("SELECT * FROM jobs WHERE id=? AND status='Processing'").get(jobId);
+  if (!ph) return;
+  // Deterministic ownership: the output names are allocated and recorded in this
+  // job's split_payload BEFORE anything is written. Cleanup (failure, or re-run
+  // after a restart) deletes exactly the recorded names, never anything else.
+  let made = [];
+  let payload = null;
   try {
-    // Parse the schedule data from headers (body is the 3MF file)
+    const ctx = loadSplitContext(ph);
+    const { origName, origPath } = ctx;
+    payload = ctx.payload;
+    // Leftovers of an interrupted / failed earlier attempt are released first
+    // (undeletable names move to split_orphans, they never block this run).
+    removeRecordedSplitOutputs(jobId, payload);
+    if (!origPath || !fs.existsSync(origPath)) throw new Error('Original 3MF is missing');
+    const planIdx = [...new Set(payload.plates.map(p => p.plateIndex))];
+    const thumbs = await safeReadThumbnails(origPath);
+    const planNames = {
+      plates: planIdx.map(idx => ({ idx, name: newStoredName() })),
+      thumbs: thumbs.map(t => ({ plateIndex: t.plateIndex, name: crypto.randomBytes(8).toString('hex') + '.png' })),
+    };
+    const planned = [...planNames.plates.map(p => p.name), ...planNames.thumbs.map(t => t.name)];
+    payload.outputs = planned;
+    // Ownership must be durable BEFORE the first write: if the placeholder is gone (or no
+    // longer Processing) nothing is recorded, so nothing may be written. Abort cleanly.
+    const rec = db.prepare("UPDATE jobs SET split_payload=? WHERE id=? AND status='Processing'").run(JSON.stringify(payload), jobId);
+    if (rec.changes !== 1) { payload = null; return; }
+    made = planned;
+    const fileByPlate = {};
+    for (const { idx, name } of planNames.plates) {
+      await plateSplit.splitPlate(origPath, idx, path.join(UPLOADS_DIR, name));
+      fileByPlate[idx] = name;
+    }
+    const thumbMap = {};
+    thumbs.forEach((t, i) => {
+      const imgId = planNames.thumbs[i].name;
+      fs.writeFileSync(path.join(UPLOADS_DIR, imgId), t.buffer);
+      thumbMap[t.plateIndex] = imgId;
+    });
+    insertPlateJobs({
+      expandedPlates: payload.plates, sched: payload.sched, projId: payload.projectId,
+      thumbMap, sourceName: ph.source_name, originalFile: origName,
+      fileFor: pl => fileByPlate[pl.plateIndex], removeJobId: ph.id,
+    });
+    broadcastJobsUpdated();
+  } catch (err) {
+    // Failure cleanup releases what this attempt wrote; undeletable names go to split_orphans.
+    if (made.length && payload) {
+      releaseSplitOutputs(made);
+      delete payload.outputs;
+      db.prepare('UPDATE jobs SET split_payload=? WHERE id=?').run(JSON.stringify(payload), jobId);
+    }
+    let msg = String(err.message || err);
+    if (/^Unknown printer/.test(msg)) msg = `Split failed: printer deleted (${msg})`; // row stays deletable
+    db.prepare("UPDATE jobs SET status='Split failed', split_error=? WHERE id=? AND status='Processing'")
+      .run(msg.slice(0, 500), jobId);
+    broadcastJobsUpdated();
+  }
+}
+// Split outputs are owned by the placeholder's record while it lives. When the record
+// goes away (delete / fallback / retry / failure / import) the names are RELEASED: each is
+// unlinked (+ its in-flight `.part`); a name that cannot be unlinked (anything but ENOENT)
+// moves to the `split_orphans` table instead of blocking the user. No file is ever
+// untracked and no user action is ever refused because of a filesystem error. Only
+// exact recorded names are touched (no directory scan, no age heuristic); names still
+// referenced by a job, or that are not generated stored names, are skipped.
+const SPLIT_NAME_RE = /^[0-9a-f]{16}\.(3mf|png)$/;
+function unlinkWithPart(name) {
+  let err2 = null;
+  for (const f of [name, `${name}.part`]) {
+    try { fs.unlinkSync(path.join(UPLOADS_DIR, f)); } catch (err) { if (err.code !== 'ENOENT') err2 = err; }
+  }
+  return err2;
+}
+function isReferencedUpload(name) {
+  return db.prepare('SELECT 1 FROM jobs WHERE printFile=? OR thumbFile=? OR original_file=?').get(name, name, name) != null;
+}
+function releaseSplitOutputs(names) {
+  for (const name of names || []) {
+    if (typeof name !== 'string' || !SPLIT_NAME_RE.test(name) || isReferencedUpload(name)) continue;
+    const err = unlinkWithPart(name);
+    if (err) trackOrphan(name, err);
+  }
+}
+// The single tracking mechanism for undeletable upload files (split outputs, job-delete
+// cleanup, failed-import cleanup): the name (main file + `.part`) is kept in split_orphans.
+function trackOrphan(name, err) {
+  if (typeof name !== 'string' || !SPLIT_NAME_RE.test(name)) { console.warn(`[uploads] could not unlink ${name}: ${err.message}`); return; }
+  console.warn(`[uploads] could not unlink ${name}, kept for retry: ${err.message}`);
+  db.prepare('INSERT INTO split_orphans (name, first_seen, last_error) VALUES (?,?,?) ON CONFLICT(name) DO UPDATE SET last_error=excluded.last_error')
+    .run(name, Date.now(), String(err.message || err).slice(0, 300));
+}
+// Retry every orphaned name (boot + periodic). A name a job still references is skipped and
+// its row KEPT (file and `.part` stay tracked); once the last reference is gone a later
+// drain unlinks file + `.part` and drops the row.
+function drainSplitOrphans() {
+  for (const { name } of db.prepare('SELECT name FROM split_orphans').all()) {
+    if (isReferencedUpload(name)) continue;
+    const err = unlinkWithPart(name);
+    if (!err) db.prepare('DELETE FROM split_orphans WHERE name=?').run(name);
+    else db.prepare('UPDATE split_orphans SET last_error=? WHERE name=?').run(String(err.message || err).slice(0, 300), name);
+  }
+}
+app.drainSplitOrphans = drainSplitOrphans;
+// Release a job's recorded outputs and clear the record.
+function removeRecordedSplitOutputs(jobId, payload) {
+  if (!payload.outputs || !payload.outputs.length) return;
+  releaseSplitOutputs(payload.outputs);
+  delete payload.outputs;
+  db.prepare('UPDATE jobs SET split_payload=? WHERE id=?').run(JSON.stringify(payload), jobId);
+}
+// Called before any route deletes job rows (single delete, printer cascade, import
+// restore). A 'Processing' placeholder owns files being written right now: refuse (the
+// split finishes or fails on its own, so this is transient). 'Split failed' rows release
+// their recorded outputs (undeletable ones go to split_orphans) and never block.
+function splitDeleteBlock(rows) {
+  if (rows.some(r => r.status === 'Processing')) return 'A plate split is still running for this job; try again when it finishes';
+  for (const r of rows) {
+    if (r.status !== 'Split failed' || !r.split_payload) continue;
+    let payload;
+    try { payload = JSON.parse(r.split_payload); } catch { continue; }
+    removeRecordedSplitOutputs(r.id, payload);
+  }
+  return null;
+}
+// A placeholder's printers live in split_payload.plates (its own printerId is NULL), so
+// deleting a printer is refused while a pending ('Processing' / 'Split failed') split
+// still references it: retry / fallback would fail with "Unknown printer".
+function printerSplitBlock(printerId) {
+  for (const r of db.prepare("SELECT split_payload FROM jobs WHERE status IN ('Processing','Split failed') AND split_payload IS NOT NULL").all()) {
+    let payload;
+    try { payload = JSON.parse(r.split_payload); } catch { continue; }
+    if ((payload.plates || []).some(pl => pl.printerId != null && String(pl.printerId) === String(printerId))) {
+      return 'A plate split for this printer is pending; wait for it to finish (or retry / use the original file) before deleting the printer';
+    }
+  }
+  return null;
+}
+// Boot recovery: a restart mid-split leaves 'Processing' rows; run them again.
+// runSplit first removes the outputs that row recorded before writing (see above).
+function recoverSplits() {
+  const rows = db.prepare("SELECT id FROM jobs WHERE status='Processing'").all();
+  for (const r of rows) enqueueSplit(r.id);
+  return rows.length;
+}
+app.recoverSplits = recoverSplits;
+app.splitIdle = () => splitChain;
+
+app.post('/api/jobs/:id/split-retry', (req, res) => {
+  const job = db.prepare('SELECT status FROM jobs WHERE id=?').get(req.params.id);
+  if (!job) return res.status(404).json({ error: 'Job not found' });
+  if (job.status !== 'Split failed') return res.status(409).json({ error: 'Job is not in a failed split state' });
+  db.prepare("UPDATE jobs SET status='Processing', split_error=NULL WHERE id=?").run(req.params.id);
+  enqueueSplit(Number(req.params.id));
+  broadcastJobsUpdated();
+  res.status(202).json({ ok: true });
+});
+// Fallback: give up splitting, expand per plate pointing every job at the original file.
+app.post('/api/jobs/:id/split-fallback', (req, res) => {
+  const ph = db.prepare('SELECT * FROM jobs WHERE id=?').get(req.params.id);
+  if (!ph) return res.status(404).json({ error: 'Job not found' });
+  if (ph.status !== 'Split failed') return res.status(409).json({ error: 'Job is not in a failed split state' });
+  try {
+    const { payload, origName } = loadSplitContext(ph);
+    // The fallback deletes the placeholder, the owner of any recorded outputs: release them.
+    removeRecordedSplitOutputs(ph.id, payload);
+    const jobs = insertPlateJobs({
+      expandedPlates: payload.plates, sched: payload.sched, projId: payload.projectId,
+      thumbMap: {}, sourceName: ph.source_name, originalFile: null,
+      fileFor: () => origName, removeJobId: ph.id,
+    });
+    broadcastJobsUpdated();
+    res.status(201).json({ jobs, file: origName });
+  } catch (err) {
+    res.status(err.status || 400).json({ error: err.message });
+  }
+});
+
+app.post('/api/import-3mf-schedule', async (req, res) => {
+  // The body (the 3MF) streams to disk; the schedule rides in the X-Schedule header.
+  const storedName = newStoredName();
+  const fullPath = path.join(UPLOADS_DIR, storedName);
+  const writtenFiles = [];
+  let keepOriginal = false;
+  try {
+    await streamToFile(req, fullPath);
+    writtenFiles.push(storedName);
+
     const rawSchedule = req.headers['x-schedule'] || '{}';
     const schedule = JSON.parse(decodeURIComponent(rawSchedule));
     const { plates, startISO, startDate, startTime, mode } = schedule;
@@ -1488,26 +1866,24 @@ app.post('/api/import-3mf-schedule', express.raw({ type: '*/*', limit: '500mb' }
     const isQueue = mode === 'queue';
     if (!plates?.length) return res.status(400).json({ error: 'plates required' });
     if (!isQueue && !isFirstAvailable && !startISO && !startDate) return res.status(400).json({ error: 'plates and start time required' });
+    const sched = { isQueue, isFirstAvailable, startISO, startDate, startTime };
+    const rawFileName = schedule.fileName || (req.headers['x-file-name'] ? decodeURIComponent(req.headers['x-file-name']) : '');
+    const sourceName = baseNameOf(rawFileName) || null;
 
     // Resolve the (optional) batch project ONCE, so every imported job shares
     // the same project_id and the first-create push fires at most once.
     const proj = schedule.project ? projects.resolveProject({ db, name: schedule.project }) : null;
 
     // Expand each plate by its `copies` count (default 1), preserving order.
-    // Validate up-front so an invalid/oversized count rejects before any file
-    // IO — copies are never silently dropped. Copies cascade back-to-back on
-    // the plate's printer via the same loop that handles multiple plates.
+    // Validate up-front so an invalid/oversized count rejects before any insert —
+    // copies are never silently dropped.
     const expandedPlates = scheduling.expandPlateCopies(plates);
 
-    // Auto-bind unassigned plates to the printer embedded in the 3MF. The
-    // headless uploader always posts printerId:null (no printer is picked at
-    // slice time), so without this every headless job lands unassigned. Uses the
-    // SAME fuzzy match the import dialog shows (printer-match.js). Only a single,
-    // unambiguous match binds; no match or an ambiguous one leaves the job
-    // unassigned (a wrong bind is worse than an unassigned queue job). An
-    // explicit printerId from the caller (web user picked one) is never touched.
+    // Auto-bind unassigned plates to the printer embedded in the 3MF (headless
+    // uploader posts printerId:null). Same fuzzy match the import dialog shows.
+    // Only a single, unambiguous match binds; an explicit printerId is untouched.
     if (expandedPlates.some(pl => pl.printerId == null)) {
-      const embeddedName = parse3mf(req.body).printerName;
+      const embeddedName = parse3mf(fullPath).printerName;
       const bound = matchPrinter(embeddedName, db.prepare('SELECT id, name FROM printers').all());
       if (bound) {
         for (const pl of expandedPlates) {
@@ -1516,134 +1892,58 @@ app.post('/api/import-3mf-schedule', express.raw({ type: '*/*', limit: '500mb' }
       }
     }
 
-    // Validate every plate's printer BEFORE any file IO or insert, so a bad
-    // printer on a later plate can never leave a partial import behind (orphan
-    // jobs + a stored 3MF). A null printerId is allowed: it is an unassigned
-    // QUEUE job (the headless importer has no printer at slice time). Any
-    // non-null id must resolve to a real printer. The lookups are cached so the
-    // insert loop reuses them (per-job warm-up/cool-down snapshot).
-    const printerCache = new Map();
+    // Validate every plate's printer BEFORE any insert, so a bad printer on a
+    // later plate can never leave a partial import behind. A null printerId is an
+    // unassigned QUEUE job; any non-null id must resolve to a real printer.
     for (const pl of expandedPlates) {
       if (pl.printerId == null) continue;
-      if (!printerCache.has(pl.printerId)) {
-        const p = db.prepare('SELECT warm_up_mins, cool_down_mins FROM printers WHERE id=?').get(pl.printerId);
-        if (!p) return res.status(400).json({ error: `Unknown printer: ${pl.printerId}` });
-        printerCache.set(pl.printerId, p);
+      if (!db.prepare('SELECT 1 FROM printers WHERE id=?').get(pl.printerId)) {
+        return res.status(400).json({ error: `Unknown printer: ${pl.printerId}` });
       }
     }
 
-    // Save the 3MF file + thumbnails. Tracked in `writtenFiles` so a failed
-    // insert transaction can remove them — no orphan artifacts on rollback.
-    const fileId = crypto.randomBytes(8).toString('hex');
-    const storedName = `${fileId}.3mf`;
-    const writtenFiles = [storedName];
-    fs.writeFileSync(path.join(UPLOADS_DIR, storedName), req.body);
+    const sliced = await safeListSlicedPlates(fullPath);
+    const wanted = [...new Set(expandedPlates.map(p => p.plateIndex))];
+    const needsSplit = sliced.length > 1 && wanted.every(i => sliced.includes(i));
 
-    const thumbs = extractThumbnails(req.body);
-    const thumbMap = {};
-    for (const t of thumbs) {
-      const imgId = crypto.randomBytes(8).toString('hex') + '.png';
-      fs.writeFileSync(path.join(UPLOADS_DIR, imgId), t.buffer);
-      writtenFiles.push(imgId);
-      thumbMap[t.plateIndex] = imgId;
-    }
-
-    // Schedule jobs sequentially, respecting silent hours/closed days/overlaps.
-    // Queue mode skips all time-slotting entirely: jobs are inserted with
-    // queued=1 and empty start/end, so no `new Date('')` is ever computed.
-    const importTz = getSchedulingRestrictions().timezone || DEFAULT_TZ;
-    let currentStart = null;
-    if (!isQueue) {
-      if (isFirstAvailable) {
-        currentStart = new Date();
-      } else if (startISO) {
-        currentStart = new Date(startISO);
-      } else {
-        const [dy, dmo, dda] = startDate.split('-').map(Number);
-        const [sh, smi] = (startTime || '08:00').split(':').map(Number);
-        currentStart = zonedTimeToDate(dy, dmo, dda, sh, smi || 0, importTz);
-      }
-    }
-    const createdJobs = [];
-
-    // All inserts run in ONE transaction: any throw rolls back every prior
-    // insert, so the import is all-or-nothing. Files written above are cleaned
-    // up in the catch below if the transaction fails.
-    const runInserts = db.transaction(() => {
-      for (const pl of expandedPlates) {
-        const durationMins = pl.durationMins || 0;
-
-        const printer = pl.printerId != null ? printerCache.get(pl.printerId) : null;
-        const warmUp = printer?.warm_up_mins ?? 5;
-        const coolDown = printer?.cool_down_mins ?? 15;
-
-        const thumbFile = thumbMap[pl.plateIndex] || null;
-        const colorsStr = pl.colors ? JSON.stringify(pl.colors) : null;
-
-        // Item count forwarded by the calculator (plate objectCount). Null-safe:
-        // a missing/invalid value leaves items NULL (untracked). plate_name
-        // remembers which plate this job came from for later display + reload.
-        const plItems = Number.isInteger(pl.items) && pl.items >= 0 ? pl.items : null;
-        const plateName = pl.name || null;
-
-        // Time-slotted only when not queueing. Queue mode leaves start/end empty.
-        let startStr = '';
-        let endStr = '';
-        if (!isQueue) {
-          const validStart = findNextValidStart(currentStart, durationMins, pl.printerId);
-          const endDate = new Date(validStart.getTime() + durationMins * 60000);
-          startStr = validStart.toISOString();
-          endStr = endDate.toISOString();
-          // Next plate candidate: after this job's end + cool-down + warm-up
-          currentStart = new Date(endDate.getTime() + (coolDown + warmUp) * 60000);
+    let createdJobs, processing = false;
+    if (needsSplit) {
+      // Multi-plate source: ONE 'Processing' placeholder now, per-plate jobs once the split is done.
+      const payload = { plates: expandedPlates, sched, projectId: proj?.id ?? null };
+      const first = expandedPlates[0];
+      // Printers were validated before the awaits above: revalidate in the SAME synchronous
+      // transaction as the insert, so a concurrent printer delete cannot slip in between.
+      const result = db.transaction(() => {
+        for (const pl of expandedPlates) {
+          if (pl.printerId != null && !db.prepare('SELECT 1 FROM printers WHERE id=?').get(pl.printerId)) {
+            throw Object.assign(new Error(`Unknown printer: ${pl.printerId}`), { status: 409 });
+          }
         }
-
-        const result = db.prepare(
-          'INSERT INTO jobs (printerId, name, customerName, orderNr, start, end, status, colors, printFile, remarks, queued, durationMins, thumbFile, bedType, cool_down_mins, warm_up_mins, items, plate_name) VALUES (?,?,?,?,?,?,?,?,?,?,?,?,?,?,?,?,?,?)'
-        ).run(
-          pl.printerId || null,
-          pl.name || `Plate ${pl.plateIndex}`,
-          pl.customerName || null,
-          pl.orderNr || null,
-          startStr,
-          endStr,
-          'Planned',
-          colorsStr,
-          storedName,
-          null,
-          isQueue ? 1 : 0,
-          durationMins,
-          thumbFile || null,
-          pl.bedType || null,
-          coolDown,
-          warmUp,
-          plItems,
-          plateName
-        );
-
-        if (proj) db.prepare('UPDATE jobs SET project_id=? WHERE id=?').run(proj.id, result.lastInsertRowid);
-
-        createdJobs.push({
-          id: result.lastInsertRowid,
-          name: pl.name,
-          printerId: pl.printerId ?? null,
-          start: startStr,
-          end: endStr,
-          durationMins,
-          thumbFile,
-          queued: isQueue ? 1 : 0,
-        });
+        const r = db.prepare(
+          "INSERT INTO jobs (printerId, name, start, end, status, queued, durationMins, original_file, split_payload, source_name, warm_up_mins, cool_down_mins) VALUES (NULL,?,?,?,?,1,0,?,?,?,0,0)"
+        ).run(sourceName || first.name || 'Import', '', '', 'Processing', storedName, JSON.stringify(payload), sourceName);
+        if (proj) db.prepare('UPDATE jobs SET project_id=? WHERE id=?').run(proj.id, r.lastInsertRowid);
+        return r;
+      })();
+      createdJobs = [{ id: result.lastInsertRowid, name: sourceName || first.name || 'Import', printerId: null, start: '', end: '', durationMins: 0, thumbFile: null, queued: 1, status: 'Processing' }];
+      processing = true;
+      keepOriginal = true;
+      setImmediate(() => enqueueSplit(result.lastInsertRowid));
+    } else {
+      // Single-plate (or unsplittable) source: one file, no split. Thumbnails written first;
+      // rolled back with the file if the insert transaction fails.
+      const thumbMap = {};
+      for (const t of await safeReadThumbnails(fullPath)) {
+        const imgId = crypto.randomBytes(8).toString('hex') + '.png';
+        fs.writeFileSync(path.join(UPLOADS_DIR, imgId), t.buffer);
+        writtenFiles.push(imgId);
+        thumbMap[t.plateIndex] = imgId;
       }
-    });
-
-    try {
-      runInserts();
-    } catch (insertErr) {
-      // Roll back the stored artifacts too — the DB already rolled back.
-      for (const f of writtenFiles) {
-        try { fs.unlinkSync(path.join(UPLOADS_DIR, f)); } catch { /* best effort */ }
-      }
-      throw insertErr;
+      createdJobs = insertPlateJobs({
+        expandedPlates, sched, projId: proj?.id ?? null, thumbMap, sourceName,
+        originalFile: null, fileFor: () => storedName,
+      });
+      keepOriginal = true;
     }
 
     // First-create push (once per batch), behind the `project` toggle.
@@ -1656,9 +1956,13 @@ app.post('/api/import-3mf-schedule', express.raw({ type: '*/*', limit: '500mb' }
       });
     }
 
-    res.status(201).json({ jobs: createdJobs, file: storedName, project_id: proj?.id ?? null });
+    if (processing) broadcastJobsUpdated();
+    res.status(201).json({ jobs: createdJobs, file: storedName, project_id: proj?.id ?? null, ...(processing ? { processing: true } : {}) });
   } catch (err) {
-    res.status(400).json({ error: err.message });
+    res.status(err.status || 400).json({ error: err.message });
+  } finally {
+    // Failed / rejected import: no orphan artifacts. (A successful one keeps its files.)
+    if (!keepOriginal) for (const f of writtenFiles) unlinkQuiet(f);
   }
 });
 
@@ -1673,15 +1977,23 @@ function safeUploadPath(name) {
   return full;
 }
 
+// Recognisable download name for a split single-plate file: <original>_plate<N>.gcode.3mf
+// (the on-disk name stays an opaque <hex>.3mf). null for non-split jobs.
+function splitDownloadName(job) {
+  if (!job.original_file || job.original_file === job.printFile || !job.plate_index) return null;
+  const base = String(job.source_name || job.name || 'plate').replace(/[^a-zA-Z0-9_-]/g, '_');
+  return `${base}_plate${job.plate_index}.gcode.3mf`;
+}
+
 // "Open in slicer": authenticated mint of a ~5 min signed download URL for the
 // job's retained 3MF, plus the slicer detected from the file itself.
-app.post('/api/jobs/:id/slicer-link', (req, res) => {
-  const job = db.prepare('SELECT name, orderNr, printFile FROM jobs WHERE id=?').get(req.params.id);
+app.post('/api/jobs/:id/slicer-link', rejectIfSplitPending, (req, res) => {
+  const job = db.prepare('SELECT name, orderNr, printFile, original_file, plate_index, source_name FROM jobs WHERE id=?').get(req.params.id);
   if (!job) return res.status(404).json({ error: 'Job not found' });
   const pf = job.printFile;
   const full = pf && dlToken.STORED_RE.test(pf) ? safeUploadPath(pf) : null;
   if (!full || !fs.existsSync(full)) return res.status(404).json({ error: 'No retained 3MF' });
-  const filename = `${job.orderNr ? job.orderNr + '_' : ''}${String(job.name).replace(/[^a-zA-Z0-9_-]/g, '_')}.3mf`;
+  const filename = splitDownloadName(job) || `${job.orderNr ? job.orderNr + '_' : ''}${String(job.name).replace(/[^a-zA-Z0-9_-]/g, '_')}.3mf`;
   res.setHeader('Cache-Control', 'no-store');
   res.json({
     slicer: detectSlicer(full),
@@ -1700,7 +2012,8 @@ app.get('/api/dl/:token/:name', (req, res) => {
   if (!stored || typeof name !== 'string' || !/\.3mf$/i.test(name)) return res.status(404).json({ error: 'Not found' });
   const filepath = safeUploadPath(stored);
   if (!filepath || !fs.existsSync(filepath)) return res.status(404).json({ error: 'Not found' });
-  const safeName = name.slice(0, -4).replace(/[^a-zA-Z0-9_-]/g, '_') + '.3mf';
+  const gcodeExt = /\.gcode\.3mf$/i.test(name); // split files keep the slicer's .gcode.3mf
+  const safeName = name.slice(0, gcodeExt ? -10 : -4).replace(/[^a-zA-Z0-9_-]/g, '_') + (gcodeExt ? '.gcode.3mf' : '.3mf');
   res.setHeader('Content-Type', 'application/octet-stream');
   res.setHeader('Content-Disposition', `attachment; filename="${safeName}"`);
   res.sendFile(path.basename(filepath), { root: UPLOADS_DIR });
@@ -1728,6 +2041,9 @@ if (require.main === module) {
     // -3MF backlog never blocks incoming HTTP — the port answers immediately and
     // the backfill self-heals in the background. See runItemsBackfill above.
     runItemsBackfill();
+    drainSplitOrphans(); // retry undeletable split outputs (#4051)
+    setInterval(drainSplitOrphans, 10 * 60 * 1000).unref();
+    recoverSplits(); // re-run plate splits interrupted by a restart (#4051)
   });
 }
 

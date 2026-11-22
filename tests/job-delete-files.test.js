@@ -69,6 +69,21 @@ describe('job delete removes upload artifacts', () => {
     try { appDb.exec('DELETE FROM jobs; DELETE FROM printers;'); } catch { /* ignore */ }
   });
 
+  test('deleting a printer removes original_file once no job references it (kept while shared)', async () => {
+    const original = `${hex()}.3mf`;
+    fs.writeFileSync(upPath(original), 'ORIG'); written.add(original);
+    const p2 = appDb.prepare('INSERT INTO printers (name, color, warm_up_mins, cool_down_mins) VALUES (?,?,?,?)').run('P2', '#0f0', 5, 15).lastInsertRowid;
+    const ins = (pid) => appDb.prepare(
+      'INSERT INTO jobs (printerId, name, start, end, status, original_file, queued) VALUES (?,?,?,?,?,?,0)'
+    ).run(pid, 'S', '2026-04-13T06:00:00Z', '2026-04-13T07:00:00Z', 'Planned', original);
+    ins(printerId); ins(p2);
+
+    expect((await del(`/api/printers/${printerId}`)).status).toBe(204);
+    expect(exists(original)).toBe(true);  // still referenced by the job on P2
+    expect((await del(`/api/printers/${p2}`)).status).toBe(204);
+    expect(exists(original)).toBe(false); // last reference gone
+  });
+
   test('deleting a QUEUED job unlinks its 3mf + thumbnail', async () => {
     const { printFile, thumbFile } = makeFiles();
     const id = insertJob({ printFile, thumbFile, queued: 1 });
