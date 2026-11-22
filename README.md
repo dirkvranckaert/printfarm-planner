@@ -596,7 +596,9 @@ The project ships with a Jest test suite covering core DB logic and utility func
 npm test
 ```
 
-Test files live in `tests/`, one file per feature area (server routes, scheduling, realign, pause, printer links, 3MF import, projects/items, day-view client behaviour, utils). Everything runs against in-memory SQLite or jsdom — no server process is needed.
+Test files live in `tests/`, one file per feature area (server routes, scheduling, realign, pause, printer links, 3MF import, projects/items, day-view client behaviour, utils). Everything runs against temp SQLite/uploads (per-file `PLANNER_DB_PATH` + `PLANNER_UPLOADS_DIR` via `tests/isolate-env.js`) or jsdom. Route tests bind loopback-only through `tests/helpers/listen-local.js` (never `request(app)`); no jest retries.
+
+**Open in slicer:** the job-card printer icon opens the job's 3MF in Bambu Studio / OrcaSlicer (auto-detected from the 3MF; Alt-click = plain download). Uses a 5-min HMAC-signed download link (`DL_TOKEN_SECRET`, falls back to `SHARED_AUTH_SECRET`, else per-process random). Bambu Studio shows a "not from a trusted site" prompt each time (its allow-list); PrusaSlicer falls back to download.
 
 Add tests alongside any non-trivial logic change, and **revert-confirm every regression test**: temporarily revert the guard it protects and check the test actually fails. Import the production module under test — never assert against a copied mirror of its logic.
 
