@@ -328,7 +328,7 @@ describe('item-count routes (integration)', () => {
   beforeAll(() => {
     appDb = require('../db');
     app   = require('../server');
-    UPLOADS_DIR = path.join(__dirname, '..', 'data', 'uploads');
+    UPLOADS_DIR = process.env.PLANNER_UPLOADS_DIR; // per-file temp dir (tests/isolate-env.js)
     appDb.prepare('INSERT OR REPLACE INTO sessions (token, expires_at) VALUES (?,?)')
       .run(SESSION_TOKEN, Date.now() + 3_600_000);
   });

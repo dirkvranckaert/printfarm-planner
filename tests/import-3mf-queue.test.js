@@ -17,7 +17,7 @@ describe('import-3mf-schedule — queue mode (real route via supertest)', () => 
   let app, appDb, printerId;
   const SESSION_TOKEN = 'queue-import-session-token';
   const authCookie = `pf_session=${SESSION_TOKEN}`;
-  const uploadsDir = path.join(__dirname, '..', 'data', 'uploads');
+  const uploadsDir = process.env.PLANNER_UPLOADS_DIR; // per-file temp dir (tests/isolate-env.js)
   const createdFiles = [];
 
   // Non-zip dummy body: the route trusts the X-Schedule `plates` array for job

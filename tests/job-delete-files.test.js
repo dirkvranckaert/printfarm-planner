@@ -14,7 +14,7 @@ process.env.PLANNER_DB_PATH =
 
 const request = require('supertest');
 
-const UPLOADS_DIR = path.join(__dirname, '..', 'data', 'uploads');
+const UPLOADS_DIR = process.env.PLANNER_UPLOADS_DIR; // per-file temp dir (tests/isolate-env.js)
 
 describe('job delete removes upload artifacts', () => {
   let appDb, app, printerId;
