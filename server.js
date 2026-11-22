@@ -34,11 +34,9 @@ function cleanupOrphanUploads(fileNames) {
   for (const name of names) {
     const ref = db.prepare('SELECT COUNT(*) AS c FROM jobs WHERE printFile=? OR thumbFile=? OR original_file=?').get(name, name, name);
     if (ref.c > 0) continue; // still referenced by a surviving job — keep it
-    try {
-      fs.unlinkSync(path.join(UPLOADS_DIR, name));
-    } catch (err) {
-      if (err.code !== 'ENOENT') console.warn(`[job-delete] could not unlink ${name}: ${err.message}`);
-    }
+    // Main file + in-flight `.part`; an undeletable one is tracked in split_orphans (retried by the drain).
+    const err = unlinkWithPart(name);
+    if (err) trackOrphan(name, err);
   }
 }
 
@@ -567,7 +565,7 @@ async function safeReadThumbnails(filePath) {
 async function safeListSlicedPlates(filePath) {
   try { return await plateSplit.listSlicedPlates(filePath); } catch { return []; }
 }
-function unlinkQuiet(name) { try { fs.unlinkSync(path.join(UPLOADS_DIR, name)); } catch { /* best effort */ } }
+function unlinkQuiet(name) { const err = unlinkWithPart(name); if (err) trackOrphan(name, err); }
 
 // Attach a 3MF to an existing job (must be before :id routes). Body streams to
 // disk; a multi-plate sliced source is split to the chosen plate (primary
@@ -624,8 +622,10 @@ app.post('/api/jobs/:id/attach-3mf', rejectIfSplitPending, async (req, res) => {
     const newEnd = job.start ? new Date(new Date(job.start).getTime() + durationMins * 60 * 1000).toISOString() : '';
     const bedType = plate?.bedType || null;
 
-    db.prepare('UPDATE jobs SET printFile=?, thumbFile=?, colors=?, durationMins=?, end=?, bedType=?, original_file=?, plate_index=?, source_name=? WHERE id=?')
+    const upd = db.prepare('UPDATE jobs SET printFile=?, thumbFile=?, colors=?, durationMins=?, end=?, bedType=?, original_file=?, plate_index=?, source_name=? WHERE id=?')
       .run(printFile, thumbFile, colorsStr, durationMins, newEnd, bedType, originalFile, usedPlate, sourceName, req.params.id);
+    // The job may have been deleted during the awaits above: never leave the new files behind.
+    if (!upd.changes) throw Object.assign(new Error('Job not found'), { status: 404 });
 
     res.json(db.prepare('SELECT * FROM jobs WHERE id=?').get(req.params.id));
   } catch (err) {
@@ -1722,8 +1722,10 @@ async function runSplit(jobId) {
       delete payload.outputs;
       db.prepare('UPDATE jobs SET split_payload=? WHERE id=?').run(JSON.stringify(payload), jobId);
     }
+    let msg = String(err.message || err);
+    if (/^Unknown printer/.test(msg)) msg = `Split failed: printer deleted (${msg})`; // row stays deletable
     db.prepare("UPDATE jobs SET status='Split failed', split_error=? WHERE id=? AND status='Processing'")
-      .run(String(err.message || err).slice(0, 500), jobId);
+      .run(msg.slice(0, 500), jobId);
     broadcastJobsUpdated();
   }
 }
@@ -1749,17 +1751,23 @@ function releaseSplitOutputs(names) {
   for (const name of names || []) {
     if (typeof name !== 'string' || !SPLIT_NAME_RE.test(name) || isReferencedUpload(name)) continue;
     const err = unlinkWithPart(name);
-    if (!err) continue;
-    console.warn(`[plate-split] could not unlink ${name}, kept for retry: ${err.message}`);
-    db.prepare('INSERT INTO split_orphans (name, first_seen, last_error) VALUES (?,?,?) ON CONFLICT(name) DO UPDATE SET last_error=excluded.last_error')
-      .run(name, Date.now(), String(err.message || err).slice(0, 300));
+    if (err) trackOrphan(name, err);
   }
 }
-// Retry every orphaned name (boot + periodic). A name a job references is dropped from
-// the list without touching the file.
+// The single tracking mechanism for undeletable upload files (split outputs, job-delete
+// cleanup, failed-import cleanup): the name (main file + `.part`) is kept in split_orphans.
+function trackOrphan(name, err) {
+  if (typeof name !== 'string' || !SPLIT_NAME_RE.test(name)) { console.warn(`[uploads] could not unlink ${name}: ${err.message}`); return; }
+  console.warn(`[uploads] could not unlink ${name}, kept for retry: ${err.message}`);
+  db.prepare('INSERT INTO split_orphans (name, first_seen, last_error) VALUES (?,?,?) ON CONFLICT(name) DO UPDATE SET last_error=excluded.last_error')
+    .run(name, Date.now(), String(err.message || err).slice(0, 300));
+}
+// Retry every orphaned name (boot + periodic). A name a job still references is skipped and
+// its row KEPT (file and `.part` stay tracked); once the last reference is gone a later
+// drain unlinks file + `.part` and drops the row.
 function drainSplitOrphans() {
   for (const { name } of db.prepare('SELECT name FROM split_orphans').all()) {
-    if (isReferencedUpload(name)) { db.prepare('DELETE FROM split_orphans WHERE name=?').run(name); continue; }
+    if (isReferencedUpload(name)) continue;
     const err = unlinkWithPart(name);
     if (!err) db.prepare('DELETE FROM split_orphans WHERE name=?').run(name);
     else db.prepare('UPDATE split_orphans SET last_error=? WHERE name=?').run(String(err.message || err).slice(0, 300), name);
@@ -1903,10 +1911,20 @@ app.post('/api/import-3mf-schedule', async (req, res) => {
       // Multi-plate source: ONE 'Processing' placeholder now, per-plate jobs once the split is done.
       const payload = { plates: expandedPlates, sched, projectId: proj?.id ?? null };
       const first = expandedPlates[0];
-      const result = db.prepare(
-        "INSERT INTO jobs (printerId, name, start, end, status, queued, durationMins, original_file, split_payload, source_name, warm_up_mins, cool_down_mins) VALUES (NULL,?,?,?,?,1,0,?,?,?,0,0)"
-      ).run(sourceName || first.name || 'Import', '', '', 'Processing', storedName, JSON.stringify(payload), sourceName);
-      if (proj) db.prepare('UPDATE jobs SET project_id=? WHERE id=?').run(proj.id, result.lastInsertRowid);
+      // Printers were validated before the awaits above: revalidate in the SAME synchronous
+      // transaction as the insert, so a concurrent printer delete cannot slip in between.
+      const result = db.transaction(() => {
+        for (const pl of expandedPlates) {
+          if (pl.printerId != null && !db.prepare('SELECT 1 FROM printers WHERE id=?').get(pl.printerId)) {
+            throw Object.assign(new Error(`Unknown printer: ${pl.printerId}`), { status: 409 });
+          }
+        }
+        const r = db.prepare(
+          "INSERT INTO jobs (printerId, name, start, end, status, queued, durationMins, original_file, split_payload, source_name, warm_up_mins, cool_down_mins) VALUES (NULL,?,?,?,?,1,0,?,?,?,0,0)"
+        ).run(sourceName || first.name || 'Import', '', '', 'Processing', storedName, JSON.stringify(payload), sourceName);
+        if (proj) db.prepare('UPDATE jobs SET project_id=? WHERE id=?').run(proj.id, r.lastInsertRowid);
+        return r;
+      })();
       createdJobs = [{ id: result.lastInsertRowid, name: sourceName || first.name || 'Import', printerId: null, start: '', end: '', durationMins: 0, thumbFile: null, queued: 1, status: 'Processing' }];
       processing = true;
       keepOriginal = true;

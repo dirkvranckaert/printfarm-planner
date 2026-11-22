@@ -384,16 +384,107 @@ describe('plate split routes', () => {
     for (const n of hexFiles()) fs.unlinkSync(path.join(uploadsDir, n));
   });
 
-  test('drain drops an orphan name a job references, without deleting the file', () => {
+  // R5-F1: a referenced orphan keeps its row (file + .part stay tracked); once the last
+  // reference is gone the drain removes file, .part and row.
+  test('drain keeps the orphan row while a job references it, then removes file + .part', () => {
     const name = `${require('crypto').randomBytes(8).toString('hex')}.3mf`;
     fs.writeFileSync(path.join(uploadsDir, name), 'x');
+    fs.writeFileSync(path.join(uploadsDir, `${name}.part`), 'x');
     appDb.prepare('INSERT INTO split_orphans (name, first_seen) VALUES (?,?)').run(name, Date.now());
     appDb.prepare("INSERT INTO jobs (name, start, end, status, queued, printFile) VALUES ('r','','','Planned',1,?)").run(name);
     app.drainSplitOrphans();
-    expect(appDb.prepare('SELECT COUNT(*) c FROM split_orphans').get().c).toBe(0);
+    expect(appDb.prepare('SELECT COUNT(*) c FROM split_orphans').get().c).toBe(1);
     expect(fs.existsSync(path.join(uploadsDir, name))).toBe(true);
+    expect(fs.existsSync(path.join(uploadsDir, `${name}.part`))).toBe(true);
     appDb.exec('DELETE FROM jobs');
-    fs.unlinkSync(path.join(uploadsDir, name));
+    app.drainSplitOrphans();
+    expect(appDb.prepare('SELECT COUNT(*) c FROM split_orphans').get().c).toBe(0);
+    expect(fs.existsSync(path.join(uploadsDir, name))).toBe(false);
+    expect(fs.existsSync(path.join(uploadsDir, `${name}.part`))).toBe(false);
+  });
+
+  test('job delete with an undeletable file (or .part) tracks it in split_orphans', async () => {
+    const hex = () => require('crypto').randomBytes(8).toString('hex');
+    const name = `${hex()}.3mf`;
+    fs.writeFileSync(path.join(uploadsDir, name), 'x');
+    fs.writeFileSync(path.join(uploadsDir, `${name}.part`), 'x');
+    const id = appDb.prepare("INSERT INTO jobs (name, start, end, status, queued, printFile) VALUES ('r','','','Planned',1,?)").run(name).lastInsertRowid;
+    const realUnlink = fs.unlinkSync;
+    const unlink = jest.spyOn(fs, 'unlinkSync').mockImplementation(p => {
+      if (String(p).endsWith(`${name}.part`)) throw Object.assign(new Error('busy'), { code: 'EPERM' });
+      return realUnlink(p);
+    });
+    expect((await request(server).delete(`/api/jobs/${id}`).set('Cookie', cookie)).status).toBe(204);
+    expect(appDb.prepare('SELECT name FROM split_orphans').all().map(o => o.name)).toEqual([name]);
+    unlink.mockRestore();
+    app.drainSplitOrphans();
+    expect(appDb.prepare('SELECT COUNT(*) c FROM split_orphans').get().c).toBe(0);
+    expect(fs.existsSync(path.join(uploadsDir, `${name}.part`))).toBe(false);
+  });
+
+  // R5-F2: the printer is deleted between the up-front validation and the placeholder insert
+  // (during the async 3MF analysis). The import must reject and leave nothing behind.
+  test('printer deleted during async analysis: import rejects 409, no placeholder, upload cleaned', async () => {
+    const pid = appDb.prepare("INSERT INTO printers (name, color) VALUES ('p','#fff')").run().lastInsertRowid;
+    const before = new Set(fs.readdirSync(uploadsDir));
+    const real = plateSplit.listSlicedPlates;
+    jest.spyOn(plateSplit, 'listSlicedPlates').mockImplementation(async (...a) => {
+      appDb.prepare('DELETE FROM printers WHERE id=?').run(pid);
+      return real(...a);
+    });
+    const res = await imp({ plates: plates(2).map(p => ({ ...p, printerId: pid })), mode: 'queue' });
+    expect(res.status).toBe(409);
+    expect(jobs()).toHaveLength(0);
+    expect(fs.readdirSync(uploadsDir).filter(f => !before.has(f))).toEqual([]);
+  });
+
+  test('printer deleted during async analysis (single-plate source): 400, nothing inserted', async () => {
+    const pid = appDb.prepare("INSERT INTO printers (name, color) VALUES ('p','#fff')").run().lastInsertRowid;
+    const before = new Set(fs.readdirSync(uploadsDir));
+    const real = plateSplit.readThumbnails;
+    jest.spyOn(plateSplit, 'readThumbnails').mockImplementation(async (...a) => {
+      appDb.prepare('DELETE FROM printers WHERE id=?').run(pid);
+      return real(...a);
+    });
+    const res = await imp({ plates: plates(2).map(p => ({ ...p, printerId: pid })), mode: 'queue' },
+      fs.readFileSync(path.join(__dirname, 'fixtures', 'two-plate.gcode.3mf')));
+    expect(res.status).toBe(400);
+    expect(jobs()).toHaveLength(0);
+    expect(fs.readdirSync(uploadsDir).filter(f => !before.has(f))).toEqual([]);
+  });
+
+  test('attach-3mf: job deleted during async analysis -> 404, new files cleaned', async () => {
+    const id = appDb.prepare("INSERT INTO jobs (name, start, end, status, queued) VALUES ('r','','','Planned',1)").run().lastInsertRowid;
+    const before = new Set(fs.readdirSync(uploadsDir));
+    const real = plateSplit.listSlicedPlates;
+    jest.spyOn(plateSplit, 'listSlicedPlates').mockImplementation(async (...a) => {
+      appDb.prepare('DELETE FROM jobs WHERE id=?').run(id);
+      return real(...a);
+    });
+    const res = await request(server).post(`/api/jobs/${id}/attach-3mf`).set('Cookie', cookie)
+      .set('Content-Type', 'application/octet-stream').set('X-Plate-Index', '2').send(srcBody);
+    expect(res.status).toBe(404);
+    expect(fs.readdirSync(uploadsDir).filter(f => !before.has(f))).toEqual([]);
+  });
+
+  test('split runs after the printer vanished: clear "printer deleted" Split failed, still deletable', async () => {
+    const pid = appDb.prepare("INSERT INTO printers (name, color) VALUES ('p','#fff')").run().lastInsertRowid;
+    const before0 = new Set(fs.readdirSync(uploadsDir));
+    const real = plateSplit.splitPlate;
+    jest.spyOn(plateSplit, 'splitPlate').mockImplementation(async (...a) => {
+      appDb.prepare('DELETE FROM printers WHERE id=?').run(pid); // vanishes mid-split
+      return real(...a);
+    });
+    const res = await imp({ plates: plates(2).map(p => ({ ...p, printerId: pid })), mode: 'queue' });
+    expect(res.status).toBe(201);
+    await settle();
+    const row = jobs()[0];
+    expect(row.status).toBe('Split failed');
+    expect(row.split_error).toMatch(/printer deleted/);
+    expect((await request(server).post(`/api/jobs/${row.id}/split-fallback`).set('Cookie', cookie)).status).toBe(400);
+    expect((await request(server).delete(`/api/jobs/${row.id}`).set('Cookie', cookie)).status).toBe(204);
+    expect(jobs()).toHaveLength(0);
+    for (const f of fs.readdirSync(uploadsDir)) if (!before0.has(f)) fs.rmSync(path.join(uploadsDir, f), { force: true });
   });
 
   test('cleanup treats ENOENT as success (record cleared) and drops invalid names', async () => {
