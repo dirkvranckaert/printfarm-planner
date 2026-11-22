@@ -14,7 +14,7 @@
 
 const fs = require('fs');
 const path = require('path');
-const { execSync } = require('child_process');
+const { execSync, execFileSync } = require('child_process');
 
 /**
  * Extract a file from a ZIP archive. Returns string or null.
@@ -280,4 +280,25 @@ function parseSliceInfo(xml) {
   return plates;
 }
 
-module.exports = { parse3mf, extractThumbnails };
+/**
+ * Detect the slicer that produced a 3MF from the Application metadata in
+ * 3D/3dmodel.model (e.g. "BambuStudio-02.01.01.52", "OrcaSlicer-2.3.1",
+ * "PrusaSlicer-2.8.0"). Only the first 16 KB of the model is read.
+ * @param {string} filePath
+ * @returns {'bambustudio'|'orcaslicer'|'prusaslicer'|null} null = unknown
+ */
+function detectSlicer(filePath) {
+  let head;
+  try {
+    head = execFileSync('sh', ['-c', 'unzip -p "$1" 3D/3dmodel.model 2>/dev/null | head -c 16384', '_', filePath],
+      { encoding: 'utf-8', timeout: 10000 });
+  } catch { return null; }
+  const m = /<metadata\s+name="Application"[^>]*>([^<]*)</i.exec(head || '');
+  const app = m ? m[1].trim().toLowerCase() : '';
+  if (app.startsWith('bambustudio')) return 'bambustudio';
+  if (app.startsWith('orcaslicer')) return 'orcaslicer';
+  if (app.startsWith('prusaslicer')) return 'prusaslicer';
+  return null;
+}
+
+module.exports = { parse3mf, extractThumbnails, detectSlicer };

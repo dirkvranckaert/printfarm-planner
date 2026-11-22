@@ -459,6 +459,12 @@ body {
 }
 
 /* Job blocks (day view) */
+.job-dl {
+  flex-shrink: 0; margin-left: auto; width: 28px; height: 28px; margin-top: -4px; margin-bottom: -4px;
+  display: inline-flex; align-items: center; justify-content: center;
+  background: none; border: 0; border-radius: 6px; padding: 0; cursor: pointer; color: inherit;
+}
+.job-dl:hover { background: rgba(0,0,0,.12); }
 .job-block {
   position: absolute;
   left: 3px;

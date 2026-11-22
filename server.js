@@ -11,12 +11,13 @@ const projects = require('./projects');
 const awaitingPrinter = require('./awaiting-printer');
 const linkTransition = require('./link-transition');
 const itemsMigration = require('./itemsMigration');
-const { parse3mf, extractThumbnails } = require('./parse3mf');
+const { parse3mf, extractThumbnails, detectSlicer } = require('./parse3mf');
+const dlToken = require('./dl-token');
 const { matchPrinter } = require('./printer-match');
 const sharedAuth = require('./shared-auth');
 const apiTokens = require('./api-tokens');
 
-const UPLOADS_DIR = path.join(__dirname, 'data', 'uploads');
+const UPLOADS_DIR = process.env.PLANNER_UPLOADS_DIR || path.join(__dirname, 'data', 'uploads'); // env override: test isolation
 if (!fs.existsSync(UPLOADS_DIR)) fs.mkdirSync(UPLOADS_DIR, { recursive: true });
 
 // Remove upload artifacts (the imported `<hex>.3mf` and plate thumbnail PNGs)
@@ -125,6 +126,8 @@ app.get('/logout', (req, res) => {
 app.use((req, res, next) => {
   // Allow PWA assets through unauthenticated
   if (['/favicon.svg', '/manifest.json', '/sw.js', '/apple-touch-icon.png', '/api/config'].includes(req.path)) return next();
+  // Signed short-lived 3MF download for slicers (no session); the route verifies the HMAC token itself.
+  if (req.method === 'GET' && /^\/api\/dl\/[^/]+\/[^/]+$/.test(req.path)) return next();
   if (req.apiToken) return next(); // validated by the Bearer middleware above
   const token = parseCookieToken(req);
   if (token && isValidSession(token)) return next();
@@ -1660,15 +1663,59 @@ app.post('/api/import-3mf-schedule', express.raw({ type: '*/*', limit: '500mb' }
 });
 
 
+// Resolve a bare filename inside UPLOADS_DIR; null for anything else (#4052:
+// Express decodes %2F in params, so ../ must be rejected explicitly).
+function safeUploadPath(name) {
+  if (typeof name !== 'string' || !name || name.includes('\0') || name.includes('\\')) return null;
+  if (name !== path.basename(name)) return null;
+  const full = path.resolve(UPLOADS_DIR, name);
+  if (!full.startsWith(path.resolve(UPLOADS_DIR) + path.sep)) return null;
+  return full;
+}
+
+// "Open in slicer": authenticated mint of a ~5 min signed download URL for the
+// job's retained 3MF, plus the slicer detected from the file itself.
+app.post('/api/jobs/:id/slicer-link', (req, res) => {
+  const job = db.prepare('SELECT name, orderNr, printFile FROM jobs WHERE id=?').get(req.params.id);
+  if (!job) return res.status(404).json({ error: 'Job not found' });
+  const pf = job.printFile;
+  const full = pf && dlToken.STORED_RE.test(pf) ? safeUploadPath(pf) : null;
+  if (!full || !fs.existsSync(full)) return res.status(404).json({ error: 'No retained 3MF' });
+  const filename = `${job.orderNr ? job.orderNr + '_' : ''}${String(job.name).replace(/[^a-zA-Z0-9_-]/g, '_')}.3mf`;
+  res.setHeader('Cache-Control', 'no-store');
+  res.json({
+    slicer: detectSlicer(full),
+    filename,
+    path: `/api/dl/${dlToken.mint(pf)}/${encodeURIComponent(filename)}`,
+    expiresInSec: dlToken.TTL_MS / 1000,
+  });
+});
+
+// Signed download (no session): the token binds one stored file; the trailing
+// name is cosmetic (gives slicers a .3mf extension) and never touches the FS.
+app.get('/api/dl/:token/:name', (req, res) => {
+  res.setHeader('Cache-Control', 'no-store');
+  const stored = dlToken.verify(req.params.token);
+  const name = req.params.name;
+  if (!stored || typeof name !== 'string' || !/\.3mf$/i.test(name)) return res.status(404).json({ error: 'Not found' });
+  const filepath = safeUploadPath(stored);
+  if (!filepath || !fs.existsSync(filepath)) return res.status(404).json({ error: 'Not found' });
+  const safeName = name.slice(0, -4).replace(/[^a-zA-Z0-9_-]/g, '_') + '.3mf';
+  res.setHeader('Content-Type', 'application/octet-stream');
+  res.setHeader('Content-Disposition', `attachment; filename="${safeName}"`);
+  res.sendFile(filepath, { dotfiles: 'allow' }); // path is containment-checked; allow dot-dir checkouts
+});
+
 // Serve uploaded images/thumbnails
 app.get('/api/uploads/:filename', (req, res) => {
-  const filepath = path.join(UPLOADS_DIR, req.params.filename);
+  const filepath = safeUploadPath(req.params.filename);
+  if (!filepath) return res.status(400).json({ error: 'Bad filename' });
   if (!fs.existsSync(filepath)) return res.status(404).json({ error: 'Not found' });
   const ext = path.extname(req.params.filename).toLowerCase();
   const mime = { '.png': 'image/png', '.jpg': 'image/jpeg', '.3mf': 'application/octet-stream' };
   res.setHeader('Content-Type', mime[ext] || 'application/octet-stream');
   res.setHeader('Cache-Control', 'public, max-age=86400');
-  res.sendFile(filepath);
+  res.sendFile(filepath, { dotfiles: 'allow' }); // path is containment-checked; allow dot-dir checkouts
 });
 
 // Only bind a port when run directly (node server.js). Under supertest the app

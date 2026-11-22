@@ -1515,8 +1515,8 @@ async function renderDay() {
                 <span class="job-block-name" style="flex-shrink:1;min-width:0;overflow:hidden;text-overflow:ellipsis;white-space:nowrap">${job.orderNr ? `#${escHtml(job.orderNr)} — ` : ''}${escHtml(job.name)}</span>
                 ${job.colors ? renderColorSwatches(job.colors) : ''}
                 ${job.linked_printer_id ? '<span title="Linked to printer">🔗</span>' : ''}
-                ${jobDownloadLink(job)}
                 <span class="job-status-badge" style="flex-shrink:0;${statusBadgeStyle(status)}">${escHtml(status)}</span>
+                ${jobDownloadLink(job)}
               </div>`;
       if (htPx >= 40 && job.customerName) h += `<span class="job-block-customer">${escHtml(job.customerName)}</span>`;
       if (htPx >= 40 && job.project) h += `<span class="job-block-project">${escHtml(job.project)}</span>`;
@@ -1900,11 +1900,43 @@ async function onDragEnd() {
   if (scr2) scr2.scrollTop = savedScrollTop;
 }
 
-// Download link for a job's retained uploaded .3mf; same filename logic as the job dialog.
+// "Open in slicer" printer icon for a job's retained uploaded .3mf (right of the card header).
+// Click = open in the slicer that made the file; Alt/Option-click = plain download
+// (the job dialog also keeps its plain download link).
+const PRINTER_ICON_SVG = '<svg width="18" height="18" viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2" stroke-linecap="round" stroke-linejoin="round" aria-hidden="true"><path d="M6 9V3h12v6"/><rect x="3" y="9" width="18" height="9" rx="2"/><path d="M6 14h12v7H6z"/></svg>';
 function jobDownloadLink(job) {
   if (!job.printFile || job.printFile.includes('/')) return '';
   const dlName = `${job.orderNr ? job.orderNr + '_' : ''}${job.name.replace(/[^a-zA-Z0-9_-]/g, '_')}.3mf`;
-  return `<a class="job-dl" href="/api/uploads/${escHtml(job.printFile)}" download="${escHtml(dlName)}" title="Download ${escHtml(dlName)}" style="flex-shrink:0;text-decoration:none">📦</a>`;
+  return `<button type="button" class="job-dl" data-job-id="${escHtml(String(job.id))}" title="Open in slicer (Alt-click: download ${escHtml(dlName)})" aria-label="Open in slicer">${PRINTER_ICON_SVG}</button>`;
+}
+
+// Slicer URL-scheme link for an https download URL, or null (= plain download).
+// Verified against the installed apps / upstream source (task #4055):
+//  - Bambu Studio on macOS registers only `bambustudioopen://<urlencoded url>`;
+//    elsewhere `bambustudio://open?file=<urlencoded url>`. Foreign hosts get a
+//    "not from a trusted site, open anyway?" prompt (not refused).
+//  - OrcaSlicer: `orcaslicer://open?file=<urlencoded url>`, no host allow-list.
+//  - PrusaSlicer only downloads from printables.com/thingiverse.com -> null.
+function slicerHref(slicer, url, isMac) {
+  const enc = encodeURIComponent(url);
+  if (slicer === 'bambustudio') return isMac ? `bambustudioopen://${enc}` : `bambustudio://open?file=${enc}`;
+  if (slicer === 'orcaslicer') return `orcaslicer://open?file=${enc}`;
+  return null;
+}
+
+async function openJobInSlicer(jobId, plainDownload) {
+  try {
+    const res = await fetch(`/api/jobs/${jobId}/slicer-link`, { method: 'POST' });
+    if (!res.ok) { alert('No 3MF available for this job'); return; }
+    const d = await res.json();
+    const url = location.origin + d.path;
+    const isMac = /Mac/i.test(navigator.platform || '') && !/iPhone|iPad/i.test(navigator.userAgent || '');
+    const href = plainDownload ? null : slicerHref(d.slicer, url, isMac);
+    if (href) { location.href = href; return; }
+    const a = document.createElement('a');
+    a.href = url; a.download = d.filename;
+    document.body.appendChild(a); a.click(); a.remove();
+  } catch (err) { alert('Could not open 3MF: ' + err.message); }
 }
 
 function attachDayEvents() {
@@ -1912,7 +1944,8 @@ function attachDayEvents() {
   document.querySelectorAll('.job-block').forEach(el => {
     el.addEventListener('click', e => {
       e.stopPropagation();
-      if (e.target.closest('.job-dl')) return; // browser downloads; don't open the job
+      const dl = e.target.closest('.job-dl');
+      if (dl) { openJobInSlicer(parseInt(dl.dataset.jobId), e.altKey); return; } // don't open the job
       if (lastDragMoved) { lastDragMoved = false; return; }
       openJobModal(parseInt(el.dataset.jobId));
     });
