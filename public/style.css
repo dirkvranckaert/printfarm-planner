@@ -463,8 +463,10 @@ body {
   flex-shrink: 0; margin-left: auto; width: 28px; height: 28px; margin-top: -4px; margin-bottom: -4px;
   display: inline-flex; align-items: center; justify-content: center;
   background: none; border: 0; border-radius: 6px; padding: 0; cursor: pointer; color: inherit;
+  opacity: .45; transition: opacity .12s, background-color .12s;
 }
-.job-dl:hover { background: rgba(0,0,0,.12); }
+.job-block:hover .job-dl { opacity: 1; }
+.job-dl:hover { opacity: 1; background: rgba(128,128,128,.22); }
 .job-block {
   position: absolute;
   left: 3px;

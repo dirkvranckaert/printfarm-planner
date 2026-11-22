@@ -79,6 +79,16 @@ describe('jobDownloadLink', () => {
     expect(T.jobDownloadLink({ id: 1, name: '<b>', printFile: 'a.3mf' })).not.toContain('<b>');
   });
 
+  test('subtle: 16px glyph, muted by default, full on card hover, tint on icon hover, no box', () => {
+    expect(T.jobDownloadLink({ id: 1, name: 'x', printFile: 'a.3mf' })).toMatch(/width="16" height="16"/);
+    const rule = /\.job-dl\s*\{([^}]*)\}/.exec(CSS)[1];
+    expect(rule).toMatch(/opacity:\s*\.45/);
+    expect(rule).toMatch(/background:\s*none/);
+    expect(rule).toMatch(/border:\s*0/);
+    expect(CSS).toMatch(/\.job-block:hover \.job-dl\s*\{\s*opacity:\s*1/);
+    expect(CSS).toMatch(/\.job-dl:hover\s*\{[^}]*background:\s*rgba/);
+  });
+
   test('hit area is at least 28px', () => {
     const rule = /\.job-dl\s*\{([^}]*)\}/.exec(CSS)[1];
     expect(rule).toMatch(/width:\s*28px/);

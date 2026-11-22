@@ -1903,7 +1903,7 @@ async function onDragEnd() {
 // "Open in slicer" printer icon for a job's retained uploaded .3mf (right of the card header).
 // Click = open in the slicer that made the file; Alt/Option-click = plain download
 // (the job dialog also keeps its plain download link).
-const PRINTER_ICON_SVG = '<svg width="18" height="18" viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2" stroke-linecap="round" stroke-linejoin="round" aria-hidden="true"><path d="M6 9V3h12v6"/><rect x="3" y="9" width="18" height="9" rx="2"/><path d="M6 14h12v7H6z"/></svg>';
+const PRINTER_ICON_SVG = '<svg width="16" height="16" viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2" stroke-linecap="round" stroke-linejoin="round" aria-hidden="true"><path d="M6 9V3h12v6"/><rect x="3" y="9" width="18" height="9" rx="2"/><path d="M6 14h12v7H6z"/></svg>';
 function jobDownloadLink(job) {
   if (!job.printFile || job.printFile.includes('/')) return '';
   const dlName = `${job.orderNr ? job.orderNr + '_' : ''}${job.name.replace(/[^a-zA-Z0-9_-]/g, '_')}.3mf`;
