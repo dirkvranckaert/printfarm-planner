@@ -1,0 +1,234 @@
+// Real routes via supertest for the async per-plate split (#4051): placeholder
+// "Processing" -> per-plate jobs, "Split failed" + retry + fallback, 409 guards,
+// naming, traversal. Isolated DB/uploads from tests/isolate-env.js.
+const fs = require('fs');
+const path = require('path');
+const { listenLocal, closeServer } = require('./helpers/listen-local');
+const { buildSliced3mf } = require('./helpers/sliced-3mf');
+
+describe('plate split routes', () => {
+  const request = require('supertest');
+  const TOKEN = 'plate-split-session-token';
+  const cookie = `pf_session=${TOKEN}`;
+  const uploadsDir = process.env.PLANNER_UPLOADS_DIR;
+  let server, app, appDb, plateSplit, srcBody;
+
+  beforeAll(async () => {
+    appDb = require('../db');
+    app = require('../server');
+    plateSplit = require('../plate-split');
+    server = await listenLocal(app);
+    appDb.prepare('INSERT OR REPLACE INTO sessions (token, expires_at) VALUES (?,?)').run(TOKEN, Date.now() + 3_600_000);
+    fs.mkdirSync(uploadsDir, { recursive: true });
+    const p = path.join(uploadsDir, '..', 'multi-src.gcode.3mf');
+    await buildSliced3mf(p, 3);
+    srcBody = fs.readFileSync(p);
+  });
+  afterAll(() => closeServer(server));
+  beforeEach(() => {
+    jest.restoreAllMocks();
+    appDb.exec('DELETE FROM jobs; DELETE FROM printers;');
+  });
+
+  const sched = obj => encodeURIComponent(JSON.stringify(obj));
+  const plates = (n, extra = {}) => Array.from({ length: n }, (_, i) => ({
+    plateIndex: i + 1, name: `1245-keychain-name-rood ${i + 1}`, printerId: null, durationMins: 10 * (i + 1), items: 1, ...extra,
+  }));
+  const imp = (obj, body = srcBody, headers = {}) => {
+    let r = request(server).post('/api/import-3mf-schedule').set('Cookie', cookie)
+      .set('Content-Type', 'application/octet-stream').set('X-Schedule', sched(obj));
+    for (const [k, v] of Object.entries(headers)) r = r.set(k, v);
+    return r.send(body);
+  };
+  const jobs = () => appDb.prepare('SELECT * FROM jobs ORDER BY id').all();
+  const settle = () => app.splitIdle();
+
+  test('multi-plate import: one Processing placeholder at once, then per-plate jobs', async () => {
+    const res = await imp({ plates: plates(3), mode: 'queue', fileName: 'keychain-name_order_1245.gcode.3mf' });
+    expect(res.status).toBe(201);
+    expect(res.body.processing).toBe(true);
+    expect(res.body.jobs).toHaveLength(1); // uploader contract {jobs:[{id,name}], file} unchanged
+    expect(res.body.jobs[0]).toMatchObject({ name: 'keychain-name_order_1245' });
+    expect(typeof res.body.file).toBe('string');
+    let rows = jobs();
+    expect(rows).toHaveLength(1);
+    expect(rows[0]).toMatchObject({ status: 'Processing', queued: 1, original_file: res.body.file });
+
+    await settle();
+    rows = jobs();
+    expect(rows).toHaveLength(3);
+    // job names unchanged vs the pre-split convention: straight from the client plates[].name
+    expect(rows.map(r => r.name)).toEqual(['1245-keychain-name-rood 1', '1245-keychain-name-rood 2', '1245-keychain-name-rood 3']);
+    expect(rows.every(r => r.status === 'Planned' && r.queued === 1)).toBe(true);
+    expect(rows.map(r => r.plate_index)).toEqual([1, 2, 3]);
+    for (const r of rows) {
+      expect(r.original_file).toBe(res.body.file);
+      expect(r.printFile).not.toBe(r.original_file);
+      expect(r.source_name).toBe('keychain-name_order_1245');
+      expect(fs.existsSync(path.join(uploadsDir, r.printFile))).toBe(true);
+      expect(await plateSplit.listSlicedPlates(path.join(uploadsDir, r.printFile))).toEqual([1]);
+    }
+    expect(fs.existsSync(path.join(uploadsDir, res.body.file))).toBe(true); // backup kept
+  });
+
+  test('copies expand per plate, every copy shares the plate file', async () => {
+    await imp({ plates: [{ ...plates(3)[1], copies: 2 }], mode: 'queue' });
+    await settle();
+    const rows = jobs();
+    expect(rows).toHaveLength(2);
+    expect(rows[0].printFile).toBe(rows[1].printFile);
+    expect(rows.map(r => r.plate_index)).toEqual([2, 2]);
+  });
+
+  test('download/open-in-slicer serves the single-plate file named <orig>_plate<N>.gcode.3mf', async () => {
+    await imp({ plates: plates(3), mode: 'queue', fileName: 'keychain-name_order_1245.gcode.3mf' });
+    await settle();
+    const j = jobs()[1];
+    const link = await request(server).post(`/api/jobs/${j.id}/slicer-link`).set('Cookie', cookie);
+    expect(link.status).toBe(200);
+    expect(link.body.filename).toBe('keychain-name_order_1245_plate2.gcode.3mf');
+    const dl = await request(server).get(link.body.path).buffer(true).parse((r, cb) => {
+      const c = []; r.on('data', d => c.push(d)); r.on('end', () => cb(null, Buffer.concat(c)));
+    });
+    expect(dl.status).toBe(200);
+    expect(dl.headers['content-disposition']).toContain('keychain-name_order_1245_plate2.gcode.3mf');
+    expect(Buffer.compare(dl.body, fs.readFileSync(path.join(uploadsDir, j.printFile)))).toBe(0);
+  });
+
+  test('fileName fallbacks: X-File-Name header, else none (names stay plate names)', async () => {
+    await imp({ plates: plates(2), mode: 'queue' }, srcBody, { 'X-File-Name': encodeURIComponent('Header Name.gcode.3mf') });
+    await settle();
+    expect(jobs().every(r => r.source_name === 'Header Name')).toBe(true);
+    appDb.exec('DELETE FROM jobs');
+    await imp({ plates: plates(2), mode: 'queue' });
+    expect(jobs()[0].name).toBe('1245-keychain-name-rood 1'); // placeholder falls back to first plate name
+    await settle();
+    expect(jobs().every(r => r.source_name === null)).toBe(true);
+  });
+
+  test('single-plate source (and unsliced fixture): no placeholder, one shared file', async () => {
+    const res = await imp({ plates: plates(2), mode: 'queue' }, fs.readFileSync(path.join(__dirname, 'fixtures', 'two-plate.gcode.3mf')));
+    expect(res.status).toBe(201);
+    expect(res.body.processing).toBeUndefined();
+    const rows = jobs();
+    expect(rows).toHaveLength(2);
+    expect(new Set(rows.map(r => r.printFile)).size).toBe(1);
+    expect(rows.every(r => r.original_file === null)).toBe(true);
+  });
+
+  test('Split failed -> retry succeeds', async () => {
+    const filesBefore = new Set(fs.readdirSync(uploadsDir));
+    const spy = jest.spyOn(plateSplit, 'splitPlate').mockRejectedValueOnce(new Error('boom'));
+    const res = await imp({ plates: plates(2), mode: 'queue' });
+    await settle();
+    let rows = jobs();
+    expect(rows).toHaveLength(1);
+    expect(rows[0]).toMatchObject({ status: 'Split failed', split_error: 'boom' });
+    spy.mockRestore();
+
+    const retry = await request(server).post(`/api/jobs/${rows[0].id}/split-retry`).set('Cookie', cookie);
+    expect(retry.status).toBe(202);
+    expect(jobs()[0]).toMatchObject({ status: 'Processing', split_error: null });
+    await settle();
+    rows = jobs();
+    expect(rows).toHaveLength(2);
+    expect(rows.every(r => r.status === 'Planned' && r.original_file === res.body.file)).toBe(true);
+    // failed attempt left no stray split files behind
+    const referenced = new Set(rows.flatMap(r => [r.printFile, r.thumbFile, r.original_file]));
+    const stray = fs.readdirSync(uploadsDir).filter(f => /\.3mf$/.test(f) && !referenced.has(f) && !filesBefore.has(f));
+    expect(stray).toEqual([]);
+  });
+
+  test('Split failed -> "use original, expand per plate" fallback', async () => {
+    jest.spyOn(plateSplit, 'splitPlate').mockRejectedValue(new Error('nope'));
+    const res = await imp({ plates: plates(3), mode: 'queue' });
+    await settle();
+    const ph = jobs()[0];
+    expect(ph.status).toBe('Split failed');
+    const fb = await request(server).post(`/api/jobs/${ph.id}/split-fallback`).set('Cookie', cookie);
+    expect(fb.status).toBe(201);
+    const rows = jobs();
+    expect(rows).toHaveLength(3);
+    expect(rows.every(r => r.printFile === res.body.file && r.original_file === null)).toBe(true);
+    expect(rows.map(r => r.name)).toEqual(['1245-keychain-name-rood 1', '1245-keychain-name-rood 2', '1245-keychain-name-rood 3']);
+  });
+
+  test('retry / fallback on a job that is not Split failed -> 409; unknown id -> 404', async () => {
+    const id = appDb.prepare("INSERT INTO jobs (name, start, end, status, queued) VALUES ('x','','','Planned',1)").run().lastInsertRowid;
+    expect((await request(server).post(`/api/jobs/${id}/split-retry`).set('Cookie', cookie)).status).toBe(409);
+    expect((await request(server).post(`/api/jobs/${id}/split-fallback`).set('Cookie', cookie)).status).toBe(409);
+    expect((await request(server).post('/api/jobs/99999/split-retry').set('Cookie', cookie)).status).toBe(404);
+  });
+
+  test.each(['Processing', 'Split failed'])('placeholder (%s) is not sendable / schedulable / editable: 409', async (status) => {
+    const id = appDb.prepare("INSERT INTO jobs (name, start, end, status, queued, original_file) VALUES ('ph','','',?,1,'aaaaaaaaaaaaaaaa.3mf')").run(status).lastInsertRowid;
+    const c = r => r.set('Cookie', cookie);
+    expect((await c(request(server).put(`/api/jobs/${id}`)).send({ name: 'n', status: 'Planned' })).status).toBe(409);
+    expect((await c(request(server).patch(`/api/jobs/${id}`)).send({ status: 'Planned' })).status).toBe(409);
+    expect((await c(request(server).patch(`/api/jobs/${id}`)).send({ printerId: 1 })).status).toBe(409);
+    expect((await c(request(server).post(`/api/jobs/${id}/schedule-from-queue`)).send({ printerId: 1 })).status).toBe(409);
+    expect((await c(request(server).post(`/api/jobs/${id}/slicer-link`))).status).toBe(409);
+    expect((await c(request(server).post(`/api/jobs/${id}/attach-3mf`)).send(srcBody)).status).toBe(409);
+    // harmless field edits still allowed
+    expect((await c(request(server).patch(`/api/jobs/${id}`)).send({ remarks: 'note' })).status).toBe(200);
+  });
+
+  test('attach-3mf to a normal job on a multi-plate file: single-plate primary + original backup', async () => {
+    const id = appDb.prepare("INSERT INTO jobs (name, start, end, status, queued) VALUES ('a','','','Planned',1)").run().lastInsertRowid;
+    const res = await request(server).post(`/api/jobs/${id}/attach-3mf`).set('Cookie', cookie)
+      .set('Content-Type', 'application/octet-stream').set('X-Plate-Index', '2')
+      .set('X-File-Name', encodeURIComponent('src.gcode.3mf')).send(srcBody);
+    expect(res.status).toBe(200);
+    expect(res.body.original_file).toBeTruthy();
+    expect(res.body.printFile).not.toBe(res.body.original_file);
+    expect(res.body.plate_index).toBe(2);
+    expect(res.body.source_name).toBe('src');
+    expect(await plateSplit.listSlicedPlates(path.join(uploadsDir, res.body.printFile))).toEqual([1]);
+  });
+
+  test('empty body -> 400, no file left behind', async () => {
+    const before = fs.readdirSync(uploadsDir).length;
+    const res = await imp({ plates: plates(1), mode: 'queue' }, Buffer.alloc(0));
+    expect(res.status).toBe(400);
+    expect(fs.readdirSync(uploadsDir).length).toBe(before);
+  });
+
+  test('boot recovery: a Processing row left by a restart is re-run', async () => {
+    const res = await imp({ plates: plates(2), mode: 'queue' });
+    await settle();
+    // simulate crash: turn the expanded result back into one Processing placeholder
+    const first = jobs()[0];
+    const payload = { plates: plates(2), sched: { isQueue: true }, projectId: null };
+    appDb.exec('DELETE FROM jobs');
+    appDb.prepare("INSERT INTO jobs (name, start, end, status, queued, original_file, split_payload, source_name, plate_index) VALUES ('rec','','','Processing',1,?,?,NULL,NULL)")
+      .run(first.original_file, JSON.stringify(payload));
+    expect(app.recoverSplits()).toBe(1);
+    await settle();
+    expect(jobs()).toHaveLength(2);
+    expect(res.status).toBe(201);
+  });
+
+  test('traversal stays rejected: stored name with ../ never resolves (slicer-link, split)', async () => {
+    const id = appDb.prepare("INSERT INTO jobs (name, start, end, status, queued, printFile) VALUES ('t','','','Planned',1,'../planner.db')").run().lastInsertRowid;
+    expect((await request(server).post(`/api/jobs/${id}/slicer-link`).set('Cookie', cookie)).status).toBe(404);
+    const ph = appDb.prepare("INSERT INTO jobs (name, start, end, status, queued, original_file, split_payload) VALUES ('t2','','','Processing',1,'../planner.db',?)")
+      .run(JSON.stringify({ plates: plates(1), sched: { isQueue: true }, projectId: null })).lastInsertRowid;
+    app.recoverSplits();
+    await settle();
+    expect(appDb.prepare('SELECT status, split_error FROM jobs WHERE id=?').get(ph)).toMatchObject({ status: 'Split failed', split_error: 'Original 3MF is missing' });
+    const dl = await request(server).get('/api/dl/abc/..%2F..%2Fplanner.db.3mf');
+    expect(dl.status).toBe(404);
+  });
+
+  test('deleting a job keeps shared files until the last reference is gone (original_file counted)', async () => {
+    await imp({ plates: plates(2), mode: 'queue' });
+    await settle();
+    const [a, b] = jobs();
+    const orig = a.original_file;
+    await request(server).delete(`/api/jobs/${a.id}`).set('Cookie', cookie);
+    expect(fs.existsSync(path.join(uploadsDir, orig))).toBe(true);
+    await request(server).delete(`/api/jobs/${b.id}`).set('Cookie', cookie);
+    expect(fs.existsSync(path.join(uploadsDir, orig))).toBe(false);
+    expect(fs.existsSync(path.join(uploadsDir, b.printFile))).toBe(false);
+  });
+});
