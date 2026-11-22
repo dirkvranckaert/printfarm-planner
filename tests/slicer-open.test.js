@@ -10,7 +10,7 @@ const { execFileSync } = require('child_process');
 process.env.NODE_ENV = 'test';
 // Own DB file: other suites share one (global-setup env) and DELETE FROM jobs concurrently.
 process.env.PLANNER_DB_PATH = path.join(os.tmpdir(), `printfarm-slicer-${process.pid}-${Date.now()}.db`);
-process.env.ADMIN_PASS = 'test-pass-for-dl-token';
+process.env.SHARED_AUTH_SECRET = 'test-shared-secret-for-dl-token';
 
 const request = require('supertest');
 const dlToken = require('../dl-token');
@@ -19,7 +19,23 @@ const { detectSlicer } = require('../parse3mf');
 const UPLOADS_DIR = fs.mkdtempSync(path.join(os.tmpdir(), 'slicer-uploads-'));
 process.env.PLANNER_UPLOADS_DIR = UPLOADS_DIR; // isolated: other suites sweep data/uploads concurrently
 
+// Sign an arbitrary payload with the real key derivation (SHARED_AUTH_SECRET above).
+function signWithRealKey(obj) {
+  const key = crypto.createHmac('sha256', process.env.SHARED_AUTH_SECRET).update('printfarm-planner:dl-token:v1').digest();
+  const payload = Buffer.from(JSON.stringify(obj)).toString('base64url');
+  return `${payload}.${crypto.createHmac('sha256', key).update(payload).digest('base64url')}`;
+}
+
 describe('dl-token', () => {
+  test('ADMIN_PASS is never a key source (token signed from it is rejected)', () => {
+    const k = crypto.createHmac('sha256', process.env.ADMIN_PASS || 'changeme').update('printfarm-planner:dl-token:v1').digest();
+    const payload = Buffer.from(JSON.stringify({ f: 'abcd.3mf', e: Date.now() + 1e5 })).toString('base64url');
+    const sig = crypto.createHmac('sha256', k).update(payload).digest('base64url');
+    expect(dlToken.verify(`${payload}.${sig}`)).toBeNull();
+  });
+  test('signWithRealKey produces a valid token for a valid payload (derivation matches)', () => {
+    expect(dlToken.verify(signWithRealKey({ f: 'abcd.3mf', e: Date.now() + 1e5 }))).toBe('abcd.3mf');
+  });
   const F = 'abcdef0123456789.3mf';
   const T0 = 1_000_000;
 
@@ -146,7 +162,7 @@ describe('routes', () => {
     expect(r.body.slicer).toBe('orcaslicer');
     expect(r.body.filename).toBe('A1_My_Cube_1.3mf');
     expect(r.body.path).toMatch(/^\/api\/dl\/[A-Za-z0-9_-]+\.[A-Za-z0-9_-]+\/A1_My_Cube_1\.3mf$/);
-    expect(JSON.stringify(r.body)).not.toContain('test-pass-for-dl-token');
+    expect(JSON.stringify(r.body)).not.toContain('test-shared-secret-for-dl-token');
 
     const dl = await request(app).get(r.body.path).buffer(true).parse((res, cb) => {
       const c = []; res.on('data', d => c.push(d)); res.on('end', () => cb(null, Buffer.concat(c)));
@@ -212,5 +228,9 @@ describe('routes', () => {
     const payload = Buffer.from(JSON.stringify({ f: '../server.js', e: Date.now() + 1e5 })).toString('base64url');
     const sig = crypto.createHmac('sha256', 'x').update(payload).digest('base64url');
     expect((await request(app).get(`/api/dl/${payload}.${sig}/x.3mf`)).status).toBe(404);
+    // correctly signed (real key) traversal token: must die on the STORED_RE check, not only the signature
+    const real = signWithRealKey({ f: '../server.js', e: Date.now() + 1e5 });
+    expect(dlToken.verify(real)).toBeNull();
+    expect((await request(app).get(`/api/dl/${real}/x.3mf`)).status).toBe(404);
   });
 });

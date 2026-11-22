@@ -147,6 +147,16 @@ describe('day view card', () => {
     expect(fetchCalls.find(c => /slicer-link/.test(c[0]))).toEqual(['/api/jobs/1/slicer-link', { method: 'POST' }]);
   });
 
+  test('401 shows a session-expired message, not "No 3MF"', async () => {
+    slicerLinkResponse = { ok: false, status: 401, json: async () => ({}) };
+    const msgs = [];
+    window.alert = m => msgs.push(m);
+    click(document.querySelector('.job-block[data-job-id="1"] .job-dl'));
+    await flush();
+    expect(msgs).toHaveLength(1);
+    expect(msgs[0]).toMatch(/session expired/i);
+  });
+
   test('unknown slicer falls back to a plain download link click (no scheme navigation)', async () => {
     slicerLinkResponse = { ok: true, status: 200, json: async () => ({ slicer: null, filename: 'A1_Cube_v2.3mf', path: '/api/dl/t.s/A1_Cube_v2.3mf' }) };
     const clicked = [];

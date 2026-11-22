@@ -1927,6 +1927,7 @@ function slicerHref(slicer, url, isMac) {
 async function openJobInSlicer(jobId, plainDownload) {
   try {
     const res = await fetch(`/api/jobs/${jobId}/slicer-link`, { method: 'POST' });
+    if (res.status === 401) { alert('Session expired, please reload the page and log in again'); return; }
     if (!res.ok) { alert('No 3MF available for this job'); return; }
     const d = await res.json();
     const url = location.origin + d.path;

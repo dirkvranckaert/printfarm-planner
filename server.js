@@ -1703,7 +1703,7 @@ app.get('/api/dl/:token/:name', (req, res) => {
   const safeName = name.slice(0, -4).replace(/[^a-zA-Z0-9_-]/g, '_') + '.3mf';
   res.setHeader('Content-Type', 'application/octet-stream');
   res.setHeader('Content-Disposition', `attachment; filename="${safeName}"`);
-  res.sendFile(filepath, { dotfiles: 'allow' }); // path is containment-checked; allow dot-dir checkouts
+  res.sendFile(path.basename(filepath), { root: UPLOADS_DIR });
 });
 
 // Serve uploaded images/thumbnails
@@ -1715,7 +1715,7 @@ app.get('/api/uploads/:filename', (req, res) => {
   const mime = { '.png': 'image/png', '.jpg': 'image/jpeg', '.3mf': 'application/octet-stream' };
   res.setHeader('Content-Type', mime[ext] || 'application/octet-stream');
   res.setHeader('Cache-Control', 'public, max-age=86400');
-  res.sendFile(filepath, { dotfiles: 'allow' }); // path is containment-checked; allow dot-dir checkouts
+  res.sendFile(path.basename(filepath), { root: UPLOADS_DIR });
 });
 
 // Only bind a port when run directly (node server.js). Under supertest the app

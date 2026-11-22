@@ -18,8 +18,10 @@ const STORED_RE = /^[a-f0-9]{1,64}\.3mf$/;
 let cachedKey = null;
 function key() {
   if (cachedKey) return cachedKey;
-  const secret = process.env.SHARED_AUTH_SECRET || process.env.ADMIN_PASS
-    || crypto.randomBytes(32).toString('hex'); // per-process; tokens die on restart (fine for 5 min)
+  // High-entropy secrets only. Never ADMIN_PASS: a leaked token would be an offline
+  // dictionary oracle on the login password.
+  const secret = process.env.DL_TOKEN_SECRET || process.env.SHARED_AUTH_SECRET
+    || crypto.randomBytes(32).toString('hex'); // per-process; live links die on restart (<=5 min)
   cachedKey = crypto.createHmac('sha256', secret).update('printfarm-planner:dl-token:v1').digest();
   return cachedKey;
 }
