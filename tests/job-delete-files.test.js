@@ -1,3 +1,4 @@
+const { listenLocal, closeServer } = require('./helpers/listen-local');
 // Deleting a job (queued or scheduled) must unlink its upload artifacts — the
 // imported `<hex>.3mf` and plate thumbnail PNG(s) — but only files no surviving
 // job still references (one 3MF backs every plate/copy; copies share a thumb).
@@ -14,10 +15,10 @@ process.env.PLANNER_DB_PATH =
 
 const request = require('supertest');
 
-const UPLOADS_DIR = path.join(__dirname, '..', 'data', 'uploads');
+const UPLOADS_DIR = process.env.PLANNER_UPLOADS_DIR; // per-file temp dir (tests/isolate-env.js)
 
 describe('job delete removes upload artifacts', () => {
-  let appDb, app, printerId;
+  let server, appDb, app, printerId;
   const SESSION_TOKEN = 'job-delete-files-session';
   const authCookie = `pf_session=${SESSION_TOKEN}`;
   const written = new Set(); // track files we create so afterAll can sweep
@@ -44,12 +45,14 @@ describe('job delete removes upload artifacts', () => {
     ).run(queued ? null : printerId, 'J', start, end, 'Planned', printFile, thumbFile, queued).lastInsertRowid;
   };
 
-  const del = (url) => request(app).delete(url).set('Cookie', authCookie);
+  const del = (url) => request(server).delete(url).set('Cookie', authCookie);
 
-  beforeAll(() => {
+  afterAll(() => closeServer(server));
+  beforeAll(async () => {
     if (!fs.existsSync(UPLOADS_DIR)) fs.mkdirSync(UPLOADS_DIR, { recursive: true });
     appDb = require('../db');
     app   = require('../server');
+    server = await listenLocal(app);
     appDb.prepare('INSERT OR REPLACE INTO sessions (token, expires_at) VALUES (?,?)')
       .run(SESSION_TOKEN, Date.now() + 3_600_000);
   });

@@ -1,3 +1,4 @@
+const { listenLocal, closeServer } = require('./helpers/listen-local');
 // Tests for the "Link when printer starts" pending-link feature.
 //
 //   1. awaiting-printer module — start-time window guard + assignPending
@@ -291,13 +292,15 @@ describe('PAUSE / resume transition (production applier)', () => {
 
 describe('PATCH /api/jobs/:id — "Link when printer starts" entry (real route)', () => {
   const request = require('supertest');
-  let app, appDb, printerId;
+  let server, app, appDb, printerId;
   const SESSION_TOKEN = 'awaiting-test-token';
   const authCookie = `pf_session=${SESSION_TOKEN}`;
 
-  beforeAll(() => {
+  afterAll(() => closeServer(server));
+  beforeAll(async () => {
     appDb = require('../db');
     app   = require('../server');
+    server = await listenLocal(app);
     appDb.prepare('INSERT OR REPLACE INTO sessions (token, expires_at) VALUES (?,?)')
       .run(SESSION_TOKEN, Date.now() + 3_600_000);
   });
@@ -319,7 +322,7 @@ describe('PATCH /api/jobs/:id — "Link when printer starts" entry (real route)'
 
   test('in-window job enters Awaiting Printer and links to its printer', async () => {
     const id = insertJob(Date.now() + 15 * 60 * 1000);
-    const res = await request(app).patch(`/api/jobs/${id}`).set('Cookie', authCookie)
+    const res = await request(server).patch(`/api/jobs/${id}`).set('Cookie', authCookie)
       .send({ status: STATUS, linked_printer_id: printerId });
     expect(res.status).toBe(200);
     const job = appDb.prepare('SELECT * FROM jobs WHERE id=?').get(id);
@@ -329,7 +332,7 @@ describe('PATCH /api/jobs/:id — "Link when printer starts" entry (real route)'
 
   test('job scheduled beyond the window ahead is rejected (400) and left unchanged', async () => {
     const id = insertJob(Date.now() + 25 * 60 * 60 * 1000);
-    const res = await request(app).patch(`/api/jobs/${id}`).set('Cookie', authCookie)
+    const res = await request(server).patch(`/api/jobs/${id}`).set('Cookie', authCookie)
       .send({ status: STATUS, linked_printer_id: printerId });
     expect(res.status).toBe(400);
     expect(appDb.prepare('SELECT status FROM jobs WHERE id=?').get(id).status).toBe('Planned');
@@ -338,10 +341,10 @@ describe('PATCH /api/jobs/:id — "Link when printer starts" entry (real route)'
   test('second pending job for the same printer is rejected (409)', async () => {
     const a = insertJob(Date.now());
     const b = insertJob(Date.now());
-    const r1 = await request(app).patch(`/api/jobs/${a}`).set('Cookie', authCookie)
+    const r1 = await request(server).patch(`/api/jobs/${a}`).set('Cookie', authCookie)
       .send({ status: STATUS, linked_printer_id: printerId });
     expect(r1.status).toBe(200);
-    const r2 = await request(app).patch(`/api/jobs/${b}`).set('Cookie', authCookie)
+    const r2 = await request(server).patch(`/api/jobs/${b}`).set('Cookie', authCookie)
       .send({ status: STATUS, linked_printer_id: printerId });
     expect(r2.status).toBe(409);
     expect(appDb.prepare('SELECT status FROM jobs WHERE id=?').get(b).status).toBe('Planned');
@@ -361,7 +364,7 @@ describe('PATCH /api/jobs/:id — "Link when printer starts" entry (real route)'
 
   test('PUT: status change to an INACTIVE status (Post Printing) clears linked_printer_id', async () => {
     const id = linkJob(Date.now(), 'Printing');
-    const res = await request(app).put(`/api/jobs/${id}`).set('Cookie', authCookie)
+    const res = await request(server).put(`/api/jobs/${id}`).set('Cookie', authCookie)
       .send({ printerId, name: 'Job', start: iso(Date.now()), end: iso(Date.now() + 3_600_000), status: 'Post Printing' });
     expect(res.status).toBe(200);
     expect(linkOf(id)).toBeNull();
@@ -369,7 +372,7 @@ describe('PATCH /api/jobs/:id — "Link when printer starts" entry (real route)'
 
   test('PUT: status change to an ACTIVE status (Paused) retains linked_printer_id', async () => {
     const id = linkJob(Date.now(), 'Printing');
-    const res = await request(app).put(`/api/jobs/${id}`).set('Cookie', authCookie)
+    const res = await request(server).put(`/api/jobs/${id}`).set('Cookie', authCookie)
       .send({ printerId, name: 'Job', start: iso(Date.now()), end: iso(Date.now() + 3_600_000), status: 'Paused' });
     expect(res.status).toBe(200);
     expect(linkOf(id)).toBe(printerId);
@@ -377,14 +380,14 @@ describe('PATCH /api/jobs/:id — "Link when printer starts" entry (real route)'
 
   test('PATCH: status change to an INACTIVE status (Done) clears linked_printer_id', async () => {
     const id = linkJob(Date.now(), 'Printing');
-    const res = await request(app).patch(`/api/jobs/${id}`).set('Cookie', authCookie).send({ status: 'Done' });
+    const res = await request(server).patch(`/api/jobs/${id}`).set('Cookie', authCookie).send({ status: 'Done' });
     expect(res.status).toBe(200);
     expect(linkOf(id)).toBeNull();
   });
 
   test('PATCH: status change to an ACTIVE status (Printing) retains linked_printer_id', async () => {
     const id = linkJob(Date.now(), 'Paused');
-    const res = await request(app).patch(`/api/jobs/${id}`).set('Cookie', authCookie).send({ status: 'Printing' });
+    const res = await request(server).patch(`/api/jobs/${id}`).set('Cookie', authCookie).send({ status: 'Printing' });
     expect(res.status).toBe(200);
     expect(linkOf(id)).toBe(printerId);
   });
@@ -397,7 +400,7 @@ describe('PATCH /api/jobs/:id — "Link when printer starts" entry (real route)'
   // is gated on `status !== undefined`.
   test('PUT without a status field leaves no inactive row holding a live link', async () => {
     const id = linkJob(Date.now(), 'Printing');
-    const res = await request(app).put(`/api/jobs/${id}`).set('Cookie', authCookie)
+    const res = await request(server).put(`/api/jobs/${id}`).set('Cookie', authCookie)
       .send({ printerId, name: 'Job', start: iso(Date.now()), end: iso(Date.now() + 3_600_000) });
     expect(res.status).toBe(200);
     const row = appDb.prepare('SELECT status, linked_printer_id FROM jobs WHERE id=?').get(id);

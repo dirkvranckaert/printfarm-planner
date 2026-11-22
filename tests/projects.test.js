@@ -1,3 +1,4 @@
+const { listenLocal, closeServer } = require('./helpers/listen-local');
 // Projects feature — resolve/create/reopen, counts/buckets, sort order,
 // context-menu assign (existing-only), first-create push toggle, project detail
 // grouping, and the Settings + UI wiring.
@@ -247,13 +248,15 @@ describe('project routes (integration)', () => {
   process.env.PLANNER_DB_PATH =
     process.env.PLANNER_DB_PATH || path.join(os.tmpdir(), `printfarm-projects-test-${process.pid}.db`);
   const request = require('supertest');
-  let app, appDb, printerId;
+  let server, app, appDb, printerId;
   const SESSION_TOKEN = 'projects-session-token';
   const authCookie = `pf_session=${SESSION_TOKEN}`;
 
-  beforeAll(() => {
+  afterAll(() => closeServer(server));
+  beforeAll(async () => {
     appDb = require('../db');
     app   = require('../server');
+    server = await listenLocal(app);
     appDb.prepare('INSERT OR REPLACE INTO sessions (token, expires_at) VALUES (?,?)')
       .run(SESSION_TOKEN, Date.now() + 3_600_000);
   });
@@ -269,7 +272,7 @@ describe('project routes (integration)', () => {
     try { appDb.exec('DELETE FROM jobs; DELETE FROM printers; DELETE FROM projects;'); } catch { /* ignore */ }
   });
 
-  const post = (url, body) => request(app).post(url).set('Cookie', authCookie).send(body);
+  const post = (url, body) => request(server).post(url).set('Cookie', authCookie).send(body);
 
   test('POST /api/jobs with a project name creates the project and assigns it', async () => {
     const r = await post('/api/jobs', {
@@ -291,7 +294,7 @@ describe('project routes (integration)', () => {
     const c = await post('/api/jobs', { printerId, name: 'C', start: '2026-08-04T08:00', end: '2026-08-04T09:00', project: 'Reopenable' });
     appDb.prepare("UPDATE projects SET status='closed' WHERE id=?").run('reopenable');
     const jobId = c.body.id;
-    const r = await request(app).put(`/api/jobs/${jobId}`).set('Cookie', authCookie)
+    const r = await request(server).put(`/api/jobs/${jobId}`).set('Cookie', authCookie)
       .send({ printerId, name: 'C', start: '2026-08-04T08:00', end: '2026-08-04T09:00', project: 'reopenable' });
     expect(r.status).toBe(200);
     expect(appDb.prepare('SELECT status FROM projects WHERE id=?').get('reopenable').status).toBe('open');
@@ -318,7 +321,7 @@ describe('project routes (integration)', () => {
   test('GET /api/projects/:id returns the project + its jobs (for grouped detail)', async () => {
     await post('/api/jobs', { printerId, name: 'X1', start: '2026-08-04T08:00', end: '2026-08-04T09:00', project: 'Grouped' });
     await post('/api/jobs', { printerId, name: 'X2', start: '2026-08-04T10:00', end: '2026-08-04T11:00', project: 'Grouped' });
-    const r = await request(app).get('/api/projects/grouped').set('Cookie', authCookie);
+    const r = await request(server).get('/api/projects/grouped').set('Cookie', authCookie);
     expect(r.status).toBe(200);
     expect(r.body.project.label).toBe('Grouped');
     expect(r.body.jobs).toHaveLength(2);
@@ -326,7 +329,7 @@ describe('project routes (integration)', () => {
 
   test('GET /api/projects returns sorted summaries with counts', async () => {
     await post('/api/jobs', { printerId, name: 'Y1', start: '2026-08-04T08:00', end: '2026-08-04T09:00', project: 'Counts' });
-    const r = await request(app).get('/api/projects').set('Cookie', authCookie);
+    const r = await request(server).get('/api/projects').set('Cookie', authCookie);
     expect(r.status).toBe(200);
     const p = r.body.find(x => x.id === 'counts');
     expect(p).toMatchObject({ total: 1, done: 0, busy: 0, active: true });
@@ -336,14 +339,14 @@ describe('project routes (integration)', () => {
     const c = await post('/api/jobs', { printerId, name: 'W1', start: '2026-08-04T08:00', end: '2026-08-04T09:00', project: 'Emptyable' });
     // Detach the only job so the project is empty, then delete it.
     await post(`/api/jobs/${c.body.id}/assign-project`, { projectId: '__none__' });
-    const r = await request(app).delete('/api/projects/emptyable').set('Cookie', authCookie);
+    const r = await request(server).delete('/api/projects/emptyable').set('Cookie', authCookie);
     expect(r.status).toBe(204);
     expect(appDb.prepare('SELECT COUNT(*) c FROM projects WHERE id=?').get('emptyable').c).toBe(0);
   });
 
   test('DELETE /api/projects/:id refuses (409) while a job still references it', async () => {
     const c = await post('/api/jobs', { printerId, name: 'W2', start: '2026-08-04T08:00', end: '2026-08-04T09:00', project: 'Keepme' });
-    const r = await request(app).delete('/api/projects/keepme').set('Cookie', authCookie);
+    const r = await request(server).delete('/api/projects/keepme').set('Cookie', authCookie);
     expect(r.status).toBe(409);
     expect(appDb.prepare('SELECT COUNT(*) c FROM projects WHERE id=?').get('keepme').c).toBe(1);
     // Never cascades: the job keeps its project link.
@@ -351,7 +354,7 @@ describe('project routes (integration)', () => {
   });
 
   test('DELETE /api/projects/:id on an unknown id is 404', async () => {
-    const r = await request(app).delete('/api/projects/ghost').set('Cookie', authCookie);
+    const r = await request(server).delete('/api/projects/ghost').set('Cookie', authCookie);
     expect(r.status).toBe(404);
   });
 

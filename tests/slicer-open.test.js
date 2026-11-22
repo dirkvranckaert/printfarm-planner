@@ -8,16 +8,14 @@ const path   = require('path');
 const crypto = require('crypto');
 const { execFileSync } = require('child_process');
 process.env.NODE_ENV = 'test';
-// Own DB file: other suites share one (global-setup env) and DELETE FROM jobs concurrently.
-process.env.PLANNER_DB_PATH = path.join(os.tmpdir(), `printfarm-slicer-${process.pid}-${Date.now()}.db`);
 process.env.SHARED_AUTH_SECRET = 'test-shared-secret-for-dl-token';
 
 const request = require('supertest');
+const { listenLocal, closeServer } = require('./helpers/listen-local');
 const dlToken = require('../dl-token');
 const { detectSlicer } = require('../parse3mf');
 
-const UPLOADS_DIR = fs.mkdtempSync(path.join(os.tmpdir(), 'slicer-uploads-'));
-process.env.PLANNER_UPLOADS_DIR = UPLOADS_DIR; // isolated: other suites sweep data/uploads concurrently
+const UPLOADS_DIR = process.env.PLANNER_UPLOADS_DIR; // per-file temp dir (tests/isolate-env.js)
 
 // Sign an arbitrary payload with the real key derivation (SHARED_AUTH_SECRET above).
 function signWithRealKey(obj) {
@@ -115,7 +113,7 @@ describe('detectSlicer', () => {
 });
 
 describe('routes', () => {
-  let db, app, printerId;
+  let db, app, server, printerId;
   const SESSION = 'slicer-open-test-session';
   const cookie = `pf_session=${SESSION}`;
   const written = [];
@@ -136,35 +134,37 @@ describe('routes', () => {
     db.prepare('INSERT INTO jobs (printerId, name, orderNr, start, end, status, printFile, queued) VALUES (?,?,?,?,?,?,?,?)')
       .run(printerId, name, orderNr, '2026-04-13T06:00:00Z', '2026-04-13T07:00:00Z', 'Planned', printFile, 0).lastInsertRowid;
 
-  beforeAll(() => {
+  beforeAll(async () => {
     if (!fs.existsSync(UPLOADS_DIR)) fs.mkdirSync(UPLOADS_DIR, { recursive: true });
     tmpDir = fs.mkdtempSync(path.join(os.tmpdir(), 'slicer-routes-'));
     db  = require('../db');
     app = require('../server');
+    server = await listenLocal(app);
     db.prepare('INSERT OR REPLACE INTO sessions (token, expires_at) VALUES (?,?)').run(SESSION, Date.now() + 3_600_000);
     printerId = db.prepare("INSERT INTO printers (name, color) VALUES ('P','#fff')").run().lastInsertRowid;
   });
-  afterAll(() => {
+  afterAll(async () => {
+    await closeServer(server);
     fs.rmSync(UPLOADS_DIR, { recursive: true, force: true });
     fs.rmSync(tmpDir, { recursive: true, force: true });
   });
 
   test('mint requires auth', async () => {
     const id = addJob(put3mf('BambuStudio-02.01'));
-    expect((await request(app).post(`/api/jobs/${id}/slicer-link`)).status).toBe(401);
+    expect((await request(server).post(`/api/jobs/${id}/slicer-link`)).status).toBe(401);
   });
 
   test('mint returns detected slicer, filename and a signed path that downloads without a session', async () => {
     const stored = put3mf('OrcaSlicer-2.3.1');
     const id = addJob(stored);
-    const r = await request(app).post(`/api/jobs/${id}/slicer-link`).set('Cookie', cookie);
+    const r = await request(server).post(`/api/jobs/${id}/slicer-link`).set('Cookie', cookie);
     expect(r.status).toBe(200);
     expect(r.body.slicer).toBe('orcaslicer');
     expect(r.body.filename).toBe('A1_My_Cube_1.3mf');
     expect(r.body.path).toMatch(/^\/api\/dl\/[A-Za-z0-9_-]+\.[A-Za-z0-9_-]+\/A1_My_Cube_1\.3mf$/);
     expect(JSON.stringify(r.body)).not.toContain('test-shared-secret-for-dl-token');
 
-    const dl = await request(app).get(r.body.path).buffer(true).parse((res, cb) => {
+    const dl = await request(server).get(r.body.path).buffer(true).parse((res, cb) => {
       const c = []; res.on('data', d => c.push(d)); res.on('end', () => cb(null, Buffer.concat(c)));
     });
     expect(dl.status).toBe(200);
@@ -175,27 +175,27 @@ describe('routes', () => {
 
   test('mint: unknown slicer -> null; no file / unknown job -> 404', async () => {
     const id = addJob(put3mf('Cura_SteVe'));
-    expect((await request(app).post(`/api/jobs/${id}/slicer-link`).set('Cookie', cookie)).body.slicer).toBeNull();
+    expect((await request(server).post(`/api/jobs/${id}/slicer-link`).set('Cookie', cookie)).body.slicer).toBeNull();
     const none = addJob(null);
-    expect((await request(app).post(`/api/jobs/${none}/slicer-link`).set('Cookie', cookie)).status).toBe(404);
-    expect((await request(app).post('/api/jobs/999999/slicer-link').set('Cookie', cookie)).status).toBe(404);
+    expect((await request(server).post(`/api/jobs/${none}/slicer-link`).set('Cookie', cookie)).status).toBe(404);
+    expect((await request(server).post('/api/jobs/999999/slicer-link').set('Cookie', cookie)).status).toBe(404);
   });
 
   test('signed route: expired, tampered, non-.3mf name, no token all 404', async () => {
     const stored = put3mf('BambuStudio-02.01');
     const good = dlToken.mint(stored);
-    expect((await request(app).get(`/api/dl/${good}/x.3mf`)).status).toBe(200);
-    expect((await request(app).get(`/api/dl/${good}/x.png`)).status).toBe(404);
-    expect((await request(app).get(`/api/dl/${dlToken.mint(stored, Date.now() - 6 * 60 * 1000)}/x.3mf`)).status).toBe(404);
-    expect((await request(app).get(`/api/dl/${good.slice(0, -3)}AAA/x.3mf`)).status).toBe(404);
-    expect((await request(app).get('/api/dl/garbage/x.3mf')).status).toBe(404);
-    expect((await request(app).get('/api/dl/x.3mf')).status).toBe(401); // not under the signed route -> normal auth
+    expect((await request(server).get(`/api/dl/${good}/x.3mf`)).status).toBe(200);
+    expect((await request(server).get(`/api/dl/${good}/x.png`)).status).toBe(404);
+    expect((await request(server).get(`/api/dl/${dlToken.mint(stored, Date.now() - 6 * 60 * 1000)}/x.3mf`)).status).toBe(404);
+    expect((await request(server).get(`/api/dl/${good.slice(0, -3)}AAA/x.3mf`)).status).toBe(404);
+    expect((await request(server).get('/api/dl/garbage/x.3mf')).status).toBe(404);
+    expect((await request(server).get('/api/dl/x.3mf')).status).toBe(401); // not under the signed route -> normal auth
   });
 
   test('signed route serves only the bound file, not path-supplied names', async () => {
     const a = put3mf('BambuStudio-02.01');
     const b = put3mf('OrcaSlicer-2.3.1');
-    const r = await request(app).get(`/api/dl/${dlToken.mint(a)}/${b}`).buffer(true).parse((res, cb) => {
+    const r = await request(server).get(`/api/dl/${dlToken.mint(a)}/${b}`).buffer(true).parse((res, cb) => {
       const c = []; res.on('data', d => c.push(d)); res.on('end', () => cb(null, Buffer.concat(c)));
     });
     expect(r.body.equals(fs.readFileSync(path.join(UPLOADS_DIR, a)))).toBe(true);
@@ -207,30 +207,30 @@ describe('routes', () => {
     fs.writeFileSync(secret, 'TOPSECRET');
     const rel = path.relative(UPLOADS_DIR, secret);
     for (const evil of [encodeURIComponent(rel), rel.split(path.sep).join('%2F'), '..%2F..%2Fserver.js', '%2e%2e%2fserver.js', '..%5Cserver.js']) {
-      const r = await request(app).get(`/api/uploads/${evil}`).set('Cookie', cookie);
+      const r = await request(server).get(`/api/uploads/${evil}`).set('Cookie', cookie);
       expect([400, 404]).toContain(r.status);
       expect(r.text || '').not.toContain('TOPSECRET');
     }
     fs.rmSync(secret, { force: true });
     const ok = put3mf('BambuStudio-02.01');
-    expect((await request(app).get(`/api/uploads/${ok}`).set('Cookie', cookie)).status).toBe(200);
+    expect((await request(server).get(`/api/uploads/${ok}`).set('Cookie', cookie)).status).toBe(200);
   });
 
   test('signed route traversal rejected: encoded name segment never reaches the FS', async () => {
     const stored = put3mf('BambuStudio-02.01');
     const t = dlToken.mint(stored);
     for (const evil of ['..%2F..%2Fserver.js', '..%2Fserver.js%00.3mf']) {
-      const r = await request(app).get(`/api/dl/${t}/${evil}`);
+      const r = await request(server).get(`/api/dl/${t}/${evil}`);
       expect([200, 404]).toContain(r.status); // name is cosmetic; bound file only
       if (r.status === 200) expect(r.headers['content-disposition']).not.toContain('..');
     }
     // a hand-signed token for a traversal name is refused by verify/mint
     const payload = Buffer.from(JSON.stringify({ f: '../server.js', e: Date.now() + 1e5 })).toString('base64url');
     const sig = crypto.createHmac('sha256', 'x').update(payload).digest('base64url');
-    expect((await request(app).get(`/api/dl/${payload}.${sig}/x.3mf`)).status).toBe(404);
+    expect((await request(server).get(`/api/dl/${payload}.${sig}/x.3mf`)).status).toBe(404);
     // correctly signed (real key) traversal token: must die on the STORED_RE check, not only the signature
     const real = signWithRealKey({ f: '../server.js', e: Date.now() + 1e5 });
     expect(dlToken.verify(real)).toBeNull();
-    expect((await request(app).get(`/api/dl/${real}/x.3mf`)).status).toBe(404);
+    expect((await request(server).get(`/api/dl/${real}/x.3mf`)).status).toBe(404);
   });
 });

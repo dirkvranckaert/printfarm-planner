@@ -10,9 +10,15 @@
   "jest": {
     "testEnvironment": "node",
     "globalSetup": "<rootDir>/tests/global-setup.js",
+    "setupFiles": [
+      "<rootDir>/tests/isolate-env.js"
+    ],
+    "setupFilesAfterEnv": [
+      "<rootDir>/tests/isolate-env-cleanup.js"
+    ],
     "testPathIgnorePatterns": [
       "/node_modules/",
-      "/.claude/"
+      "<rootDir>/.claude/"
     ]
   },
   "keywords": [],
