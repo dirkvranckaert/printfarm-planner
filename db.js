@@ -217,6 +217,20 @@ if (!jobColsItems.some(c => c.name === 'plate_name')) {
   db.exec('ALTER TABLE jobs ADD COLUMN plate_name TEXT');
 }
 
+// Plate split (#4051). A multi-plate sliced 3MF is split per plate: `printFile`
+// is the single-plate file (primary), `original_file` the untouched multi-plate
+// upload (backup), `plate_index` the source plate, `source_name` the uploaded
+// file's name (recognisable download names). While the async split runs the
+// queue holds ONE placeholder job (status 'Processing'; 'Split failed' on
+// error) carrying `split_payload` (JSON, what to expand) and `split_error`.
+// All nullable: existing rows keep working unchanged.
+const jobColsSplit = db.pragma('table_info(jobs)');
+for (const col of ['original_file TEXT', 'split_payload TEXT', 'split_error TEXT', 'plate_index INTEGER', 'source_name TEXT']) {
+  if (!jobColsSplit.some(c => c.name === col.split(' ')[0])) {
+    db.exec(`ALTER TABLE jobs ADD COLUMN ${col}`);
+  }
+}
+
 // One-time backfill: heal jobs left with a STALE linked_printer_id from before
 // the forward-clearing fix (server.js PUT/PATCH now null the link when a status
 // change leaves LINK_ACTIVE_STATUSES). Rows already in a status OUTSIDE that set
