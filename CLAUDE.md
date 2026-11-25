@@ -10,7 +10,7 @@ Dirk (primary), potentially other Printseed users. Accessed via browser (PWA-cap
 
 ## Tech stack
 
-- **Node 20+**, Express 5, better-sqlite3 (WAL mode), pm2 (fork, single instance)
+- **Node 22** (`.nvmrc`; prod = Ubuntu Node 22, ABI 127), Express 5, better-sqlite3 (WAL mode), pm2 (fork, single instance)
 - **Auth:** session cookie (`pf_session`) with 7-day TTL + shared JWT for cross-app SSO
 - **MQTT:** connects to Bambu Lab printers for real-time status updates
 - **Push:** `web-push` for browser notifications on job completion
