@@ -19,6 +19,7 @@
 // an in-memory SQLite.
 
 const scheduling = require('./scheduling');
+const { trimPrevCoolDown } = require('./cooldown-trim');
 
 const DEFAULT_THRESHOLD_MS = 2 * 60 * 1000; // 2 minutes
 const CASCADABLE_STATUSES = new Set(['Planned', 'Awaiting']);
@@ -126,6 +127,9 @@ function realignLinkedJob({ db, printer, job, remainingMins, now, restr, snapSta
   const updated = [];
   db.prepare('UPDATE jobs SET start=?, end=? WHERE id=?').run(newStartISO, newEndISO, job.id);
   updated.push({ id: job.id, start: newStartISO, end: newEndISO });
+  // Start moved (e.g. snapped to the real start): re-trim the previous job's
+  // cool-down if only it overlaps the new start.
+  trimPrevCoolDown({ db, jobId: job.id, tz });
 
   // Only cascade downstream when we're running LATE. Running ahead creates
   // free gap — no automatic pull-forward on subsequent jobs.

@@ -30,7 +30,9 @@ function makeDb() {
     CREATE TABLE printers (
       id INTEGER PRIMARY KEY AUTOINCREMENT,
       name TEXT NOT NULL,
-      color TEXT NOT NULL
+      color TEXT NOT NULL,
+      warm_up_mins INTEGER NOT NULL DEFAULT 5,
+      cool_down_mins INTEGER NOT NULL DEFAULT 15
     );
     CREATE TABLE jobs (
       id INTEGER PRIMARY KEY AUTOINCREMENT,
@@ -41,7 +43,10 @@ function makeDb() {
       end TEXT NOT NULL,
       linked_printer_id INTEGER,
       paused_at TEXT,
-      paused_remaining_ms INTEGER
+      paused_remaining_ms INTEGER,
+      queued INTEGER NOT NULL DEFAULT 0,
+      cool_down_mins INTEGER,
+      warm_up_mins INTEGER
     );
   `);
   return db;
