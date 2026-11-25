@@ -7,6 +7,7 @@ const { listenLocal, closeServer } = require('./helpers/listen-local');
 const { buildSliced3mf } = require('./helpers/sliced-3mf');
 
 describe('plate split routes', () => {
+  jest.setTimeout(30_000); // real I/O + async splits per test; default 5s is flaky under machine load
   const request = require('supertest');
   const TOKEN = 'plate-split-session-token';
   const cookie = `pf_session=${TOKEN}`;
@@ -23,7 +24,7 @@ describe('plate split routes', () => {
     const p = path.join(uploadsDir, '..', 'multi-src.gcode.3mf');
     await buildSliced3mf(p, 3);
     srcBody = fs.readFileSync(p);
-  });
+  }, 60_000); // boot + zip build can exceed jest's 5s default on a loaded host (deploy gate); a hook timeout fails all 29 tests
   afterAll(() => closeServer(server));
   beforeEach(() => {
     jest.restoreAllMocks();
