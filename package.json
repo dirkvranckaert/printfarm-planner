@@ -24,6 +24,9 @@
   "keywords": [],
   "author": "",
   "license": "ISC",
+  "engines": {
+    "node": ">=22 <23"
+  },
   "dependencies": {
     "better-sqlite3": "^12.8.0",
     "dotenv": "^17.3.1",
