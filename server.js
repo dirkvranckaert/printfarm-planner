@@ -62,6 +62,18 @@ if (ALLOWED_ORIGINS.length) {
   });
 }
 
+// --- DB health probe (no auth, no session). Runs SELECT 1 on the real DB
+// connection, so a broken native module (better-sqlite3 built for another Node)
+// shows up here. Never leaks error details.
+app.get('/health', (req, res) => {
+  try {
+    db.prepare('SELECT 1').get();
+    res.json({ ok: true });
+  } catch (_e) {
+    res.status(503).json({ ok: false, error: 'db' });
+  }
+});
+
 // --- API token (Bearer) resolution: ahead of body parsing and every route
 // (incl. anonymous ones), so a bad/revoked/empty token is always 401 JSON and
 // never a 400/413 parse error, redirect, anonymous 200, or silent fall-through
