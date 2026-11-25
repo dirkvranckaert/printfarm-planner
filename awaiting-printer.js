@@ -22,6 +22,8 @@
 // Pure DB glue: all functions take the db handle explicitly so they can be
 // driven by an in-memory SQLite in tests.
 
+const { trimPrevCoolDown } = require('./cooldown-trim');
+
 const STATUS = 'Awaiting Printer';
 const WINDOW_MS = 24 * 60 * 60 * 1000; // 24 hours
 
@@ -67,6 +69,9 @@ function assignPending({ db, jobId, printerId, now }) {
   }
   db.prepare('UPDATE jobs SET status=?, linked_printer_id=? WHERE id=?')
     .run(STATUS, printerId, jobId);
+  // Linking = the job is (about to be) started: an overlap with the previous
+  // job's cool-down alone is not a conflict, so trim that cool-down.
+  trimPrevCoolDown({ db, jobId });
   return { ok: true };
 }
 

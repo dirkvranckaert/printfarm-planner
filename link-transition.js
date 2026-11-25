@@ -14,6 +14,7 @@
 
 const awaitingPrinter = require('./awaiting-printer');
 const pause = require('./pause');
+const { trimPrevCoolDown } = require('./cooldown-trim');
 
 // Statuses for which a job's linked_printer_id is meaningful. An explicit
 // status change that leaves this set (→ Post Printing / Done / Planned /
@@ -66,6 +67,8 @@ function applyRunningTransition({ db, printerId, now }) {
     db.prepare(
       "UPDATE jobs SET status='Printing', paused_at=NULL, paused_remaining_ms=NULL WHERE id=?"
     ).run(job.id);
+    // Job actually starts now: trim the previous job's cool-down if only it overlaps.
+    trimPrevCoolDown({ db, jobId: job.id });
     started.push(job);
   }
   return { started };
