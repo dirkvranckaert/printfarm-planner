@@ -87,6 +87,17 @@ describe('slotCardHtml', () => {
   });
 });
 
+describe('fill CSS (review round 1)', () => {
+  const CSS = fs.readFileSync(path.join(__dirname, '..', 'public', 'style.css'), 'utf8');
+  const rule = sel => (CSS.match(new RegExp(sel.replace('.', '\\.') + '\\s*\\{([^}]*)\\}')) || [])[1] || '';
+  test('tile does not clip overflow (long labels stay unclipped)', () => {
+    expect(rule('.ams-slot-leveled')).not.toMatch(/overflow/);
+  });
+  test('fill has its own boundary so level shows when spool colour equals tile colour', () => {
+    expect(rule('.ams-slot-fill')).toMatch(/border-top:\s*1px solid/);
+  });
+});
+
 describe('bambu.js ingest', () => {
   test('parseMessage forwards remain and tray_weight per tray', () => {
     const bambu = require('../bambu.js');
