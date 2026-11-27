@@ -85,6 +85,7 @@ function parseAms(p) {
           color:     color,
           material:  material,
           remainPct: tray.remain != null ? Number(tray.remain) : null,
+          trayWeight: tray.tray_weight != null ? Number(tray.tray_weight) : null,
           k:         tray.k     != null ? Number(tray.k)      : null,
           active,
           empty:     isEmpty,
@@ -105,6 +106,7 @@ function parseAms(p) {
       color:     color,
       material:  material,
       remainPct: vt.remain != null ? Number(vt.remain) : null,
+      trayWeight: vt.tray_weight != null ? Number(vt.tray_weight) : null,
       k:         vt.k      != null ? Number(vt.k)      : null,
       active:    trayNow === 254,
       empty:     isEmpty,
@@ -295,4 +297,4 @@ function onUpdate(cb) {
   updateCallbacks.push(cb);
 }
 
-module.exports = { connect, disconnect, reinit, subscribeSerial, isConnected, getStatus, getAllStatuses, onUpdate };
+module.exports = { connect, disconnect, reinit, subscribeSerial, isConnected, getStatus, getAllStatuses, onUpdate, _parseMessage: parseMessage };

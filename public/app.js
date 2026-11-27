@@ -127,11 +127,22 @@ function slotCardHtml(slot) {
   const active  = slot.active ? ' ams-slot-active' : '';
   const kText   = slot.k != null ? `K ${slot.k.toFixed(3)}` : '';
   const matText = slot.empty ? 'Empty' : (slot.material || '?');
+  // Remaining-level fill: dim tile + colour rising from the bottom. Empty or
+  // colourless slots keep the old flat look. Text gets a halo in the spool
+  // colour so it stays readable over both the filled and unfilled part.
+  const leveled = !slot.empty && slot.color;
+  const fill    = leveled ? amsLevel.fillPct(slot.remainPct) : 100;
+  const partial = leveled && fill < 100;
+  const tip     = leveled ? amsLevel.tooltip(slot.material, slot.remainPct, slot.trayWeight) : '';
+  const tileCss = partial ? `background:var(--surface-2);color:${fg}` : `background:${bg};color:${fg}`;
   return `<div class="ams-slot-wrap${slot.active ? ' ams-slot-wrap-active' : ''}">
-    <div class="ams-slot${active}" style="background:${bg};color:${fg}">
-      <div class="ams-slot-mat">${escHtml(matText)}</div>
-      ${kText ? `<div class="ams-slot-k">${escHtml(kText)}</div>` : ''}
-      <div class="ams-slot-id">${escHtml(slot.id)}</div>
+    <div class="ams-slot${active}${partial ? ' ams-slot-leveled' : ''}" style="${tileCss}"${tip ? ` title="${escHtml(tip)}"` : ''}>
+      ${partial ? `<div class="ams-slot-fill" style="height:${fill}%;background:${bg}"></div>` : ''}
+      <div class="ams-slot-txt"${partial ? ` style="--halo:${bg}"` : ''}>
+        <div class="ams-slot-mat">${escHtml(matText)}</div>
+        ${kText ? `<div class="ams-slot-k">${escHtml(kText)}</div>` : ''}
+        <div class="ams-slot-id">${escHtml(slot.id)}</div>
+      </div>
     </div>
     ${slot.active ? '<div class="ams-slot-arrow"></div>' : ''}
   </div>`;
